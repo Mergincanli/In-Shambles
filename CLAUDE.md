@@ -101,6 +101,7 @@ docs/       specs, roadmap, decisions, handoffs.
 | `docs/06-engine-architecture.md` | Packages, modules, rendering, input, audio, console/cvars |
 | `docs/07-map-pipeline-trenchbroom.md` | Compiled map format, greybox builder, TrenchBroom importer |
 | `docs/08-art-direction.md` | Look-dev process, readability rules, budgets |
+| `docs/08a-xiii-style-reference.md` | XIII (2003) style research: verified facts, techniques, corrected shader recipes (reference, not rules) |
 | `docs/09-roadmap.md` | Milestones M0–M10 with acceptance criteria and status |
 | `docs/10-testing-and-performance.md` | Test strategy, net profiles, performance budgets |
 | `docs/11-decision-log.md` | Decisions (D-###) and why |

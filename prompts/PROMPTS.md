@@ -355,14 +355,15 @@ Plan first and wait for approval. Finish with /net-check and /handoff.
 ## M8 — Look & feel
 
 ```
-Milestone M8. Read CLAUDE.md, docs/08 (ALL, especially the §6 style guide), docs/07 §5,
-docs/10 §4.3, docs/09 (M8).
-If docs/08 §6 is still TBD, STOP and ask me. Don't invent an art direction.
+Milestone M8. Read CLAUDE.md, docs/08 (ALL, especially §15–§19), docs/07 §5, docs/10 §4.3,
+docs/09 (M8). docs/08a is reference material, not rules.
+If the look-dev parameters (docs/08 §17.3) aren't in the decision log yet, STOP and ask me.
+Don't invent them.
 
 Goal: the chosen art direction implemented within budgets.
 
-Build (per the style guide):
-1. Lighting pipeline per the docs/07 §5 decision (lightmap baker / Blender bake / stylized),
+Build (per docs/08):
+1. Lighting pipeline per the docs/07 §5 decision (lightmap baker / Blender bake; see docs/08 §6),
    materials, post-processing, graphics presets (low/medium/high) with renderer.info budget
    overlay.
 2. Character model pipeline (glTF skinned, LODs) with animation driven by interpolated state.
@@ -375,8 +376,8 @@ Build (per the style guide):
 6. UI/HUD styling and menus: settings (graphics, audio, controls, sensitivity in Quake units,
    accessibility: colorblind presets, FOV, viewmodel, reduced shake).
 
-Acceptance: budgets in docs/08 §4 and docs/10 §4.3 on the reference machines; the readability
-test from docs/08 §1 documented with screenshots.
+Acceptance: budgets in docs/08 §16 and docs/10 §4.3 on the reference machines; the readability
+test from docs/08 §17.4 documented with screenshots.
 Plan first and wait for approval. Use perf-auditor before closing. Finish with /handoff.
 ```
 

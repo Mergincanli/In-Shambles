@@ -60,10 +60,10 @@ A browser-native, server-authoritative arena/tactical FPS. It reproduces Urban T
 
 | ID | Decision | Status | Notes |
 |---|---|---|---|
-| O-1 | Working title and branding | **TBD** | Must not use "Urban Terror", "UrT" or "FrozenSand" (trademarks of Frozensand Games Ltd). |
+| O-1 | Working title and branding | **Decided**: working title "In Shambles" | See D-014. Must not use "Urban Terror", "UrT" or "FrozenSand" (trademarks of Frozensand Games Ltd). |
 | O-2 | Weapon/item naming direction | **Exploring**: Italian-food names vs. slightly modified real names | Internal IDs are fixed (`docs/04` §2). Display names live in `content/names/*.json`, so switching later is cheap. |
 | O-3 | The twist | **TBD** | Reserved for M10. Keep systems modular (data-driven weapons, mode rules as plug-ins). |
-| O-4 | Art direction | **TBD**; explore in FORGE (Three.js look-dev sandbox) | See `docs/08`. |
+| O-4 | Art direction | **Decided** — see `docs/08` | "Comic Noir" (D-013). Reference research: `docs/08a`. |
 | O-5 | Business model and license | **TBD** | Default assumption until decided: closed source, free-to-play, **no GPL code**. |
 | O-6 | v1 game modes | **Proposed**: FFA, TDM, Team Survivor (rounds), CTF, Movement Trials (timed courses) | Modes are "ours"; these are suggestions. |
 | O-7 | Hosting regions | **TBD** | Proposal: start with one EU region (NL/DE), add more later. |
