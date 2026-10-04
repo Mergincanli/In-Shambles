@@ -190,6 +190,15 @@ describe("set", () => {
     expect(cvars.info("pm_gravity")?.latched).toBeUndefined();
   });
 
+  it("makes reset() of a LATCH cvar wait for applyLatched() too", () => {
+    cvars.set("pm_gravity", 600);
+    cvars.applyLatched();
+    expect(cvars.reset("pm_gravity")).toMatchObject({ ok: true, latched: true });
+    expect(cvars.get("pm_gravity")).toBe(600);
+    expect(cvars.applyLatched()).toEqual(["pm_gravity"]);
+    expect(cvars.get("pm_gravity")).toBe(800);
+  });
+
   it("cancels a pending LATCH value when set back to the current value", () => {
     cvars.set("pm_gravity", 600);
     expect(cvars.set("pm_gravity", 800)).toMatchObject({ ok: true, latched: false });
@@ -261,6 +270,21 @@ describe("setFromString", () => {
       expect(cvars.setFromString("sensitivity", text), text).toEqual({ ok: false, error: "type" });
     }
     expect(cvars.setFromString("cl_drawfps", "yes")).toEqual({ ok: false, error: "type" });
+    expect(cvars.setFromString("sensitivity", "3.25abc")).toEqual({ ok: false, error: "type" });
+    expect(cvars.setFromString("pm_maxWallJumps", "2 3")).toEqual({ ok: false, error: "type" });
+  });
+
+  it.each([
+    ["1", true],
+    ["true", true],
+    ["TRUE", true],
+    ["0", false],
+    ["false", false],
+    ["False", false],
+  ])("parses bool %j as %s", (text, expected) => {
+    cvars.set("cl_drawfps", !expected);
+    expect(cvars.setFromString("cl_drawfps", text).ok).toBe(true);
+    expect(cvars.get("cl_drawfps")).toBe(expected);
   });
 
   it('stores "-0" as 0', () => {
