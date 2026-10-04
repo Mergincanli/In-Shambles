@@ -65,6 +65,26 @@
 **Decision:** the server doesn't send enemy positions without potential line of sight (with hysteresis and leak radius); unseen players produce coarse audio events only.
 **Why:** browser clients are fully inspectable; data never sent can't be revealed.
 
+### D-013 — Art direction: "Comic Noir" (2026-10-04, accepted)
+**Context:** O-4 was open. The game needs its own visual identity (pillar 5) that stays readable at competitive speed and fits the browser performance budgets.
+**Decision:**
+- Adopt **"Comic Noir"**: a modern Franco-Belgian comic look inspired by XIII (2003), rebuilt for a competitive browser FPS. The rules live in `docs/08`; `docs/08a` is reference research, not rules.
+- Core techniques: banded lighting with tinted shadows over baked lightmaps, pixel-width hull outlines on actors, compiler-emitted crease lines plus a screen-space edge pass, world-space hatching on environments only, onomatopoeia lettering and comic panels.
+- When rules collide: readability and fairness → performance budgets → style fidelity.
+- Borrow the style family only: no XIII characters, story elements, logos, UI layouts or traced art (`docs/08` §3).
+- Onomatopoeia is generated only from sound events the client legitimately receives (`docs/08` §11.2).
+
+**Why:** flat color, baked light and ink lines are cheap to render in a browser and suit brush-built maps (`docs/08` §6, §7.2). Onomatopoeia doubles as a fair sound visualizer and an accessibility feature (`docs/08` §11).
+**Consequences:**
+- Exact parameters (bands, line widths, palettes, team colors, lettering font) are locked in look-dev (`docs/08` §17) and recorded in a later D-entry.
+- Art work starts before M8 (`docs/08` §18): an optional style spike after M2, crease-line data from the compiler in M5, comic FX and UI hooks in M6–M7.
+- Baked world lighting narrows the `docs/07` §5 lighting choice to a lightmap bake (options 1–2).
+
+### D-014 — Working title: "In Shambles" (2026-10-04, accepted)
+**Context:** O-1 (working title and branding) was open.
+**Decision:** the working title is **"In Shambles"**. O-1's trademark rule still applies: no "Urban Terror", "UrT" or "FrozenSand" in names or branding.
+**Consequences:** use "In Shambles" wherever player-facing text needs the game's name (page title, menus, server list). As a working title it can still change; check it against existing game titles and trademarks before a public release.
+
 ---
 
 <!-- Template

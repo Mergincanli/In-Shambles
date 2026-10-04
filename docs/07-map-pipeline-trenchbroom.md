@@ -127,6 +127,8 @@ TrenchBroom supports custom game configurations. Place a folder under its user-d
 | 2. **Blender bake** (export compiled geometry, bake in Cycles, import lightmaps) | Highest quality, least code | Manual steps |
 | 3. **No lightmaps:** baked vertex AO + light probes + a stylized real-time look | Cheapest | Depends heavily on the chosen art style |
 
+**Narrowed by D-013:** the Comic Noir art direction bakes world lighting into lightmaps (`docs/08` §6), which rules out option 3. M8 picks between options 1 and 2.
+
 Whatever is chosen: static lighting is baked or stylized. **Collision always stays brush-based**, and art meshes (`misc_model`, detail meshes) never affect movement.
 
 ## 6. Mapping metrics (gameplay-first; from hull and physics in `docs/03`)

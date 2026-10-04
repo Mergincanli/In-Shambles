@@ -10,6 +10,7 @@
 | M0 | Bootstrap & guardrails | ☐ not started | |
 | M1 | Simulation core: tick, math, brush collision, greybox builder | ☐ | |
 | M2 | Base Q3 movement + client shell + Worker server + prediction | ☐ | |
+| — | *Optional:* Style spike: toon material, hull outline, crease lines on greybox (`docs/08` §18) | ☐ | |
 | M3 | Real networking: dedicated server, protocol, snapshots, interpolation, bots | ☐ | |
 | M4 | UrT movement set (sprint/stamina, wall jumps, slide, ledge grab, …) | ☐ | |
 | M5 | TrenchBroom pipeline: game config, FGD, `.map` compiler, hot reload | ☐ | |
@@ -78,6 +79,20 @@
 - NET-03 (prediction parity: 0 corrections on lossless loopback) passes.
 - With `net_profile wan-150-loss2`, movement stays smooth (no visible rubber-banding; corrections rare and small, logged).
 - `pnpm feel-report` prints base metrics.
+
+## Style spike (optional, after M2)
+
+**Goal:** confirm the Comic Noir render pipeline on greybox before content production (`docs/08` §18). Recommended, 1–2 sessions; skipping it doesn't block M3.
+
+**Scope**
+- Banded toon material driven by the key light, with tinted shadows (`docs/08` §6).
+- Hull outlines with pixel-accurate width on a test character (`docs/08` §7.1).
+- Crease lines from the greybox brushes (`docs/08` §7.2).
+
+**Out of scope:** lightmaps, hatching, the screen-space edge pass, comic FX and UI. They arrive in M5–M8 per `docs/08` §18.
+
+**Acceptance**
+- Frame cost measured against the `docs/08` §16 budgets on the low preset; results recorded in the handoff.
 
 ## M3 — Real networking
 
@@ -174,8 +189,8 @@
 - HUD/UI styling, settings menus (graphics presets, audio, controls, accessibility).
 
 **Acceptance**
-- Budgets in `docs/08` §4 and `docs/10` met on the reference machines.
-- Readability tests (`docs/08` §1.3) documented.
+- Budgets in `docs/08` §16 and `docs/10` met on the reference machines.
+- Readability tests (`docs/08` §17.4) documented.
 
 ## M9 — Online hardening
 

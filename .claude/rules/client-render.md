@@ -17,4 +17,4 @@ paths:
 - **Mouse look is immediate.** Apply mouse deltas to the camera every frame. UserCmds sample angles per tick. Never smooth or accelerate raw input unless the player enables it.
 - **HUD updates are imperative** (refs/DOM writes). Throttle non-critical panels to ≤ 15 Hz. No framework re-render per frame.
 - **Physical keys.** Bind with `KeyboardEvent.code` so non-QWERTY layouts work.
-- **Budgets.** Respect draw-call and texture budgets (`docs/08` §4, `docs/10` §4.3). Check `renderer.info` in the dev overlay.
+- **Budgets.** Respect draw-call and texture budgets (`docs/08` §16, `docs/10` §4.3). Check `renderer.info` in the dev overlay.

@@ -29,7 +29,6 @@ Open `docs/01-vision-and-scope.md` → **Open decisions**. Claude Code treats an
 |---|---|---|
 | O-5 | License/business model | the default (closed, free-to-play, no GPL) is fine for now |
 | O-2 | Naming | decide any time; names live in data |
-| O-4 | Art direction | before M8; explore it in FORGE |
 | O-3 | The twist | before M10 |
 
 When you decide something, paste the **P-DECISION** prompt.
@@ -82,7 +81,8 @@ docs/
   05-netcode.md                   60 Hz tick, protocol, prediction, interpolation, lag comp, security
   06-engine-architecture.md       packages, modules, client/server structure, cvars, perf rules
   07-map-pipeline-trenchbroom.md  compiled map format, greybox courses, TrenchBroom importer
-  08-art-direction.md             look-dev process (FORGE), readability rules, asset budgets
+  08-art-direction.md             "Comic Noir" art direction: rules, rendering, budgets, look-dev (FORGE)
+  08a-xiii-style-reference.md     XIII (2003) style research + corrected shader recipes (reference only)
   09-roadmap.md                   milestones M0–M10 with acceptance criteria + status
   10-testing-and-performance.md   test suites, network profiles, performance budgets
   11-decision-log.md              decisions D-001… and why
