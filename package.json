@@ -7,6 +7,9 @@
     "node": ">=22.12"
   },
   "scripts": {
+    "dev": "pnpm --filter @game/client dev",
+    "dev:server": "pnpm --filter @game/server start",
+    "build": "pnpm -r build",
     "test": "vitest run",
     "test:movement": "node scripts/not-yet.mjs test:movement M2",
     "test:net": "node scripts/not-yet.mjs test:net M2",
