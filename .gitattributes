@@ -1,0 +1,16 @@
+# LF everywhere, including Windows checkouts (core.autocrlf=true): Biome expects LF.
+* text=auto eol=lf
+
+# Binary assets.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.ktx2 binary
+*.glb binary
+*.ogg binary
+*.mp3 binary
+*.wav binary
+*.woff binary
+*.woff2 binary
+*.zip binary
