@@ -8,8 +8,8 @@
     "node": ">=22.12"
   },
   "scripts": {
-    "dev": "pnpm --filter @game/client dev",
-    "dev:server": "pnpm --filter @game/server start",
+    "dev": "pnpm --filter @game/client --fail-if-no-match dev",
+    "dev:server": "pnpm --filter @game/server --fail-if-no-match start",
     "build": "pnpm -r build",
     "test": "vitest run",
     "test:movement": "node scripts/not-yet.mjs test:movement M2",
