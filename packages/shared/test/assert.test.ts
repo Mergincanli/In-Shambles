@@ -14,6 +14,13 @@ describe("DEV_ASSERT", () => {
     expect(() => DEV_ASSERT(0, "speed must be finite")).toThrow("speed must be finite");
   });
 
+  it("appends the detail value only to the failure message", () => {
+    expect(() => DEV_ASSERT(true, "speed must be finite", Number.NaN)).not.toThrow();
+    expect(() => DEV_ASSERT(false, "speed must be finite", Number.NaN)).toThrow(
+      "speed must be finite (got NaN)",
+    );
+  });
+
   it("is a no-op once disabled (prod builds clamp instead)", () => {
     setDevAsserts(false);
     expect(() => DEV_ASSERT(false, "ignored in prod")).not.toThrow();

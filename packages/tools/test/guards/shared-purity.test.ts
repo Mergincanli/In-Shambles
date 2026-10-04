@@ -17,6 +17,8 @@ const FORBIDDEN: [string, RegExp][] = [
   ["fetch", /\bfetch\s*\(/],
   ["node: import", /\bfrom\s+["']node:/],
   ["require", /\brequire\s*\(/],
+  // DEV_ASSERT messages are string literals; templates allocate on every call (assert.ts).
+  ["DEV_ASSERT template message", /\bDEV_ASSERT\s*\([^`;]*?,\s*`/],
 ];
 
 function violations(source: string): string[] {
@@ -39,6 +41,10 @@ describe("shared purity guard", () => {
       "Date.now",
     ]);
     expect(violations("// never use Date.now() here\n/* or Math.random */")).toEqual([]);
+    expect(violations("DEV_ASSERT(v >= 0, `speed out of range`);")).toEqual([
+      "DEV_ASSERT template message",
+    ]);
+    expect(violations('DEV_ASSERT(v >= 0, "speed must be >= 0", v);')).toEqual([]);
   });
 
   const root = fromRoot("packages", "shared", "src");
