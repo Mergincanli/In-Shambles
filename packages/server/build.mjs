@@ -1,4 +1,5 @@
 // Production bundle of the dedicated server (docs/06 §2: esbuild for prod).
+// Usage: node build.mjs [outfile]   (default dist/main.js; tests pass a temp path)
 import { build } from "esbuild";
 
 await build({
@@ -7,7 +8,7 @@ await build({
   platform: "node",
   format: "esm",
   target: "node22",
-  outfile: "dist/main.js",
+  outfile: process.argv[2] ?? "dist/main.js",
   sourcemap: true,
   define: { "process.env.NODE_ENV": '"production"' },
   logLevel: "info",

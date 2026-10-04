@@ -1,10 +1,13 @@
-import { type ChildProcess, spawn } from "node:child_process";
+import { type ChildProcess, spawn, spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const serverDir = fileURLToPath(new URL("..", import.meta.url));
 const repoRoot = fileURLToPath(new URL("../../..", import.meta.url));
-const READY = /server ok t=\d+\.\d{3}ms/;
+const READY = /server ok t=(\d+\.\d{3})ms/;
 
 interface Run {
   child: ChildProcess;
@@ -74,6 +77,8 @@ describe("server smoke test", () => {
       const run = start(process.execPath, ["--import", "tsx", "src/main.ts"], serverDir);
       try {
         await waitFor(run, READY, 10_000, true);
+        // Monotonic time since process start, not a wall-clock epoch timestamp.
+        expect(Number(READY.exec(run.output())?.[1])).toBeLessThan(60_000);
         run.kill(signal);
         // Windows can't deliver signals to a handler; there the process is just terminated.
         if (process.platform !== "win32") {
@@ -86,6 +91,30 @@ describe("server smoke test", () => {
     },
     15_000,
   );
+
+  it("the production bundle runs with plain node", async () => {
+    const outDir = mkdtempSync(join(tmpdir(), "server-bundle-"));
+    const outfile = join(outDir, "main.js");
+    try {
+      const build = spawnSync(process.execPath, ["build.mjs", outfile], {
+        cwd: serverDir,
+        encoding: "utf8",
+      });
+      expect(build.status, build.stderr).toBe(0);
+      const run = start(process.execPath, [outfile], outDir);
+      try {
+        await waitFor(run, READY, 10_000, true);
+        run.kill("SIGTERM");
+        if (process.platform !== "win32") {
+          expect(await run.exited).toEqual({ code: 0, signal: null });
+        }
+      } finally {
+        run.kill("SIGKILL");
+      }
+    } finally {
+      rmSync(outDir, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   // The acceptance command itself, run the way a terminal's Ctrl+C or a process manager stops it.
   it.skipIf(process.platform === "win32")(
