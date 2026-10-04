@@ -185,5 +185,5 @@ DEV / OFFLINE                                  ONLINE
 
 ## 11. Scripts and CI (created in M0, extended later)
 
-- `pnpm dev`, `pnpm server`, `pnpm test`, `pnpm test:movement`, `pnpm test:net`, `pnpm test:balance`, `pnpm typecheck`, `pnpm lint`, `pnpm bench`, `pnpm bots`, `pnpm feel-report`, `pnpm balance-report`, `pnpm mapc` (M5).
+- `pnpm dev`, `pnpm dev:server`, `pnpm test`, `pnpm test:movement`, `pnpm test:net`, `pnpm test:balance`, `pnpm typecheck`, `pnpm lint`, `pnpm bench`, `pnpm bots`, `pnpm feel-report`, `pnpm balance-report`, `pnpm mapc` (M5).
 - **CI** (when a remote repo exists): typecheck, lint, unit tests, a short bot soak (2 min, 8 bots, `wan-100-loss1`), and a bundle-size check.

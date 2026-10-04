@@ -113,7 +113,7 @@ Build:
 Out of scope: any gameplay, rendering beyond the placeholder page, networking.
 
 Acceptance: fresh clone → pnpm install && pnpm typecheck && pnpm lint && pnpm test passes;
-pnpm dev serves the page; pnpm server starts; BAL-01 passes.
+pnpm dev serves the page; pnpm dev:server starts; BAL-01 passes.
 
 Plan first and wait for my approval. Then implement in small green increments. Finish with /handoff.
 ```

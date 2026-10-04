@@ -60,7 +60,7 @@ docs/       specs, roadmap, decisions, handoffs.
 |---|---|
 | `pnpm install` | Install dependencies |
 | `pnpm dev` | Client + in-browser Worker server (loopback) |
-| `pnpm server` | Dedicated Node server |
+| `pnpm dev:server` | Dedicated Node server from source (not `pnpm server`, a pnpm built-in; D-015) |
 | `pnpm test` | All tests (Vitest) |
 | `pnpm test:movement` | Movement tests |
 | `pnpm test:net` | Netcode tests |

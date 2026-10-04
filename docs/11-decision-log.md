@@ -85,6 +85,11 @@
 **Decision:** the working title is **"In Shambles"**. O-1's trademark rule still applies: no "Urban Terror", "UrT" or "FrozenSand" in names or branding.
 **Consequences:** use "In Shambles" wherever player-facing text needs the game's name (page title, menus, server list). As a working title it can still change; check it against existing game titles and trademarks before a public release.
 
+### D-015 — The dedicated-server dev command is `pnpm dev:server` (2026-10-04, accepted)
+**Context:** the docs named it `pnpm server`, but pnpm 10 has a built-in `pnpm server` command (it manages a store server). Built-in commands take priority over package scripts, so `pnpm server` silently did nothing and exited 0.
+**Decision:** the root script is `dev:server`. It runs the server from source with tsx. Production runs the esbuild bundle that `pnpm build` produces (`node packages/server/dist/main.js`).
+**Consequences:** CLAUDE.md, `docs/06` §11, `docs/09` M0 and the M0 prompt say `pnpm dev:server`. New root scripts must not reuse a pnpm built-in command name.
+
 ---
 
 <!-- Template

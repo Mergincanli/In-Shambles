@@ -35,7 +35,7 @@
 
 **Acceptance**
 - `pnpm install && pnpm typecheck && pnpm lint && pnpm test` passes on a fresh clone.
-- `pnpm dev` serves a page; `pnpm server` starts and logs.
+- `pnpm dev` serves a page; `pnpm dev:server` starts and logs (D-015).
 - BAL-01 passes (damage table golden).
 
 ## M1 — Simulation core (headless)
