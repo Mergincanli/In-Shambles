@@ -36,6 +36,7 @@ describe("weapon content", () => {
 
   it("gives every weapon a non-empty name and a known type tag", () => {
     for (const [id, entry] of Object.entries(names)) {
+      expect(Object.keys(entry).sort(), `${id} keys`).toEqual(["name", "typeTag"]);
       expect(typeof entry.name === "string" && entry.name.trim() !== "", `${id}.name`).toBe(true);
       expect(TYPE_TAGS, `${id}.typeTag`).toContain(entry.typeTag);
     }
