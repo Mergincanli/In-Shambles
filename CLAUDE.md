@@ -70,7 +70,7 @@ docs/       specs, roadmap, decisions, handoffs.
 | `pnpm lint` | Biome lint + format check |
 | `pnpm format` | Apply Biome formatting and safe fixes |
 | `pnpm bench` | Microbenchmarks |
-| `pnpm bots -- --count 16 --profile wan-150` | Headless bot load test |
+| `pnpm bots -- --count 16 --profile wan-150-loss2` | Headless bot load test |
 | `pnpm feel-report` | Movement metrics vs. targets |
 | `pnpm balance-report` | Hits-to-kill / TTK tables |
 | `pnpm mapc` | TrenchBroom `.map` compiler |

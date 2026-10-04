@@ -34,6 +34,7 @@ packages/shared/src/
   math/                vec3 (pooled, out-params), plane, aabb, quant (quantizers), angles
   rng/                 mulberry32, hash32 (seeding: match/shooter/tick/shot)
   cvars/               registry, flags, replicated block (hash), defaults from docs
+  debug/               DEV_ASSERT / setDevAsserts (dev-only checks behind a runtime flag)
   world/
     cmap.ts            compiled map format types (docs/07)
     brush.ts           convex brush = planes + bounds + contents flags
@@ -93,6 +94,9 @@ packages/tools/src/
   bots/                headless clients
   reports/             feel-report, balance-report
   replay/              demo inspection
+  docs/                Markdown section/table parsing for doc-golden tests (BAL-01)
+  content/             content-vs-docs helpers (weapon IDs, damage table)
+  paths.ts             repo-root resolution
 ```
 
 ## 4. Runtime topology

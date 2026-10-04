@@ -6,8 +6,8 @@ It runs on our own Quake-3-style engine, written from scratch in TypeScript: a s
 
 ## Requirements
 
-- Node.js 24 LTS (22.12 or newer works)
-- pnpm 10: run `corepack enable` once, and pnpm picks up the version pinned in `package.json`
+- Node.js 24 LTS (22.12+ and 26+ also work; these are the versions the toolchain supports)
+- pnpm 10: run `corepack enable` once, and pnpm picks up the version pinned in `package.json`. Node 25+ no longer ships corepack: run `npm install -g corepack` first, or install pnpm 10 directly.
 
 ## Setup
 
