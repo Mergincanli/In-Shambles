@@ -1,0 +1,8 @@
+{
+  // Root config files only; each package has its own tsconfig.
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"]
+  },
+  "include": ["vitest.config.ts"]
+}

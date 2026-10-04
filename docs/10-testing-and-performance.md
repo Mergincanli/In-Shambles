@@ -22,7 +22,7 @@
 |---|---|
 | `pnpm test` | everything fast (< 60 s target) |
 | `pnpm test:movement` | MV-01…MV-20 (`docs/03` §8) |
-| `pnpm test:balance` | BAL-01…BAL-11 (`docs/04` §13) |
+| `pnpm test:balance` | BAL-01…BAL-11 (`docs/04` §13): every test whose name starts with `BAL-`, so each BAL test's top-level `describe` starts with its ID (`BAL-07: …`) |
 | `pnpm test:net` | NET-01…NET-12 (`docs/05` §14), with profiles |
 | `pnpm bench` | trace, pmove, snapshot build, codec, render-frame microbenchmarks |
 | `pnpm bots -- --count N --profile P --minutes M --map X` | load/soak with a metrics summary (JSON + markdown) |
