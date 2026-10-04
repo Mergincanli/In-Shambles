@@ -55,3 +55,55 @@ describe("firstTable", () => {
     expect(() => firstTable(ragged)).toThrow(/row 1 has 1 cells, expected 2/);
   });
 });
+
+describe("mdSection edge cases", () => {
+  it("ignores # lines inside fenced code blocks", () => {
+    const doc =
+      "## 1. Real\n```sh\n# not a heading\n## 2. Fake\n```\n| A |\n|---|\n| 1 |\n## 2. Next\n";
+    const section = mdSection(doc, "1. Real");
+    expect(section).toContain("| 1 |");
+    expect(section).not.toContain("## 2. Next");
+    expect(() => mdSection("```\n## 3. Hidden\n```\n", "3. Hidden")).toThrow(/not found/);
+  });
+
+  it("throws when several headings match the prefix", () => {
+    const doc = "## 4. Damage table notes\ntext\n## 4. Damage table (FACT)\n| A |\n|---|\n| 1 |\n";
+    expect(() => mdSection(doc, "4. Damage table")).toThrow(/2 headings match "4. Damage table"/);
+  });
+});
+
+describe("firstTable edge cases", () => {
+  it("skips a pipe line that has no separator after it", () => {
+    const table = firstTable("| prose with a pipe |\n\n| H |\n|---|\n| 1 |\n");
+    expect(table.headers).toEqual(["H"]);
+    expect(firstTable.bind(null, "| a |\n| b |\n")).toThrow(/no table/);
+  });
+
+  it("accepts alignment colons and one-dash separators", () => {
+    expect(firstTable("| A | B |\n|:---|-:|\n| 1 | 2 |\n").rows).toEqual([["1", "2"]]);
+  });
+
+  it("keeps rows without a leading pipe instead of silently stopping", () => {
+    const table = firstTable("| A | B |\n|---|---|\n| 1 | 2 |\n3 | 4 |\n| 5 | 6 |\n");
+    expect(table.rows).toEqual([
+      ["1", "2"],
+      ["3", "4"],
+      ["5", "6"],
+    ]);
+  });
+
+  it("returns only the first of two tables", () => {
+    const table = firstTable("| A |\n|---|\n| 1 |\n\n| B |\n|---|\n| 2 |\n");
+    expect(table).toEqual({ headers: ["A"], rows: [["1"]] });
+  });
+
+  it("keeps escaped pipes inside cells, including at the end", () => {
+    const table = firstTable("| A | B |\n|---|---|\n| x \\| y | z \\|\n");
+    expect(table.rows).toEqual([["x \\| y", "z \\|"]]);
+  });
+
+  it("ignores tables inside fenced code blocks", () => {
+    const table = firstTable("```\n| X |\n|---|\n| 0 |\n```\n| A |\n|---|\n| 1 |\n");
+    expect(table.headers).toEqual(["A"]);
+  });
+});
