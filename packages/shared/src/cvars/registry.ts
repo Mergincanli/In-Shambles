@@ -11,12 +11,13 @@ interface CvarValueOf {
 }
 
 export interface CvarDef<T extends CvarType = CvarType> {
+  /** `prefix_camelCase`, as in the specs (`pm_airAccelerate`). Lookups ignore case. */
   name: string;
   type: T;
   default: CvarValueOf[T];
-  /** int/float only. */
+  /** int/float only; finite, and an integer for int cvars. */
   min?: number;
-  /** int/float only. */
+  /** int/float only; finite, and an integer for int cvars. */
   max?: number;
   description: string;
   /** `CvarFlag` bits. */
@@ -40,26 +41,39 @@ interface CvarEntry {
   latched: CvarValue | undefined;
 }
 
-const NAME = /^[a-z][a-z0-9_]*$/;
+const NAME = /^[a-z][A-Za-z0-9_]*$/;
 const INT_TEXT = /^[+-]?\d+$/;
+const FLOAT_TEXT = /^[+-]?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?$/i;
+const INT_MIN = -(2 ** 31);
+const INT_MAX = 2 ** 31 - 1;
 
 /**
- * Q3-style cvar registry (docs/06 §6). Registration is setup-time and throws on bad
- * definitions; `set`/`setFromString`/`reset` come from consoles and the network, so they
- * return a result instead of throwing.
+ * Q3-style cvar registry (docs/06 §6). Names are matched case-insensitively. Registration is
+ * setup-time and throws on bad definitions; `set`/`setFromString`/`reset` come from consoles
+ * and the network, so they return a result instead of throwing.
  */
 export class CvarRegistry {
-  /** CHEAT cvars can only change while this is true. */
-  allowCheats = false;
-
   private readonly entries = new Map<string, CvarEntry>();
+  private allowCheats = false;
 
   register<T extends CvarType>(def: CvarDef<T>): void {
     if (!NAME.test(def.name)) throw new Error(`invalid cvar name "${def.name}"`);
-    if (this.entries.has(def.name)) throw new Error(`cvar "${def.name}" already registered`);
+    const key = def.name.toLowerCase();
+    const existing = this.entries.get(key);
+    if (existing) {
+      throw new Error(`cvar "${def.name}" already registered as "${existing.def.name}"`);
+    }
     const isNumber = def.type === "int" || def.type === "float";
     if (!isNumber && (def.min !== undefined || def.max !== undefined)) {
       throw new Error(`cvar "${def.name}": min/max only apply to int and float`);
+    }
+    for (const [label, bound] of [
+      ["min", def.min],
+      ["max", def.max],
+    ] as const) {
+      if (bound !== undefined && !matchesType(def.type, bound)) {
+        throw new Error(`cvar "${def.name}": ${label} ${bound} is not a valid ${def.type}`);
+      }
     }
     if (def.min !== undefined && def.max !== undefined && def.min > def.max) {
       throw new Error(`cvar "${def.name}": min ${def.min} > max ${def.max}`);
@@ -68,32 +82,45 @@ export class CvarRegistry {
     if (!matchesType(def.type, value) || clampToRange(def, value) !== value) {
       throw new Error(`cvar "${def.name}": default ${String(value)} is not a valid ${def.type}`);
     }
-    this.entries.set(def.name, { def: { ...def }, value, latched: undefined });
+    this.entries.set(key, { def: { ...def }, value: normalize(value), latched: undefined });
   }
 
   has(name: string): boolean {
-    return this.entries.has(name);
+    return this.entries.has(name.toLowerCase());
   }
 
   get(name: string): CvarValue | undefined {
-    return this.entries.get(name)?.value;
+    return this.entries.get(name.toLowerCase())?.value;
   }
 
   info(name: string): CvarInfo | undefined {
-    return this.entries.get(name);
+    return this.entries.get(name.toLowerCase());
+  }
+
+  cheatsAllowed(): boolean {
+    return this.allowCheats;
+  }
+
+  /** Turning cheats off resets every CHEAT cvar to its default and drops its pending value. */
+  setAllowCheats(on: boolean): void {
+    this.allowCheats = on;
+    if (on) return;
+    for (const entry of this.entries.values()) {
+      if (!isCheat(entry)) continue;
+      entry.value = normalize(entry.def.default);
+      entry.latched = undefined;
+    }
   }
 
   set(name: string, value: CvarValue): SetResult {
-    const entry = this.entries.get(name);
+    const entry = this.entries.get(name.toLowerCase());
     if (!entry) return { ok: false, error: "unknown" };
-    if ((entry.def.flags ?? 0) & CvarFlag.CHEAT && !this.allowCheats) {
-      return { ok: false, error: "cheat" };
-    }
+    if (isCheat(entry) && !this.allowCheats) return { ok: false, error: "cheat" };
     return assign(entry, value);
   }
 
   setFromString(name: string, text: string): SetResult {
-    const entry = this.entries.get(name);
+    const entry = this.entries.get(name.toLowerCase());
     if (!entry) return { ok: false, error: "unknown" };
     const value = parseValue(entry.def.type, text);
     if (value === undefined) return { ok: false, error: "type" };
@@ -102,7 +129,7 @@ export class CvarRegistry {
 
   /** Back to the default. Allowed for CHEAT cvars too; LATCH cvars still wait for `applyLatched()`. */
   reset(name: string): SetResult {
-    const entry = this.entries.get(name);
+    const entry = this.entries.get(name.toLowerCase());
     if (!entry) return { ok: false, error: "unknown" };
     return assign(entry, entry.def.default);
   }
@@ -112,18 +139,20 @@ export class CvarRegistry {
     const applied: string[] = [];
     for (const entry of this.entries.values()) {
       if (entry.latched === undefined) continue;
+      if (entry.latched !== entry.value) applied.push(entry.def.name);
       entry.value = entry.latched;
       entry.latched = undefined;
-      applied.push(entry.def.name);
     }
-    return applied.sort();
+    return applied.sort(byName);
   }
 
-  /** All cvars whose name starts with `prefix`, sorted by name. */
+  /** All cvars whose name starts with `prefix` (ignoring case), sorted by name. */
   list(prefix = ""): CvarInfo[] {
-    return [...this.entries.values()]
-      .filter((entry) => entry.def.name.startsWith(prefix))
-      .sort((a, b) => (a.def.name < b.def.name ? -1 : 1));
+    const lower = prefix.toLowerCase();
+    return [...this.entries.entries()]
+      .filter(([key]) => key.startsWith(lower))
+      .map(([, entry]) => entry)
+      .sort((a, b) => byName(a.def.name, b.def.name));
   }
 
   /** REPLICATED cvars sorted by name: the block the server sends to clients. */
@@ -132,13 +161,24 @@ export class CvarRegistry {
   }
 }
 
+function isCheat(entry: CvarEntry): boolean {
+  return ((entry.def.flags ?? 0) & CvarFlag.CHEAT) !== 0;
+}
+
+function byName(a: string, b: string): number {
+  const x = a.toLowerCase();
+  const y = b.toLowerCase();
+  return x < y ? -1 : x > y ? 1 : 0;
+}
+
 function assign(entry: CvarEntry, value: CvarValue): SetResult {
   if (!matchesType(entry.def.type, value)) return { ok: false, error: "type" };
-  const next = clampToRange(entry.def, value);
+  const next = normalize(clampToRange(entry.def, value));
   const clamped = next !== value;
   if ((entry.def.flags ?? 0) & CvarFlag.LATCH) {
-    entry.latched = next;
-    return { ok: true, value: next, clamped, latched: true };
+    // Setting a LATCH cvar back to its current value cancels any pending change.
+    entry.latched = next === entry.value ? undefined : next;
+    return { ok: true, value: next, clamped, latched: entry.latched !== undefined };
   }
   entry.value = next;
   return { ok: true, value: next, clamped, latched: false };
@@ -147,7 +187,9 @@ function assign(entry: CvarEntry, value: CvarValue): SetResult {
 function matchesType(type: CvarType, value: CvarValue): boolean {
   switch (type) {
     case "int":
-      return Number.isInteger(value);
+      return (
+        Number.isInteger(value) && (value as number) >= INT_MIN && (value as number) <= INT_MAX
+      );
     case "float":
       return typeof value === "number" && Number.isFinite(value);
     case "bool":
@@ -164,15 +206,18 @@ function clampToRange(def: CvarDef, value: CvarValue): CvarValue {
   return value;
 }
 
+/** -0 becomes 0, so values compare, hash and serialize the same everywhere. */
+function normalize(value: CvarValue): CvarValue {
+  return value === 0 ? 0 : value;
+}
+
 function parseValue(type: CvarType, text: string): CvarValue | undefined {
   const trimmed = text.trim();
   switch (type) {
     case "int":
       return INT_TEXT.test(trimmed) ? Number(trimmed) : undefined;
-    case "float": {
-      const value = trimmed === "" ? Number.NaN : Number(trimmed);
-      return Number.isFinite(value) ? value : undefined;
-    }
+    case "float":
+      return FLOAT_TEXT.test(trimmed) ? Number(trimmed) : undefined;
     case "bool": {
       const lower = trimmed.toLowerCase();
       if (lower === "1" || lower === "true") return true;
