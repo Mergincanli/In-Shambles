@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parseWeaponIdsDoc } from "../../src/content/weaponDocs";
@@ -110,26 +110,65 @@ const BANNED = [
   ...BRANDS,
   ...refs.flatMap((ref) => ref.reference.split(" / ")).filter((term) => !GENERIC.has(term)),
 ];
+// Short codes and anything with a digit (FN, M4, AK-47) match with exact case, so code-ish words
+// like `fn` or `m4` don't trip the guard; longer names match in any case.
 const banned = BANNED.map((term) => {
   const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return { term, pattern: new RegExp(`(^|[^A-Za-z0-9])${escaped}($|[^A-Za-z0-9])`, "i") };
+  const flags = term.length <= 4 || /\d/.test(term) ? "" : "i";
+  return { term, pattern: new RegExp(`(^|[^A-Za-z0-9])${escaped}($|[^A-Za-z0-9])`, flags) };
 });
 
 function bannedTerms(text: string): string[] {
   return banned.filter(({ pattern }) => pattern.test(text)).map(({ term }) => term);
 }
 
+const CODE = /\.[cm]?[jt]sx?$/;
+
+/** The text of every string and template literal in a source file, without comments or code. */
+function stringLiterals(source: string): string {
+  const out: string[] = [];
+  for (let i = 0; i < source.length; i++) {
+    const c = source[i];
+    if (c === "/" && source[i + 1] === "/") {
+      i = source.indexOf("\n", i);
+      if (i === -1) break;
+    } else if (c === "/" && source[i + 1] === "*") {
+      i = source.indexOf("*/", i + 2) + 1;
+      if (i === 0) break;
+    } else if (c === '"' || c === "'" || c === "`") {
+      let j = i + 1;
+      while (j < source.length && source[j] !== c) j += source[j] === "\\" ? 2 : 1;
+      out.push(source.slice(i + 1, j));
+      i = j;
+    }
+  }
+  return out.join("\n");
+}
+
+/** What a player could see in a file: string literals for code, the whole text otherwise. */
+function playerText(file: string): string {
+  const text = readFileSync(file, "utf8");
+  return CODE.test(file) ? stringLiterals(text) : text;
+}
+
+const TEXT_FILE = /\.([cm]?[jt]sx?|json|html?|css|svg|txt|md|webmanifest)$/;
+
+function filesUnder(dir: string): string[] {
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir, { recursive: true, encoding: "utf8" })
+    .filter((file) => TEXT_FILE.test(file))
+    .map((file) => join(dir, file));
+}
+
 function playerFacingFiles(): string[] {
-  const namesDir = fromRoot("content", "names");
-  const clientSrc = fromRoot("packages", "client", "src");
+  const client = fromRoot("packages", "client");
   return [
-    ...readdirSync(namesDir)
-      .filter((file) => file.endsWith(".json"))
-      .map((file) => join(namesDir, file)),
-    fromRoot("packages", "client", "index.html"),
-    ...readdirSync(clientSrc, { recursive: true, encoding: "utf8" })
-      .filter((file) => file.endsWith(".ts"))
-      .map((file) => join(clientSrc, file)),
+    ...filesUnder(fromRoot("content", "names")),
+    ...readdirSync(client)
+      .filter((file) => file.endsWith(".html"))
+      .map((file) => join(client, file)),
+    ...filesUnder(join(client, "src")),
+    ...filesUnder(join(client, "public")),
   ];
 }
 
@@ -141,6 +180,7 @@ describe("trademark guard", () => {
     ["the Desert Eagle"],
     ["Heckler & Koch"],
     ["UrT Classic"],
+    ["FN Five"],
   ])("catches %j", (name) => {
     expect(bannedTerms(name)).not.toEqual([]);
   });
@@ -152,10 +192,25 @@ describe("trademark guard", () => {
     },
   );
 
+  it("reads code for its strings only, so identifiers and comments don't count", () => {
+    const code = `// colt and FN in a comment\nconst fn = (m4: M, sig: S, p90: number) => m4.mul(sig);\nlabel("Grissino");`;
+    expect(bannedTerms(stringLiterals(code))).toEqual([]);
+    expect(bannedTerms(stringLiterals(`label("Colt Special"); hud(\`AK-47 \${n}\`);`))).toEqual(
+      expect.arrayContaining(["Colt", "AK-47"]),
+    );
+  });
+
+  it("scans the names files and the client's player-facing files", () => {
+    const files = playerFacingFiles().map((file) => file.slice(fromRoot().length + 1));
+    expect(files).toContain(join("content", "names", "weapons.json"));
+    expect(files).toContain(join("packages", "client", "index.html"));
+    expect(files).toContain(join("packages", "client", "src", "bootLabel.ts"));
+  });
+
   it.each(playerFacingFiles().map((file) => [file.slice(fromRoot().length + 1), file]))(
     "%s has no trademarks or real gun names",
     (_name, file) => {
-      expect(bannedTerms(readFileSync(file, "utf8"))).toEqual([]);
+      expect(bannedTerms(playerText(file))).toEqual([]);
     },
   );
 });
