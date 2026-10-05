@@ -1,20 +1,31 @@
 import { PerformanceObserver } from "node:perf_hooks";
 import {
+  boxContents,
   boxPlanes,
   buildBrush,
   CONTENTS_SOLID,
   type CollisionBrushSource,
+  copyPlayerState,
   createCollisionWorld,
+  HULL_CROUCHED_MAXS,
   HULL_MINS,
   HULL_STANDING_MAXS,
   MASK_PLAYERSOLID,
   Mulberry32,
   PlayerState,
+  PlayerStateRing,
+  playerStateEquals,
+  pointContents,
+  positionContents,
+  positionTest,
   quantizePlayerState,
   rotatedBoxPlanes,
+  sanitizeUserCmd,
   snapOrigin,
   TraceResult,
   traceBox,
+  traceRay,
+  UserCmd,
   type Vec3,
   vec3,
   wedgePlanes,
@@ -94,8 +105,84 @@ function runSnap(n: number): void {
   }
 }
 
+const ring = new PlayerStateRing();
+const ps2 = new PlayerState();
+const cmd = new UserCmd();
+
+/** Ring write/read (copy), the prediction compare and a cmd sanitize. */
+function runState(n: number): void {
+  for (let i = 0; i < n; i++) {
+    const e = exact[i & (CASES - 1)] as Vec3;
+    ps.origin[0] = e[0];
+    ps.stamina = i & 4095;
+    ring.write(i, ps);
+    if (ring.has(i - 1) && ring.read(i - 1, ps2) && !playerStateEquals(ps, ps2)) {
+      outcomes[0] = (outcomes[0] as number) + 1;
+    }
+    copyPlayerState(ps2, ps);
+    if (playerStateEquals(ps, ps2)) outcomes[1] = (outcomes[1] as number) + 1;
+    // Out-of-range integers, as a wire decoder hands them over.
+    cmd.tick = i;
+    cmd.buttons = i;
+    cmd.forward = (i & 511) - 256;
+    cmd.right = (i & 255) - 300;
+    cmd.up = i & 127;
+    cmd.yaw = i * 7;
+    cmd.pitch = (i * 13) & 0x1ffff;
+    cmd.weaponSlot = (i & 15) - 4;
+    sanitizeUserCmd(cmd);
+    outcomes[2] = (outcomes[2] as number) + (cmd.forward & 1);
+  }
+}
+
+const lo = vec3();
+const hi = vec3();
+
+/** The BVH query mix of trace-allocation.test.ts, here as native ESM. */
+function runTrace(n: number): void {
+  for (let i = 0; i < n; i++) {
+    const e = exact[i & (CASES - 1)] as Vec3;
+    const s = exact[(i + 1) & (CASES - 1)] as Vec3;
+    switch (i % 5) {
+      case 0:
+        traceBox(world, s, e, HULL_MINS, HULL_CROUCHED_MAXS, MASK_PLAYERSOLID, tr);
+        if (tr.fraction < 1) outcomes[0] = (outcomes[0] as number) + 1;
+        break;
+      case 1:
+        traceRay(world, s, e, -1, tr);
+        if (tr.fraction < 1) outcomes[0] = (outcomes[0] as number) + 1;
+        break;
+      case 2:
+        if (!positionTest(world, e, HULL_MINS, HULL_STANDING_MAXS, MASK_PLAYERSOLID)) {
+          outcomes[1] = (outcomes[1] as number) + 1;
+        }
+        outcomes[1] =
+          (outcomes[1] as number) +
+          (positionContents(world, s, HULL_MINS, HULL_CROUCHED_MAXS, -1) & 1);
+        break;
+      case 3:
+        outcomes[2] = (outcomes[2] as number) + (pointContents(world, e) & 1);
+        break;
+      default:
+        lo[0] = e[0] - 16;
+        lo[1] = e[1] - 16;
+        lo[2] = e[2] - 64;
+        hi[0] = e[0] + 16;
+        hi[1] = e[1] + 16;
+        hi[2] = e[2];
+        outcomes[2] = (outcomes[2] as number) + (boxContents(world, lo, hi) & 1);
+    }
+  }
+}
+
+const WORKLOADS: Record<string, (n: number) => void> = {
+  quantize: runQuantize,
+  snap: runSnap,
+  state: runState,
+  trace: runTrace,
+};
 const workload = process.argv[2];
-const run = workload === "quantize" ? runQuantize : workload === "snap" ? runSnap : undefined;
+const run = workload === undefined ? undefined : WORKLOADS[workload];
 if (run === undefined) throw new Error(`unknown workload ${String(workload)}`);
 
 let gcs = 0;
