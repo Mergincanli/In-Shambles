@@ -20,9 +20,12 @@ export interface ServerHost {
  * Returns a function that releases the keep-alive timer.
  */
 export function startServer(host: ServerHost): () => void {
-  // Stay alive like a real server until a stop signal arrives.
-  const keepAlive = setInterval(() => {}, 2 ** 30);
-  const release = () => clearInterval(keepAlive);
+  // Stay alive like a real server until a stop signal arrives. This is a keep-alive, not the tick
+  // loop: the M3 match loop uses a monotonic accumulator, never setInterval (.claude/rules/netcode.md).
+  const keepAlive: ReturnType<typeof setTimeout> = setTimeout(function rearm() {
+    keepAlive.refresh();
+  }, 2 ** 30);
+  const release = () => clearTimeout(keepAlive);
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     host.onSignal(signal, () => {
       release();
