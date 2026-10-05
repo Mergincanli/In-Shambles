@@ -10,6 +10,7 @@
 | Scenario (sim) | Vitest + greybox courses | movement feel targets (MV-xx), balance rules (BAL-xx) | `packages/shared/test/scenarios` |
 | Parity / determinism | Vitest | client vs. server sim, recorded input streams | `packages/shared/test/parity` |
 | Determinism vectors (D-016, D-017) | Vitest; real browsers from M2 | frozen input → output bits for dtrig, quantizers, PRNG and hash, and for brush traces, `snapOrigin` and `pointContents` on a fixed world | `packages/shared/test/vectors` (regenerate with `pnpm --filter @game/tools vectors`) |
+| Property / fuzz (M1) | Vitest | trace properties P1–P7 against a SAT oracle over the courses and seeded synthetic worlds (no tunneling, startSolid/allSolid, no phantom hits, BVH = brute force, determinism, snap chains); a failure prints a case to paste into `regressions.test.ts`; `FUZZ_SEED` and `FUZZ_CASES` override the default 20k cases for long local runs | `packages/tools/test/fuzz` |
 | Netcode integration | Vitest + in-process server + NetSim | NET-xx under profiles | `packages/server/test/net` |
 | Load / soak | bots CLI | 16–32 bots, minutes to hours, metrics | `packages/tools/bots` |
 | Perf benchmarks | `pnpm bench` | µs per op for hot paths | `packages/*/bench` |
