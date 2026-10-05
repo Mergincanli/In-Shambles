@@ -102,8 +102,20 @@
 
 **Consequences:**
 - The shared purity guard rejects the banned names and `**`, and flags any use of `Math` other than `Math.<allowed member>` (computed access, optional chaining, aliasing, destructuring). The rules live in `packages/tools/src/code/deterministicMath.ts`, so compiler code can reuse them.
-- Committed determinism vectors (`packages/shared/test/vectors/determinism.ts`, input bits → output bits for dtrig, quantizers, Mulberry32 and hash32) are recomputed by the tests; M2 replays them in Chrome, Firefox and Safari (`docs/09` M2, `docs/10` §1).
+- Committed determinism vectors (`packages/shared/test/vectors/determinism.ts`, input bits → output bits for dtrig, quantizers, `quantizePlayerState`, `sanitizeUserCmd`, Mulberry32 and hash32) are recomputed by the tests; M2 replays them in Chrome, Firefox and Safari (`docs/09` M2, `docs/10` §1).
 - Constants that were written with `**` in shared (the cvar registry's i32 range) are now literals.
+
+### D-018 — PlayerState and UserCmd layout for M1 (2026-10-05, accepted)
+**Context:** M1 implements `PlayerState` (`docs/03` §6) and `UserCmd` (`docs/05` §3.4). Both docs leave the bit order, the fixed-point stamina format and the field ranges open, and `docs/05` lists "kick-eligible" among the buttons although it reads as derived state. (D-017 is reserved for the M1 trace epsilon and snapping decision, written with the M1 doc updates.)
+**Decision:**
+- **Kick-eligible is not a button.** It reads as state derived from the player and the weapon, not an input, so it is left out until the kick is built in M4 (M1 plan, open question 1). `buttons` bits 0–11 are attack … drop in the `docs/05` order; bits 12–15 are spare.
+- **Stamina** is an integer count of hundredths (u16). `flags` bits 0–9 are the `docs/03` §6 flags in the listed order.
+- **Ranges:** `groundEntity` −1 (none) to 32767 (the world); `waterLevel` 0–3; move axes ±127 (the i8 never carries −128); pitch ±89°; `weaponSlot` 0–7 (the knife plus the seven `docs/04` §9 loadout slots); `tick` 0…2^30 − 1 (not the full u32), so ticks stay V8 small integers (about 207 days at 60 Hz).
+- `quantizePlayerState` maps a non-finite `groundEntity` to −1, not 0, because 0 is a real entity. `sanitizeUserCmd` clamps and masks untrusted input and never throws.
+
+**Consequences:**
+- `docs/03` §6 and `docs/05` §3.4 carry "Pinned down in M1" notes; the code is in `packages/shared/src/sim/`.
+- Open for later milestones: whether kick-eligible needs any wire bit (M4), which `weaponSlot` index is which and whether out-of-range slots clamp or mean "no change" (weapon switching), and the hull label in `docs/03` §2.
 
 ---
 

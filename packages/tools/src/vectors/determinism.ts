@@ -2,15 +2,24 @@ import {
   cosU16,
   dcos,
   degreesToU16,
+  devAssertsEnabled,
   dsin,
+  ENTITY_WORLD,
   hash32,
   Mulberry32,
   ORIGIN_LIMIT,
   ORIGIN_SCALE,
+  PITCH_LIMIT_U16,
+  PlayerState,
   quantizeOrigin,
+  quantizePlayerState,
   quantizeStaminaHundredths,
   quantizeVelocity,
+  sanitizeUserCmd,
+  setDevAsserts,
   sinU16,
+  TICK_MAX,
+  UserCmd,
   VELOCITY_LIMIT,
   VELOCITY_SCALE,
 } from "@game/shared";
@@ -131,6 +140,162 @@ function quantInputs(limit: number, quantum: number): number[] {
   return xs;
 }
 
+/**
+ * PlayerState inputs in field order (origin, velocity, viewYaw, viewPitch, flags, groundEntity,
+ * waterLevel, stamina): edges first, then seeded random states, some out of range.
+ */
+function playerStateInputs(): number[][] {
+  const { NaN: nan, POSITIVE_INFINITY: inf } = Number;
+  const rows = [
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, -1, 0, 0],
+    [-0, -1 / 64, 1 / 64, -0, -1 / 32, 1 / 32, -0, -0.5, -0, -0.5, -0, -0],
+    [100.01, -100.02, 3 / 64, 320.03, -0.03, 270, 65535, 65536, 1023, 12, 2, 9999.5],
+    [
+      ORIGIN_LIMIT,
+      -ORIGIN_LIMIT,
+      ORIGIN_LIMIT + 1,
+      VELOCITY_LIMIT,
+      -VELOCITY_LIMIT,
+      1e9,
+      65535,
+      65535,
+      0x3ff,
+      ENTITY_WORLD,
+      3,
+      65535,
+    ],
+    [1e300, -1e300, 0.1, 1e300, -1e300, 0.1, -1, -65537, -1, -2, -1, -3],
+    [0, 0, 0, 0, 0, 0, 1.9, -1.9, 1024.75, 7.9, 2.5, 65535.4],
+    [0, 0, 0, 0, 0, 0, 4294967301, 1e20, 0xffff, ENTITY_WORLD + 1, 99, 1e9],
+    [nan, nan, nan, nan, nan, nan, nan, nan, nan, nan, nan, nan],
+    [inf, -inf, inf, -inf, inf, -inf, inf, -inf, inf, inf, inf, inf],
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, -inf, -inf, -inf],
+  ];
+  const rng = new Mulberry32(0x9500);
+  const r = (range: number) => (rng.nextFloat() * 2 - 1) * range;
+  for (let i = 0; i < 16; i++) {
+    rows.push([
+      r(20000),
+      r(20000),
+      r(20000),
+      r(40000),
+      r(40000),
+      r(40000),
+      r(200000),
+      r(200000),
+      r(4096),
+      r(40000),
+      r(5),
+      r(80000),
+    ]);
+  }
+  return rows;
+}
+
+/** UserCmd inputs in field order (tick, buttons, forward, right, up, yaw, pitch, weaponSlot). */
+function userCmdInputs(): number[][] {
+  const { NaN: nan, POSITIVE_INFINITY: inf } = Number;
+  const rows = [
+    [0, 0, 0, 0, 0, 0, 0, 0],
+    [3600, 0xfff, 127, -127, 5, 40000, 65536 - PITCH_LIMIT_U16, 7],
+    [TICK_MAX + 1, 0xffff, 128, -128, 1e9, 65536, PITCH_LIMIT_U16 + 1, 8],
+    [-1, -1, -1e9, 12.7, -12.7, -1, 32768, -1],
+    [-0, 0x1000, -0.5, -0, 0.5, -0, -0, -0],
+    [99.9, 2048.5, 0, 0, 0, 70000.9, 65541, 2.9],
+    [nan, nan, nan, nan, nan, nan, nan, nan],
+    [inf, inf, inf, inf, inf, inf, inf, inf],
+    [-inf, -inf, -inf, -inf, -inf, -inf, -inf, -inf],
+  ];
+  const rng = new Mulberry32(0xc3d0);
+  const r = (range: number) => (rng.nextFloat() * 2 - 1) * range;
+  for (let i = 0; i < 16; i++) {
+    rows.push([r(2147483648), r(0x20000), r(300), r(300), r(300), r(200000), r(200000), r(20)]);
+  }
+  return rows;
+}
+
+/** Runs `fn` with DEV_ASSERT off, so the NaN rows record the prod fallbacks. */
+function withoutAsserts<T>(fn: () => T): T {
+  const was = devAssertsEnabled();
+  setDevAsserts(false);
+  try {
+    return fn();
+  } finally {
+    setDevAsserts(was);
+  }
+}
+
+function playerStateRow(input: number[]): string {
+  const ps = new PlayerState();
+  const [ox, oy, oz, vx, vy, vz, yaw, pitch, flags, ground, water, stamina] = input as [
+    number,
+    number,
+    number,
+    number,
+    number,
+    number,
+    number,
+    number,
+    number,
+    number,
+    number,
+    number,
+  ];
+  ps.origin.set([ox, oy, oz]);
+  ps.velocity.set([vx, vy, vz]);
+  ps.viewYaw = yaw;
+  ps.viewPitch = pitch;
+  ps.flags = flags;
+  ps.groundEntity = ground;
+  ps.waterLevel = water;
+  ps.stamina = stamina;
+  quantizePlayerState(ps);
+  const out = [
+    ...[...ps.origin, ...ps.velocity].map(f64Hex),
+    ps.viewYaw,
+    ps.viewPitch,
+    ps.flags,
+    ps.groundEntity,
+    ps.waterLevel,
+    ps.stamina,
+  ];
+  return [...input.map(f64Hex), ...out].join(" ");
+}
+
+function userCmdRow(input: number[]): string {
+  const cmd = new UserCmd();
+  const [tick, buttons, forward, right, up, yaw, pitch, weaponSlot] = input as [
+    number,
+    number,
+    number,
+    number,
+    number,
+    number,
+    number,
+    number,
+  ];
+  cmd.tick = tick;
+  cmd.buttons = buttons;
+  cmd.forward = forward;
+  cmd.right = right;
+  cmd.up = up;
+  cmd.yaw = yaw;
+  cmd.pitch = pitch;
+  cmd.weaponSlot = weaponSlot;
+  sanitizeUserCmd(cmd);
+  const out = [
+    cmd.tick,
+    cmd.buttons,
+    cmd.forward,
+    cmd.right,
+    cmd.up,
+    cmd.yaw,
+    cmd.pitch,
+    cmd.weaponSlot,
+  ];
+  return [...input.map(f64Hex), ...out].join(" ");
+}
+
 function section(name: string, doc: string, rows: string[]): string {
   return [
     `/** ${doc} */`,
@@ -190,6 +355,9 @@ export function renderDeterminismVectors(): string {
     hashes.push([s, a, b, c, d, hash32(s, a, b, c, d)].map(u32Hex).join(" "));
   }
 
+  const playerStates = withoutAsserts(() => playerStateInputs().map(playerStateRow));
+  const userCmds = userCmdInputs().map(userCmdRow);
+
   return [
     "// GENERATED by packages/tools/src/vectors/determinism.ts. Do not edit by hand.",
     "// Regenerate with `pnpm --filter @game/tools vectors`. A diff here means the sim's math",
@@ -213,5 +381,15 @@ export function renderDeterminismVectors(): string {
       draws,
     ),
     section("HASH32_VECTORS", "seed, a, b, c, d, hash32(seed, a, b, c, d)", hashes),
+    section(
+      "PLAYER_STATE_QUANT_VECTORS",
+      "12 PlayerState fields in declaration order, then after quantizePlayerState with DEV_ASSERT off: origin and velocity (f64), viewYaw, viewPitch, flags, groundEntity, waterLevel, stamina (decimal)",
+      playerStates,
+    ),
+    section(
+      "USERCMD_SANITIZE_VECTORS",
+      "8 UserCmd fields in declaration order (tick, buttons, forward, right, up, yaw, pitch, weaponSlot), then the same fields after sanitizeUserCmd (decimal)",
+      userCmds,
+    ),
   ].join("\n");
 }

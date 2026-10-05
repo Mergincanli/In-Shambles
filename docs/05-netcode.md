@@ -99,6 +99,12 @@ Each UserCmd (~12 bytes):
 - `fireSubtick` (u8, optional)
 - `viewInterpTick` (u32 + u8 fraction), only when attack is held; used by lag compensation (§7)
 
+**Pinned down in M1** (D-018, `packages/shared/src/sim/usercmd.ts`; `sanitizeUserCmd` forces every received cmd into these ranges):
+- `buttons` bits 0–11 are attack … drop in the order listed above; bits 12–15 are spare. "kick-eligible" is not a button for now: it reads as state derived from the player and weapon, and is decided with the kick in M4.
+- `forward`, `right` and `up` are clamped to ±127 (never −128); `pitch` to ±89° (±16201 units).
+- `weaponSlot` is 0–7: the knife plus the seven loadout slots of `docs/04` §9. Which index is which is decided with weapon switching.
+- `tick` stays within 0…2^30 − 1.
+
 The `INPUT` packet carries:
 - `packetSeq` (u16)
 - `lastSnapshotTick` (u32): **ack** for delta baselines

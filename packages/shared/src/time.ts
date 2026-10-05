@@ -4,6 +4,9 @@
  */
 export const TICK_RATE = 60;
 
+/** The largest tick the sim accepts: 2^30 − 1. */
+export const TICK_MAX = 0x3fffffff;
+
 /** The one dt constant: every sim step uses this value, never a measured frame time. */
 export const TICK_DT = 1 / TICK_RATE;
 

@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import { setDevAsserts } from "../src/debug/assert";
 import { cosU16, dcos, dsin, sinU16 } from "../src/math/dtrig";
 import {
   degreesToU16,
@@ -8,6 +9,8 @@ import {
 } from "../src/math/quant";
 import { hash32 } from "../src/rng/hash32";
 import { Mulberry32 } from "../src/rng/mulberry32";
+import { PlayerState, quantizePlayerState } from "../src/sim/playerState";
+import { sanitizeUserCmd, UserCmd } from "../src/sim/usercmd";
 import { f64ToHex, hexToF64 } from "./helpers/f64";
 import {
   DEGREES_TO_U16_VECTORS,
@@ -15,10 +18,12 @@ import {
   HASH32_VECTORS,
   MULBERRY32_DRAW_VECTORS,
   MULBERRY32_VECTORS,
+  PLAYER_STATE_QUANT_VECTORS,
   QUANT_ORIGIN_VECTORS,
   QUANT_STAMINA_VECTORS,
   QUANT_VELOCITY_VECTORS,
   U16_TRIG_VECTORS,
+  USERCMD_SANITIZE_VECTORS,
 } from "./vectors/determinism";
 
 // Risk 2 of the M1 plan: the committed vectors pin the exact bits of the D-016 math. This test
@@ -36,6 +41,8 @@ function mismatches(rows: readonly string[], recompute: (f: string[]) => string)
 }
 
 describe("determinism vectors (D-016)", () => {
+  afterEach(() => setDevAsserts(true));
+
   it.each([
     ["DTRIG_VECTORS", DTRIG_VECTORS, 150],
     ["U16_TRIG_VECTORS", U16_TRIG_VECTORS, 256],
@@ -46,6 +53,8 @@ describe("determinism vectors (D-016)", () => {
     ["MULBERRY32_VECTORS", MULBERRY32_VECTORS, 64],
     ["MULBERRY32_DRAW_VECTORS", MULBERRY32_DRAW_VECTORS, 32],
     ["HASH32_VECTORS", HASH32_VECTORS, 16],
+    ["PLAYER_STATE_QUANT_VECTORS", PLAYER_STATE_QUANT_VECTORS, 20],
+    ["USERCMD_SANITIZE_VECTORS", USERCMD_SANITIZE_VECTORS, 20],
   ])("%s has its rows", (_name, rows, min) => {
     expect(rows.length).toBeGreaterThanOrEqual(min);
   });
@@ -103,6 +112,46 @@ describe("determinism vectors (D-016)", () => {
     const got = mismatches(HASH32_VECTORS, (f) => {
       const h = hash32(u32(f[0]), u32(f[1]), u32(f[2]), u32(f[3]), u32(f[4]));
       return `${f.slice(0, 5).join(" ")} ${h.toString(16).padStart(8, "0")}`;
+    });
+    expect(got).toEqual([]);
+  });
+
+  it("quantizePlayerState (prod path: DEV_ASSERT off)", () => {
+    setDevAsserts(false);
+    const ps = new PlayerState();
+    const got = mismatches(PLAYER_STATE_QUANT_VECTORS, (f) => {
+      const x = (i: number) => f64(f[i]);
+      ps.origin.set([x(0), x(1), x(2)]);
+      ps.velocity.set([x(3), x(4), x(5)]);
+      ps.viewYaw = x(6);
+      ps.viewPitch = x(7);
+      ps.flags = x(8);
+      ps.groundEntity = x(9);
+      ps.waterLevel = x(10);
+      ps.stamina = x(11);
+      quantizePlayerState(ps);
+      const vectors = [...ps.origin, ...ps.velocity].map(f64ToHex);
+      const ints = [ps.viewYaw, ps.viewPitch, ps.flags, ps.groundEntity, ps.waterLevel, ps.stamina];
+      return [...f.slice(0, 12), ...vectors, ...ints].join(" ");
+    });
+    expect(got).toEqual([]);
+  });
+
+  it("sanitizeUserCmd", () => {
+    const cmd = new UserCmd();
+    const got = mismatches(USERCMD_SANITIZE_VECTORS, (f) => {
+      const x = (i: number) => f64(f[i]);
+      cmd.tick = x(0);
+      cmd.buttons = x(1);
+      cmd.forward = x(2);
+      cmd.right = x(3);
+      cmd.up = x(4);
+      cmd.yaw = x(5);
+      cmd.pitch = x(6);
+      cmd.weaponSlot = x(7);
+      sanitizeUserCmd(cmd);
+      const out = [cmd.tick, cmd.buttons, cmd.forward, cmd.right, cmd.up, cmd.yaw, cmd.pitch];
+      return [...f.slice(0, 8), ...out, cmd.weaponSlot].join(" ");
     });
     expect(got).toEqual([]);
   });

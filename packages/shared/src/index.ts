@@ -8,4 +8,8 @@ export * from "./math/quant";
 export * from "./math/vec3";
 export * from "./rng/hash32";
 export * from "./rng/mulberry32";
+export * from "./sim/entity";
+export * from "./sim/hull";
+export * from "./sim/playerState";
+export * from "./sim/usercmd";
 export * from "./time";

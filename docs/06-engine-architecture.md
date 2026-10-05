@@ -43,8 +43,10 @@ packages/shared/src/
     trace.ts           traceBox(start, end, mins, maxs, mask) → {fraction, endpos, plane, contents, entity, startSolid, allSolid}
     contents.ts        SOLID, PLAYERCLIP, WATER, LADDER, SLICK, NODAMAGE, TRIGGER…
   sim/
-    playerState.ts     PlayerState struct + quantize()
-    usercmd.ts         UserCmd struct
+    entity.ts          ENTITY_NONE (−1), ENTITY_WORLD (32767)
+    hull.ts            player hulls (docs/03 §2)
+    playerState.ts     PlayerState struct + quantize(), PlayerStateRing (128 ticks)
+    usercmd.ts         UserCmd struct + sanitize(), BUTTON_* bits
     pmove/             cmdScale, friction, accelerate, walk, air, water, ladder, slideMove,
                        stepSlideMove, groundTrace, crouch, jump  (docs/03 §4)
     urt/               sprint, stamina, wallJump, powerSlide, ledgeGrab, fall, goomba, kick (docs/03 §5)
