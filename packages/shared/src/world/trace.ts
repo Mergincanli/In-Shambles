@@ -1,5 +1,5 @@
 import { DEV_ASSERT } from "../debug/assert";
-import { ORIGIN_LIMIT, ORIGIN_SCALE, quantizeOrigin } from "../math/quant";
+import { ORIGIN_LIMIT, ORIGIN_SCALE, quantizeOriginVec3 } from "../math/quant";
 import { type Vec3, vec3 } from "../math/vec3";
 import { ENTITY_NONE, ENTITY_WORLD } from "../sim/entity";
 import type { CollisionWorld } from "./collisionWorld";
@@ -763,10 +763,6 @@ export const SNAP_PREVIOUS = 2;
 const snapPoint: Vec3 = vec3();
 const cornerDistSq = new Float64Array(8);
 
-function clampOrigin(x: number): number {
-  return x < -ORIGIN_LIMIT ? -ORIGIN_LIMIT : x > ORIGIN_LIMIT ? ORIGIN_LIMIT : x;
-}
-
 /**
  * End-of-tick origin snap (D-017): the nearest clear 1/32 u grid point. Plain rounding moves a
  * box resting in the ε skin of a slope or rotated wall by up to √3/64 along the normal, and over
@@ -794,9 +790,10 @@ export function snapOrigin(
   DEV_ASSERT(valid, "snapOrigin needs a position within TRACE_COORD_LIMIT");
   if (valid) {
     const p = snapPoint;
-    p[0] = quantizeOrigin(x);
-    p[1] = quantizeOrigin(y);
-    p[2] = quantizeOrigin(z);
+    p[0] = x;
+    p[1] = y;
+    p[2] = z;
+    quantizeOriginVec3(p);
     if (positionTest(world, p, mins, maxs, mask)) {
       out[0] = p[0];
       out[1] = p[1];
@@ -806,9 +803,10 @@ export function snapOrigin(
     const rx = p[0];
     const ry = p[1];
     const rz = p[2];
-    const cx = clampOrigin(x);
-    const cy = clampOrigin(y);
-    const cz = clampOrigin(z);
+    // Clamped inline: a helper call the JIT leaves out of line boxes its double result.
+    const cx = Math.max(-ORIGIN_LIMIT, Math.min(ORIGIN_LIMIT, x));
+    const cy = Math.max(-ORIGIN_LIMIT, Math.min(ORIGIN_LIMIT, y));
+    const cz = Math.max(-ORIGIN_LIMIT, Math.min(ORIGIN_LIMIT, z));
     const x0 = (Math.floor(cx * ORIGIN_SCALE) + 0) / ORIGIN_SCALE;
     const x1 = (Math.ceil(cx * ORIGIN_SCALE) + 0) / ORIGIN_SCALE;
     const y0 = (Math.floor(cy * ORIGIN_SCALE) + 0) / ORIGIN_SCALE;
