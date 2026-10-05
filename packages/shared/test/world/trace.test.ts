@@ -396,6 +396,21 @@ describe("corners and edges", () => {
     expect([...r.normal]).toEqual([-1, 0, 0]);
   });
 
+  it("entering and leaving at the same t is a miss (strict tEnter < tLeave, A.4)", () => {
+    // Reaches the −x skin plane (x = −ε) and leaves the +y one (y = 1 + ε) both at t = 15/32.
+    const unit = worldOf(brush(boxPlanes([0, 0, -1], [1, 1, 1])));
+    const start = v(-0.5, 0.53125, 0);
+    const end = v(0.5, 1.53125, 0);
+    const r = new TraceResult();
+    traceRay(unit, start, end, MASK_PLAYERSOLID, r);
+    expect(r.fraction).toBe(1);
+    traceBoxBrute(unit, start, end, ZERO, ZERO, MASK_PLAYERSOLID, r);
+    expect(r.fraction).toBe(1);
+    // A hair later on the way out, it is a hit.
+    traceRay(unit, start, v(0.5, 1.53125 - 1 / 1024, 0), MASK_PLAYERSOLID, r);
+    expect(r.fraction).toBeLessThan(1);
+  });
+
   it("the top edge: sliding over at ε clears it, skimming below it hits", () => {
     expect(trace(block, v(-100, 32, 64 + 24 + EPS), v(200, 32, 64 + 24 + EPS)).fraction).toBe(1);
     const r = trace(block, v(-100, 32, 64 + 24 - 1 / 64), v(200, 32, 64 + 24 - 1 / 64));
@@ -694,6 +709,14 @@ describe("robustness", () => {
     expect(() =>
       traceBox(floorWorld, v(0, 0, 0), v(0, 0, 0), STAND, MINS, MASK_SOLID, out),
     ).toThrow(DevAssertError);
+    // Each axis is checked on its own.
+    for (let axis = 0; axis < 3; axis++) {
+      const inverted = v(STAND[0], STAND[1], STAND[2]);
+      inverted[axis] = (MINS[axis] as number) - 1;
+      expect(() =>
+        traceBox(floorWorld, v(0, 0, 0), v(0, 0, 0), MINS, inverted, MASK_SOLID, out),
+      ).toThrow(DevAssertError);
+    }
     expect(() => positionTest(floorWorld, bad, MINS, STAND, MASK_SOLID)).toThrow(DevAssertError);
     setDevAsserts(false);
     traceBox(

@@ -13,6 +13,7 @@ import {
   SNAP_PREVIOUS,
   SNAP_ROUNDED,
   snapOrigin,
+  TRACE_COORD_LIMIT,
   TraceResult,
   traceBox,
 } from "../../src/world/trace";
@@ -270,13 +271,22 @@ describe("snapOrigin rules", () => {
     expect(out).toEqual(prev);
   });
 
-  it("asserts on a non-finite position; with asserts off keeps last tick's origin", () => {
-    const out = v();
+  it("asserts on a non-finite or out-of-range position; with asserts off keeps last tick's origin", () => {
     const prev = v(5, 6, 30);
-    const bad = v(Number.NaN, 0, 0);
-    expect(() => snapOrigin(floor, bad, MINS, STAND, MASK, prev, out)).toThrow(DevAssertError);
+    // In clear air, so only the input check keeps them off the grid point they would round to.
+    const bads = [
+      v(Number.NaN, 0, 100),
+      v(0, Number.POSITIVE_INFINITY, 100),
+      v(2 * TRACE_COORD_LIMIT, 0, 100),
+    ];
+    for (const bad of bads) {
+      expect(() => snapOrigin(floor, bad, MINS, STAND, MASK, prev, v())).toThrow(DevAssertError);
+    }
     setDevAsserts(false);
-    expect(snapOrigin(floor, bad, MINS, STAND, MASK, prev, out)).toBe(SNAP_PREVIOUS);
-    expect(out).toEqual(prev);
+    for (const bad of bads) {
+      const out = v();
+      expect(snapOrigin(floor, bad, MINS, STAND, MASK, prev, out)).toBe(SNAP_PREVIOUS);
+      expect(out).toEqual(prev);
+    }
   });
 });
