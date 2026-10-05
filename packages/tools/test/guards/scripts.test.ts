@@ -142,13 +142,18 @@ function filteredRuns(command: string) {
 }
 
 describe("root scripts", () => {
-  it("include every command in the CLAUDE.md commands table", () => {
+  it("match the CLAUDE.md commands table, row for script", () => {
     const table = claudeMd.split("## Commands")[1]?.split("\n## ")[0] ?? "";
     const commands = [...table.matchAll(/^\| `pnpm ([a-z:-]+)/gm)].map((m) => m[1] ?? "");
     expect(commands.length).toBeGreaterThan(10);
-    for (const name of commands.filter((c) => c !== "install")) {
-      expect(Object.keys(rootScripts), `pnpm ${name}`).toContain(name);
-    }
+    // `install` is the pnpm built-in. Scripts left out of the table on purpose go here.
+    const tableOnly = ["install"];
+    const undocumented: string[] = [];
+    expect(commands.filter((c) => !tableOnly.includes(c)).sort()).toEqual(
+      Object.keys(rootScripts)
+        .filter((s) => !undocumented.includes(s))
+        .sort(),
+    );
   });
 
   it("never use a pnpm built-in command name (D-015)", () => {

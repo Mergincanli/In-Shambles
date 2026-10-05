@@ -1,4 +1,7 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   boxContents,
   buildBrush,
@@ -246,6 +249,34 @@ describe("greybox courses: compiled files", () => {
       expect(sameBytes(bytes, new Uint8Array(readFileSync(path))), stale).toBe(true);
     },
   );
+
+  it("pnpm greybox writes exactly the committed files", () => {
+    const out = mkdtempSync(join(tmpdir(), "greybox-"));
+    try {
+      const run = spawnSync(
+        process.execPath,
+        ["--import", "tsx", "src/greybox/cli.ts", "--out", out],
+        { cwd: fromRoot("packages", "tools"), encoding: "utf8" },
+      );
+      expect(run.status, run.stderr).toBe(0);
+      const names = COURSES.map((c) => courseFileName(c.name));
+      expect(readdirSync(out).sort()).toEqual([...names].sort());
+      for (const c of COURSES) {
+        const written = new Uint8Array(readFileSync(join(out, courseFileName(c.name))));
+        expect(
+          sameBytes(written, new Uint8Array(readFileSync(committedPath(c.name)))),
+          c.name,
+        ).toBe(true);
+      }
+    } finally {
+      rmSync(out, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it("are binary to git, so no line-ending conversion can touch them", () => {
+    const attributes = readFileSync(fromRoot(".gitattributes"), "utf8");
+    expect(attributes).toMatch(/^\*\.cmap\s+binary\s*$/m);
+  });
 
   it.each(COURSES.map((c) => c.name))("%s decodes with its hash verified", (name) => {
     const bytes = new Uint8Array(readFileSync(committedPath(name)));
