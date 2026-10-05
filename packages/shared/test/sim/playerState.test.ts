@@ -289,6 +289,8 @@ describe("quantizePlayerState", () => {
     [2.5, 2],
     [WATER_LEVEL_MAX, WATER_LEVEL_MAX],
     [WATER_LEVEL_MAX + 0.5, WATER_LEVEL_MAX],
+    [WATER_LEVEL_MAX + 1, WATER_LEVEL_MAX],
+    [WATER_LEVEL_MAX + 1.5, WATER_LEVEL_MAX],
     [99, WATER_LEVEL_MAX],
   ])("clamps waterLevel %f to %i", (x, q) => {
     const ps = new PlayerState();

@@ -701,6 +701,26 @@ const rejections: readonly (readonly [string, () => Uint8Array, RegExp])[] = [
     /entities\[0\]\.props\["a"\] must be a string/,
   ],
   [
+    "entities that are not an array",
+    () => withJson(BYTES, (r) => (r.entities = { 0: r.entities })),
+    /^entities must be an array/,
+  ],
+  [
+    "materials that are not an array",
+    () => withJson(BYTES, (r) => (r.materials = "grey/floor")),
+    /^materials must be an array/,
+  ],
+  [
+    "entity brushes that are not an array",
+    () => withJson(BYTES, (r) => (entityOf(r, 0).brushes = 0)),
+    /entities\[0\]\.brushes must be an array/,
+  ],
+  [
+    "a JSON vector that is not an array",
+    () => withJson(BYTES, (r) => (entityOf(r, 0).origin = 24)),
+    /entities\[0\]\.origin must be an array/,
+  ],
+  [
     "a non-finite JSON number",
     () => withJsonText(BYTES, disassemble(BYTES).json.replace("[0,0,24]", "[0,0,1e999]")),
     /entities\[0\]\.origin\[2\] must be a finite number/,
