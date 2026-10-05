@@ -58,7 +58,7 @@ export default m.compile();
 |---|---|
 | `movement_lab` | flat runway (1024 u+), step ladder (16/18/19 u), slope set (normal.z 0.69/0.71/0.8), stairs, ladder, water pool (deep + wade), ceiling-height crouch tunnel |
 | `jump_lab` | gap series (64…320 u step 32), ledge heights (24…120 u step 8), wall-jump chimney (walls 64 u apart, 512 u tall), single-wall kick lanes at 15/30/45/60°, curb (24 u) to verify no kick |
-| `slide_lab` | long flat lane with distance markers, door frames (48 u wide), slide-under gaps (40 u high), ramp into slide |
+| `slide_lab` | long flat lane with distance markers, door frames (48 u wide), slide-under gaps (41–44 u high), ramp into slide |
 | `fall_tower` | platforms at 128/256/384/512/640/768/1024 u above a floor, water landing pool, ledge-grab catch rails |
 | `arena_greybox` | small combat map for netcode/combat tests: cover, verticality, 16 spawns |
 
@@ -147,7 +147,7 @@ Whatever is chosen: static lighting is baked or stylized. **Collision always sta
 | Step height | 18 u (anything taller needs a jump) |
 | Jump apex | ≈ 45 u (plain jump) |
 | Ledge-grab reach | per `pm_ledge*` (ESTIMATE: ledge top up to ~76 u above feet at grab time) |
-| Doors | ≥ 48 u wide × 96 u tall (comfortable); slide gaps 40–44 u high |
+| Doors | ≥ 48 u wide × 96 u tall (comfortable); slide gaps 41–44 u high (a crouched player rests 1/32 u above the floor, so 40 u blocks; D-017) |
 | Corridors | ≥ 64 u wide (two players can't pass in < 64) |
 | Walls meant for wall jumps | ≥ 64 u tall, flat, vertical |
 | Floor textures | footstep material via texture name prefix (`concrete_`, `metal_`, `wood_`, `grass_`, `water_`) |

@@ -18,3 +18,4 @@ export * from "./world/collisionWorld";
 export * from "./world/contents";
 export * from "./world/polygonize";
 export * from "./world/shapes";
+export * from "./world/trace";

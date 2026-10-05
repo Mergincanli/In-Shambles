@@ -44,7 +44,8 @@ packages/shared/src/
     brushValidate.ts   brush build errors, thresholds and the topology/geometry checks
     brushBuild.ts      polygonize + axial bevels + bounds (build time)
     bvh.ts             static BVH over brush bounds
-    trace.ts           traceBox(start, end, mins, maxs, mask) → {fraction, endpos, plane, contents, entity, startSolid, allSolid}
+    trace.ts           traceBox / traceRay → TraceResult {fraction, endpos, plane, contents, entity, startSolid, allSolid};
+                       positionTest, pointContents, boxContents, snapOrigin (ε = 1/32, D-017)
     contents.ts        SOLID, PLAYERCLIP, WATER, LADDER, SLICK, NODAMAGE, TRIGGER, NODRAW; SURF_* flags
   sim/
     entity.ts          ENTITY_NONE (−1), ENTITY_WORLD (32767)
@@ -127,7 +128,7 @@ DEV / OFFLINE                                  ONLINE
 
 - **Entity store:** id-indexed arrays per component (position, velocity, stance, team, health…), not class hierarchies. Players have a `PlayerState` struct (`docs/03` §6) that is cloned only into preallocated history slots.
 - **Collision:**
-  - World = convex **brushes** (plane sets). Traces are swept AABB vs. brush, plane-by-plane: compute enter/exit fractions with an epsilon, Q3-style "box vs. planes" by expanding planes by the box extents.
+  - World = convex **brushes** (plane sets). Traces are swept AABB vs. brush, plane-by-plane: entering fractions stop ε = 1/32 u short and leaving fractions are exact (D-017), Q3-style "box vs. planes" by expanding planes by the box extents.
   - Broadphase = static BVH over brush bounds. Players are dynamic AABBs (current state only for movement; rewound poses only for hit rays).
   - Never collide movement against triangle soups; render meshes are not collision.
 - **Rays (bullets):** ray vs. brushes (world) → nearest; then ray vs. player zone volumes (lag-compensated) → nearest player hit before the world hit.

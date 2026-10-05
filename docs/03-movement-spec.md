@@ -98,6 +98,8 @@ The **order matters**: on a grounded tick the jump check happens **before** fric
 
 ## 4. Base algorithms (Q3-style, our wording)
 
+**Trace contract** (D-017, `packages/shared/src/world/trace.ts`). Every hull trace below sweeps the box against brushes and stops ε = 1/32 u short of the surface it hits, so on a flat floor the player rests at floor + 1/32 u, which the step, crouch and gap metrics in `docs/07` §6 account for. A box that exactly touches a brush is outside it. A move that does not approach a plane never collides with it, so sliding along a face, or inside the 1/32 u skin, is free; a move that approaches a plane from inside the skin stops at once without `startSolid`. On slopes and angled walls a move meant to run exactly along the plane can round to approaching it by a few ulps and stop that way, so the slide move gets off a plane through the overclip (§4.7) and the same-plane nudge (§4.8), never through exact tangency.
+
 ### 4.1 Command scale (no faster diagonals)
 Let `f`, `r`, `u` = forwardmove, rightmove, upmove (−127..127).
 - If all are 0: scale = 0.
@@ -375,7 +377,7 @@ Return whether any plane was hit (used by step-slide).
 | `movementEvents` | small ring | footstep, jump, land(impact), wallkick, grab, slideStart/End, fallDamage, goomba |
 
 **Quantize at the end of every tick:**
-- origin to the nearest 1/32 u
+- origin to the nearest clear 1/32 u grid point (D-017): the rounded point if the hull fits there, else the nearest clear corner of the grid cell, else last tick's origin
 - velocity to the nearest 1/16 u/s
 - stamina to 0.01
 

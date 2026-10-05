@@ -120,13 +120,15 @@ The `INPUT` packet carries:
 ### 4.1 End-of-tick quantization (both sides, every tick)
 | Quantity | Quantum | Storage |
 |---|---|---|
-| Origin | 1/32 u | i32 per axis |
+| Origin | 1/32 u (nearest clear grid point, D-017) | i32 per axis |
 | Velocity | 1/16 u/s | i32 (or i20 packed) |
 | Angles | 360/65536° | u16 |
 | Stamina | 0.01 | u16 |
 | Timers | 1 ms or ticks | u16 |
 
 Because both client and server quantize identically, a correctly predicted state equals the authoritative one **bit for bit**. Mismatch detection is exact.
+
+The origin is not simply rounded: pmove snaps it to the nearest clear 1/32 u grid point (`snapOrigin`, D-017), because plain rounding drifts a player sliding along a slope or angled wall into solid. The snap is deterministic and tests world brushes only, so it predicts like everything else. The codec still sends the plain 1/32 u value.
 
 ### 4.2 Snapshot layout
 - **Header:**
