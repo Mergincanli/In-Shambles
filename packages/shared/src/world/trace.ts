@@ -9,8 +9,9 @@ import type { CollisionWorld } from "./collisionWorld";
  * every plane; touching (= d) is outside. Each plane is pushed out by the box's reach along its
  * normal, so the box becomes a point; entering times stop ε short of the expanded plane and
  * leaving times are exact, which in exact math lets a box touch a brush but never enter one
- * (A.7). Nothing here allocates: results go into caller-owned TraceResults and the module keeps
- * one scratch `work` record, so these functions are synchronous and non-reentrant.
+ * (A.7). Queries walk the world's BVH to find candidate brushes (C). Nothing here allocates:
+ * results go into caller-owned TraceResults, the module keeps one scratch `work` record and each
+ * world one traversal stack, so these functions are synchronous and non-reentrant.
  */
 
 /**
@@ -26,6 +27,21 @@ export const TRACE_EPSILON = 1 / 32;
  * rounding first eats the skin and then whole brushes, so such input is rejected like NaN.
  */
 export const TRACE_COORD_LIMIT = 1048576;
+
+/**
+ * How far BVH node and brush bounds are grown before culling: ε, where a trace can stop outside
+ * a brush's bounds, plus 1/32 u of slack for rounding in the culling tests (C).
+ */
+const BVH_MARGIN = 1 / 16;
+
+/** Traces moving farther than this along some axis also clip their path against node bounds. */
+const SLAB_MIN_DELTA = 64;
+
+/**
+ * Axes the center moves less than this along are slab-tested as standing still: the error stays
+ * far inside BVH_MARGIN's slack, and 1/Δ stays finite.
+ */
+const SLAB_STILL = 1 / 1024;
 
 /** What a trace found. Fields are assigned in declaration order so every result has one shape. */
 export class TraceResult {
@@ -91,6 +107,23 @@ class TraceWork {
   startContents = 0;
   startSolid = false;
   allSolid = false;
+  // BVH query box in origin space, grown by BVH_MARGIN (C, node test 1).
+  qx0 = 0;
+  qy0 = 0;
+  qz0 = 0;
+  qx1 = 0;
+  qy1 = 0;
+  qz1 = 0;
+  // Long traces: 1/Δ of the center path per axis, 0 for axes slab-tested as still (node test 2).
+  slab = false;
+  ix = 0;
+  iy = 0;
+  iz = 0;
+  /** Bit k set when the path runs toward −k, so traversal visits right (high) children first. */
+  negMask = 0;
+  // Work done by the last BVH query: nodes tested and brushes handed to the per-brush test.
+  walkNodes = 0;
+  walkBrushes = 0;
 }
 
 const work = new TraceWork();
@@ -303,7 +336,236 @@ export function traceBoxBrute(
   finishTrace(world, start, end, out);
 }
 
-/** The trace pmove and hit tests call; brute force until the BVH replaces the brush loop. */
+/** BVH query kinds: what walkBvh does with each candidate brush. */
+const WALK_TRACE = 0;
+const WALK_POSITION_ANY = 1;
+const WALK_POSITION_ALL = 2;
+const WALK_BOX = 3;
+
+/** Node test 1 and the per-brush cull use this box: [min(S, E) + mins − m, max(S, E) + maxs + m]. */
+function setQueryBox(start: Vec3, end: Vec3, mins: Vec3, maxs: Vec3): void {
+  const w = work;
+  w.qx0 = (start[0] < end[0] ? start[0] : end[0]) + mins[0] - BVH_MARGIN;
+  w.qy0 = (start[1] < end[1] ? start[1] : end[1]) + mins[1] - BVH_MARGIN;
+  w.qz0 = (start[2] < end[2] ? start[2] : end[2]) + mins[2] - BVH_MARGIN;
+  w.qx1 = (start[0] > end[0] ? start[0] : end[0]) + maxs[0] + BVH_MARGIN;
+  w.qy1 = (start[1] > end[1] ? start[1] : end[1]) + maxs[1] + BVH_MARGIN;
+  w.qz1 = (start[2] > end[2] ? start[2] : end[2]) + maxs[2] + BVH_MARGIN;
+  w.slab = false;
+  w.ix = 0;
+  w.iy = 0;
+  w.iz = 0;
+  w.negMask = 0;
+}
+
+/** Traversal order for every trace, and node test 2 for long ones (C). Call after beginTrace. */
+function setTracePath(start: Vec3, end: Vec3): void {
+  const w = work;
+  const dx = w.ex - w.sx;
+  const dy = w.ey - w.sy;
+  const dz = w.ez - w.sz;
+  w.negMask = (dx < 0 ? 1 : 0) | (dy < 0 ? 2 : 0) | (dz < 0 ? 4 : 0);
+  const mx = end[0] - start[0];
+  const my = end[1] - start[1];
+  const mz = end[2] - start[2];
+  if (
+    mx > SLAB_MIN_DELTA ||
+    mx < -SLAB_MIN_DELTA ||
+    my > SLAB_MIN_DELTA ||
+    my < -SLAB_MIN_DELTA ||
+    mz > SLAB_MIN_DELTA ||
+    mz < -SLAB_MIN_DELTA
+  ) {
+    // Inline rather than a helper: a double returned from a call that is not inlined gets boxed.
+    w.slab = true;
+    w.ix = dx < SLAB_STILL && dx > -SLAB_STILL ? 0 : 1 / dx;
+    w.iy = dy < SLAB_STILL && dy > -SLAB_STILL ? 0 : 1 / dy;
+    w.iz = dz < SLAB_STILL && dz > -SLAB_STILL ? 0 : 1 / dz;
+  }
+}
+
+/**
+ * Node test 2: whether the center path S′ → E′ enters node bounds grown by h + m (offset o in
+ * nodeBounds) no later than the nearest hit so far. A brush's hit point lies inside its bounds
+ * grown by h + ε, so a node entered only after the best hit cannot beat it; strictly later is
+ * pruned, which keeps equal-time hits for the brush-index tie break.
+ */
+function slabReaches(nb: Float64Array, o: number): boolean {
+  const w = work;
+  let t0 = 0;
+  let t1 = w.fraction;
+  let lo = (nb[o] as number) - w.hx - BVH_MARGIN;
+  let hi = (nb[o + 3] as number) + w.hx + BVH_MARGIN;
+  let inv = w.ix;
+  if (inv === 0) {
+    if (w.sx < lo || w.sx > hi) return false;
+  } else {
+    const ta = (lo - w.sx) * inv;
+    const tb = (hi - w.sx) * inv;
+    if (inv > 0) {
+      if (ta > t0) t0 = ta;
+      if (tb < t1) t1 = tb;
+    } else {
+      if (tb > t0) t0 = tb;
+      if (ta < t1) t1 = ta;
+    }
+    if (t0 > t1) return false;
+  }
+  lo = (nb[o + 1] as number) - w.hy - BVH_MARGIN;
+  hi = (nb[o + 4] as number) + w.hy + BVH_MARGIN;
+  inv = w.iy;
+  if (inv === 0) {
+    if (w.sy < lo || w.sy > hi) return false;
+  } else {
+    const ta = (lo - w.sy) * inv;
+    const tb = (hi - w.sy) * inv;
+    if (inv > 0) {
+      if (ta > t0) t0 = ta;
+      if (tb < t1) t1 = tb;
+    } else {
+      if (tb > t0) t0 = tb;
+      if (ta < t1) t1 = ta;
+    }
+    if (t0 > t1) return false;
+  }
+  lo = (nb[o + 2] as number) - w.hz - BVH_MARGIN;
+  hi = (nb[o + 5] as number) + w.hz + BVH_MARGIN;
+  inv = w.iz;
+  if (inv === 0) return w.sz >= lo && w.sz <= hi;
+  const ta = (lo - w.sz) * inv;
+  const tb = (hi - w.sz) * inv;
+  if (inv > 0) {
+    if (ta > t0) t0 = ta;
+    if (tb < t1) t1 = tb;
+  } else {
+    if (tb > t0) t0 = tb;
+    if (ta < t1) t1 = ta;
+  }
+  return t0 <= t1;
+}
+
+/**
+ * Walks the BVH and hands every masked brush whose bounds meet the query box to the query `kind`
+ * (C). Iterative: the far child goes on the world's stack and the near one is visited next, so the
+ * stack never holds more than one entry per level (BVH_MAX_DEPTH < BVH_STACK_SIZE). Returns the
+ * OR of matching contents for the position and box kinds; traces fold into `work` instead.
+ */
+function walkBvh(
+  world: CollisionWorld,
+  mask: number,
+  kind: number,
+  absMins: Vec3,
+  absMaxs: Vec3,
+): number {
+  const bvh = world.bvh;
+  const nodeCount = bvh.nodeCount;
+  const w = work;
+  w.walkNodes = 0;
+  w.walkBrushes = 0;
+  if (nodeCount.length === 0) return 0;
+  const nb = bvh.nodeBounds;
+  const nodeFirst = bvh.nodeFirst;
+  const nodeAxis = bvh.nodeAxis;
+  const refs = bvh.leafRefs;
+  const stack = bvh.stack;
+  const bb = world.brushBounds;
+  const contents = world.brushContents;
+  const qx0 = w.qx0;
+  const qy0 = w.qy0;
+  const qz0 = w.qz0;
+  const qx1 = w.qx1;
+  const qy1 = w.qy1;
+  const qz1 = w.qz1;
+  const slab = kind === WALK_TRACE && w.slab;
+  const negMask = w.negMask;
+  let found = 0;
+  let sp = 0;
+  let node = 0;
+  let nodes = 0;
+  let brushes = 0;
+  for (;;) {
+    nodes++;
+    const o = 6 * node;
+    if (
+      (nb[o] as number) <= qx1 &&
+      (nb[o + 3] as number) >= qx0 &&
+      (nb[o + 1] as number) <= qy1 &&
+      (nb[o + 4] as number) >= qy0 &&
+      (nb[o + 2] as number) <= qz1 &&
+      (nb[o + 5] as number) >= qz0 &&
+      (!slab || slabReaches(nb, o))
+    ) {
+      const count = nodeCount[node] as number;
+      if (count === 0) {
+        if (((negMask >> (nodeAxis[node] as number)) & 1) !== 0) {
+          stack[sp++] = node + 1;
+          node = nodeFirst[node] as number;
+        } else {
+          stack[sp++] = nodeFirst[node] as number;
+          node = node + 1;
+        }
+        continue;
+      }
+      const first = nodeFirst[node] as number;
+      const last = first + count;
+      for (let i = first; i < last; i++) {
+        const b = refs[i] as number;
+        const c = contents[b] as number;
+        if ((c & mask) === 0) continue;
+        const p = 6 * b;
+        if (
+          (bb[p] as number) > qx1 ||
+          (bb[p + 3] as number) < qx0 ||
+          (bb[p + 1] as number) > qy1 ||
+          (bb[p + 4] as number) < qy0 ||
+          (bb[p + 2] as number) > qz1 ||
+          (bb[p + 5] as number) < qz0
+        ) {
+          continue;
+        }
+        brushes++;
+        if (kind === WALK_TRACE) {
+          clipBrush(world, b);
+        } else if (kind === WALK_BOX) {
+          if (brushOverlapsBox(world, b, absMins, absMaxs)) found |= c;
+        } else if (brushContainsBox(world, b)) {
+          found |= c;
+          if (kind === WALK_POSITION_ANY) {
+            // One holding brush settles the test: drop the rest of the walk.
+            sp = 0;
+            break;
+          }
+        }
+      }
+    }
+    if (sp === 0) {
+      w.walkNodes = nodes;
+      w.walkBrushes = brushes;
+      return found;
+    }
+    node = stack[--sp] as number;
+  }
+}
+
+/**
+ * Nodes tested by the last BVH walk (traceBox, positionTest, positionContents, pointContents or
+ * boxContents; rejected inputs do not walk): what culling saves, for tests and benchmarks.
+ */
+export function lastQueryNodes(): number {
+  return work.walkNodes;
+}
+
+/** Brushes the last BVH walk passed through its culling tests to the per-brush test. */
+export function lastQueryBrushes(): number {
+  return work.walkBrushes;
+}
+
+/**
+ * The trace pmove and hit tests call: traceBoxBrute's result bit for bit, with the BVH choosing
+ * which brushes to clip (C). Every brush that could start the box solid or be hit passes the
+ * culling tests, and the per-brush clip and tie break are traceBoxBrute's own, so visiting order
+ * and skipped brushes never show in the result.
+ */
 export function traceBox(
   world: CollisionWorld,
   start: Vec3,
@@ -313,7 +575,14 @@ export function traceBox(
   mask: number,
   out: TraceResult,
 ): void {
-  traceBoxBrute(world, start, end, mins, maxs, mask, out);
+  if (!beginTrace(start, end, mins, maxs)) {
+    rejectTrace(start, out);
+    return;
+  }
+  setQueryBox(start, end, mins, maxs);
+  setTracePath(start, end);
+  walkBvh(world, mask, WALK_TRACE, ZERO, ZERO);
+  finishTrace(world, start, end, out);
 }
 
 /** traceBox with a point: the same code with zero extents, so the bits match exactly. */
@@ -354,17 +623,14 @@ function brushContainsBox(world: CollisionWorld, b: number): boolean {
   return true;
 }
 
-/** OR of the contents of masked brushes holding the box; with `firstOnly`, stops at the first. */
-function scanPosition(world: CollisionWorld, mask: number, firstOnly: boolean): number {
+/** Brute-force reference for the position queries: every masked brush holding the box. */
+function scanPosition(world: CollisionWorld, mask: number): number {
   const contents = world.brushContents;
   const count = world.brushCount;
   let found = 0;
   for (let b = 0; b < count; b++) {
     const c = contents[b] as number;
-    if ((c & mask) !== 0 && brushContainsBox(world, b)) {
-      found |= c;
-      if (firstOnly) return found;
-    }
+    if ((c & mask) !== 0 && brushContainsBox(world, b)) found |= c;
   }
   return found;
 }
@@ -383,6 +649,7 @@ function beginPosition(origin: Vec3, mins: Vec3, maxs: Vec3): boolean {
   w.hx = (maxs[0] - mins[0]) * 0.5;
   w.hy = (maxs[1] - mins[1]) * 0.5;
   w.hz = (maxs[2] - mins[2]) * 0.5;
+  if (ok) setQueryBox(origin, origin, mins, maxs);
   return ok;
 }
 
@@ -400,7 +667,7 @@ export function positionTest(
   mask: number,
 ): boolean {
   if (!beginPosition(origin, mins, maxs)) return false;
-  return scanPosition(world, mask, true) === 0;
+  return walkBvh(world, mask, WALK_POSITION_ANY, ZERO, ZERO) === 0;
 }
 
 /**
@@ -415,13 +682,25 @@ export function positionContents(
   mask: number,
 ): number {
   if (!beginPosition(origin, mins, maxs)) return mask >>> 0;
-  return scanPosition(world, mask, false);
+  return walkBvh(world, mask, WALK_POSITION_ALL, ZERO, ZERO);
+}
+
+/** positionContents without the BVH: the reference the BVH queries must match. */
+export function positionContentsBrute(
+  world: CollisionWorld,
+  origin: Vec3,
+  mins: Vec3,
+  maxs: Vec3,
+  mask: number,
+): number {
+  if (!beginPosition(origin, mins, maxs)) return mask >>> 0;
+  return scanPosition(world, mask);
 }
 
 /** OR of the contents of every brush strictly containing p (water level samples, docs/03 §4.13). */
 export function pointContents(world: CollisionWorld, p: Vec3): number {
   if (!beginPosition(p, ZERO, ZERO)) return 0;
-  return scanPosition(world, ALL_CONTENTS, false);
+  return walkBvh(world, ALL_CONTENTS, WALK_POSITION_ALL, ZERO, ZERO);
 }
 
 /**
@@ -446,14 +725,26 @@ function brushOverlapsBox(world: CollisionWorld, b: number, absMins: Vec3, absMa
   return true;
 }
 
+function validContentsBox(absMins: Vec3, absMaxs: Vec3): boolean {
+  const ok = validBox(absMins, absMaxs);
+  DEV_ASSERT(ok, "boxContents needs bounds within TRACE_COORD_LIMIT with mins <= maxs");
+  return ok;
+}
+
 /**
  * OR of the contents of every brush whose interior overlaps the open box (absMins, absMaxs), in
  * world coordinates (ladder and trigger volumes). Boxes that only touch do not overlap.
  */
 export function boxContents(world: CollisionWorld, absMins: Vec3, absMaxs: Vec3): number {
-  const ok = validBox(absMins, absMaxs);
-  DEV_ASSERT(ok, "boxContents needs bounds within TRACE_COORD_LIMIT with mins <= maxs");
-  if (!ok) return 0;
+  if (!validContentsBox(absMins, absMaxs)) return 0;
+  // A query box at the origin with the absolute bounds as its extents.
+  setQueryBox(ZERO, ZERO, absMins, absMaxs);
+  return walkBvh(world, ALL_CONTENTS, WALK_BOX, absMins, absMaxs);
+}
+
+/** boxContents without the BVH: the reference the BVH query must match. */
+export function boxContentsBrute(world: CollisionWorld, absMins: Vec3, absMaxs: Vec3): number {
+  if (!validContentsBox(absMins, absMaxs)) return 0;
   const contents = world.brushContents;
   const count = world.brushCount;
   let found = 0;

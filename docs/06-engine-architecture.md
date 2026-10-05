@@ -43,9 +43,10 @@ packages/shared/src/
     polygonize.ts      planes → welded, validated face polygons (build time)
     brushValidate.ts   brush build errors, thresholds and the topology/geometry checks
     brushBuild.ts      polygonize + axial bevels + bounds (build time)
-    bvh.ts             static BVH over brush bounds
+    bvh.ts             static BVH over brush bounds: binned SAH, built at load, depth-first typed arrays
     trace.ts           traceBox / traceRay → TraceResult {fraction, endpos, plane, contents, entity, startSolid, allSolid};
-                       positionTest, pointContents, boxContents, snapOrigin (ε = 1/32, D-017)
+                       positionTest, pointContents, boxContents, snapOrigin (ε = 1/32, D-017); queries walk the
+                       BVH and match their brute-force references (traceBoxBrute, …) bit for bit
     contents.ts        SOLID, PLAYERCLIP, WATER, LADDER, SLICK, NODAMAGE, TRIGGER, NODRAW; SURF_* flags
   sim/
     entity.ts          ENTITY_NONE (−1), ENTITY_WORLD (32767)

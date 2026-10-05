@@ -1,5 +1,6 @@
 import { ORIGIN_LIMIT } from "../math/quant";
 import { BRUSH_NORMAL_EPSILON } from "./brushValidate";
+import { type Bvh, buildBvh } from "./bvh";
 import { CONTENTS_KNOWN, FOOTSTEP_COUNT, SURF_KNOWN, surfaceFootstep } from "./contents";
 
 /** One brush as a loader hands it over: a cmap record, or buildBrush() output plus contents. */
@@ -7,7 +8,12 @@ export interface CollisionBrushSource {
   /** nx, ny, nz, d per plane: faces first, then bevels. Every value must be an f32. */
   readonly planes: Float32Array | Float64Array;
   readonly faceCount: number;
-  /** [minx, miny, minz, maxx, maxy, maxz], f32 values within ±ORIGIN_LIMIT. */
+  /**
+   * [minx, miny, minz, maxx, maxy, maxz], f32 values within ±ORIGIN_LIMIT: exactly the distances
+   * of the brush's six axial planes (faces or bevels), as buildBrush emits them. The BVH culls by
+   * these bounds, so a brush reaching past them would make traceBox and traceBoxBrute disagree;
+   * createCollisionWorld refuses any other bounds.
+   */
   readonly bounds: Float32Array | Float64Array;
   /** CONTENTS_* bits, at least one. */
   readonly contents: number;
@@ -41,10 +47,16 @@ export class CollisionWorld {
   readonly brushContents: Uint32Array;
   /** 6 per brush: minx, miny, minz, maxx, maxy, maxz. */
   readonly brushBounds: Float64Array;
-  // The BVH over brushBounds (nodeBounds, nodeFirst, nodeCount, nodeAxis, leafRefs, traversal
-  // stack) is built at load time and joins here in increment 5.
+  /** Built over brushBounds in the constructor, so it always matches them. */
+  readonly bvh: Bvh;
 
-  constructor(brushCount: number, planeCount: number) {
+  /** `brushBounds` (6 per brush) is final: the BVH is built over it here. */
+  constructor(brushCount: number, planeCount: number, brushBounds: Float64Array) {
+    if (brushBounds.length !== 6 * brushCount) {
+      throw new CollisionWorldError(
+        `${brushBounds.length} bounds values for ${brushCount} brushes`,
+      );
+    }
     this.brushCount = brushCount;
     this.planeCount = planeCount;
     this.planes = new Float64Array(4 * planeCount);
@@ -53,7 +65,8 @@ export class CollisionWorld {
     this.brushPlaneCount = new Uint16Array(brushCount);
     this.brushFaceCount = new Uint16Array(brushCount);
     this.brushContents = new Uint32Array(brushCount);
-    this.brushBounds = new Float64Array(6 * brushCount);
+    this.brushBounds = brushBounds;
+    this.bvh = buildBvh(brushBounds, brushCount);
   }
 }
 
@@ -94,6 +107,25 @@ function validateBrush(b: CollisionBrushSource, i: number): number {
     if (!((b.bounds[k] as number) <= (b.bounds[k + 3] as number)))
       fail(`bounds min > max on axis ${k}`);
   }
+  // The BVH contract: every axial side of the bounds is a plane of the brush.
+  for (let k = 0; k < 6; k++) {
+    const axis = k % 3;
+    const sign = k < 3 ? -1 : 1;
+    const d = sign * (b.bounds[k] as number);
+    let found = false;
+    for (let p = 0; p < planeCount && !found; p++) {
+      const o = 4 * p;
+      found =
+        b.planes[o + axis] === sign &&
+        b.planes[o + ((axis + 1) % 3)] === 0 &&
+        b.planes[o + ((axis + 2) % 3)] === 0 &&
+        b.planes[o + 3] === d;
+    }
+    if (!found)
+      fail(
+        `bounds value ${k} is not the distance of a ${sign < 0 ? "−" : "+"}${"xyz"[axis]} plane`,
+      );
+  }
   const c = b.contents;
   if (!Number.isInteger(c) || c <= 0 || c > 0xffffffff || (c & ~CONTENTS_KNOWN) !== 0) {
     fail(`contents ${c} must be a non-zero set of known CONTENTS_* bits`);
@@ -115,8 +147,8 @@ function validateBrush(b: CollisionBrushSource, i: number): number {
 
 /**
  * Packs validated brushes into a CollisionWorld, keeping their order (brush index = input index,
- * which traces use to break ties). Throws CollisionWorldError on invalid input: this runs at map
- * load, never per tick.
+ * which traces use to break ties), and builds the BVH. Throws CollisionWorldError on invalid
+ * input: this runs at map load, never per tick.
  */
 export function createCollisionWorld(brushes: readonly CollisionBrushSource[]): CollisionWorld {
   let planeCount = 0;
@@ -124,7 +156,12 @@ export function createCollisionWorld(brushes: readonly CollisionBrushSource[]): 
     planeCount += validateBrush(brushes[i] as CollisionBrushSource, i);
   }
   if (planeCount > 0xffffffff) throw new CollisionWorldError(`${planeCount} planes in total`);
-  const world = new CollisionWorld(brushes.length, planeCount);
+  const bounds = new Float64Array(6 * brushes.length);
+  for (let i = 0; i < brushes.length; i++) {
+    const b = brushes[i] as CollisionBrushSource;
+    for (let k = 0; k < 6; k++) bounds[6 * i + k] = (b.bounds[k] as number) + 0;
+  }
+  const world = new CollisionWorld(brushes.length, planeCount, bounds);
   let start = 0;
   for (let i = 0; i < brushes.length; i++) {
     const b = brushes[i] as CollisionBrushSource;
@@ -133,7 +170,6 @@ export function createCollisionWorld(brushes: readonly CollisionBrushSource[]): 
     world.brushPlaneCount[i] = count;
     world.brushFaceCount[i] = b.faceCount;
     world.brushContents[i] = b.contents;
-    for (let k = 0; k < 6; k++) world.brushBounds[6 * i + k] = (b.bounds[k] as number) + 0;
     for (let k = 0; k < 4 * count; k++) world.planes[4 * start + k] = (b.planes[k] as number) + 0;
     const surf = b.surfaceFlags;
     if (surf !== undefined) {

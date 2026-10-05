@@ -2,10 +2,12 @@ import type { Vec3 } from "../../src/math/vec3";
 import { buildBrush } from "../../src/world/brushBuild";
 import {
   type CollisionBrushSource,
-  type CollisionWorld,
+  CollisionWorld,
   createCollisionWorld,
 } from "../../src/world/collisionWorld";
 import { CONTENTS_SOLID } from "../../src/world/contents";
+import type { TraceResult } from "../../src/world/trace";
+import { f64ToHex } from "./f64";
 
 /** Small hand-built worlds for trace tests: shapes → buildBrush → createCollisionWorld. */
 
@@ -39,6 +41,33 @@ export function worldOf(...brushes: CollisionBrushSource[]): CollisionWorld {
 }
 
 /**
+ * Packs brushes without createCollisionWorld's checks, for brushes it refuses, such as ones
+ * stripped of their bevels. Only traceBoxBrute is meaningful on such a world: the BVH culls by
+ * bounds the brushes no longer respect.
+ */
+export function uncheckedWorldOf(...brushes: CollisionBrushSource[]): CollisionWorld {
+  let planeCount = 0;
+  const bounds = new Float64Array(6 * brushes.length);
+  brushes.forEach((b, i) => {
+    planeCount += b.planes.length / 4;
+    bounds.set(b.bounds, 6 * i);
+  });
+  const world = new CollisionWorld(brushes.length, planeCount, bounds);
+  let start = 0;
+  brushes.forEach((b, i) => {
+    const count = b.planes.length / 4;
+    world.brushPlaneStart[i] = start;
+    world.brushPlaneCount[i] = count;
+    world.brushFaceCount[i] = b.faceCount;
+    world.brushContents[i] = b.contents;
+    world.planes.set(b.planes, 4 * start);
+    if (b.surfaceFlags !== undefined) world.planeSurf.set(Array.from(b.surfaceFlags), start);
+    start += count;
+  });
+  return world;
+}
+
+/**
  * The box-expanded distance n·(p + o) − d − Σ|n_k|·h_k of world plane `plane` for the box
  * [mins, maxs] at origin p (M1 design A.2): 0 means touching, ε is a trace's resting distance.
  */
@@ -57,4 +86,14 @@ export function expandedDistance(
     f += n * ((p[k] as number) + o) - Math.abs(n) * h;
   }
   return f;
+}
+
+/** Every TraceResult field, with doubles as bits, for exact comparisons. */
+export function traceBits(r: TraceResult): string[] {
+  return [
+    f64ToHex(r.fraction),
+    ...[...r.endpos, ...r.normal, r.planeDist].map(f64ToHex),
+    `${r.plane} ${r.brush} ${r.contents} ${r.surfaceFlags} ${r.entity}`,
+    `${r.startSolid} ${r.allSolid}`,
+  ];
 }

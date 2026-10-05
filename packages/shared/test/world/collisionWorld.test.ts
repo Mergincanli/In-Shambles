@@ -109,8 +109,17 @@ describe("createCollisionWorld", () => {
       "brushFaceCount",
       "brushContents",
       "brushBounds",
+      "bvh",
     ]);
     expect(createCollisionWorld([])).toBeInstanceOf(CollisionWorld);
+  });
+
+  it("builds the BVH over the bounds it is given, which must cover every brush", () => {
+    const world = new CollisionWorld(1, 6, Float64Array.from(floor.bounds));
+    expect([...world.bvh.nodeBounds]).toEqual([...floor.bounds]);
+    expect(() => new CollisionWorld(2, 12, new Float64Array(6))).toThrow(
+      /^6 bounds values for 2 brushes$/,
+    );
   });
 
   const withPlane = (i: number, v: number): Float64Array => {
@@ -138,6 +147,9 @@ describe("createCollisionWorld", () => {
     ["inverted bounds", { bounds: withBound(0, 1024) }, /min > max on axis 0/],
     ["bounds past the world limit", { bounds: withBound(3, 16400) }, /within ±16384/],
     ["non-f32 bounds", { bounds: withBound(4, 0.1) }, /bounds value 4/],
+    ["bounds inside the brush", { bounds: withBound(3, 256) }, /value 3 is not .* a \+x plane/],
+    ["bounds outside the brush", { bounds: withBound(2, -32) }, /value 2 is not .* a −z plane/],
+    ["bounds one f32 step off", { bounds: withBound(5, 2 ** -149) }, /value 5 is not .* a \+z/],
     ["zero contents", { contents: 0 }, /non-zero set of known/],
     ["unknown contents bits", { contents: CONTENTS_WATER | 0x100 }, /contents 260/],
     ["fractional contents", { contents: 1.5 }, /contents 1.5/],
@@ -157,11 +169,22 @@ describe("createCollisionWorld", () => {
     ["contents of 2^32", { contents: 2 ** 32 }, /contents 4294967296/],
     ["contents of 2^32 + 1", { contents: 2 ** 32 + 1 }, /contents 4294967297/],
     ["surface flags of 2^32", { surfaceFlags: [0, 0, 0, 0, 0, 2 ** 32] }, /plane 5 surface flags/],
+    ["a missing axial plane", { planes: floor.planes.subarray(0, 20), faceCount: 5 }, /value 5/],
   ] as const)("rejects %s", (_name, patch, text) => {
     const bad = { ...solid(floor), ...patch } as CollisionBrushSource;
     expect(() => createCollisionWorld([solid(ramp), bad])).toThrow(CollisionWorldError);
     expect(() => createCollisionWorld([solid(ramp), bad])).toThrow(
       new RegExp(`^brush 1: .*${text.source}`),
     );
+  });
+
+  // The BVH culls by bounds, so a brush reaching past them would hide hits from traceBox.
+  it.each([
+    ["a rotated box", lane],
+    ["a wedge", ramp],
+  ])("rejects %s stripped of its axial bevels", (_name, b) => {
+    const stripped = { ...solid(b), planes: b.planes.slice(0, 4 * b.faceCount) };
+    expect(b.planes.length).toBeGreaterThan(4 * b.faceCount);
+    expect(() => createCollisionWorld([stripped])).toThrow(/^brush 0: bounds value \d is not/);
   });
 });

@@ -5,7 +5,7 @@ import { type Vec3, vec3 } from "../../src/math/vec3";
 import { Mulberry32 } from "../../src/rng/mulberry32";
 import { ENTITY_NONE, ENTITY_WORLD } from "../../src/sim/entity";
 import { HULL_CROUCHED_MAXS, HULL_MINS, HULL_STANDING_MAXS } from "../../src/sim/hull";
-import type { CollisionWorld } from "../../src/world/collisionWorld";
+import type { CollisionBrushSource, CollisionWorld } from "../../src/world/collisionWorld";
 import {
   CONTENTS_LADDER,
   CONTENTS_PLAYERCLIP,
@@ -27,7 +27,14 @@ import {
   traceRay,
 } from "../../src/world/trace";
 import { f64ToHex } from "../helpers/f64";
-import { brush, expandedDistance, withoutBevels, worldOf } from "../helpers/traceWorld";
+import {
+  brush,
+  expandedDistance,
+  traceBits,
+  uncheckedWorldOf,
+  withoutBevels,
+  worldOf,
+} from "../helpers/traceWorld";
 
 const EPS = TRACE_EPSILON;
 const MINS = HULL_MINS;
@@ -57,14 +64,15 @@ function trace(
   return out;
 }
 
-/** Every field, with doubles as bits, for exact comparisons. */
-function bits(r: TraceResult): string[] {
-  return [
-    f64ToHex(r.fraction),
-    ...[...r.endpos, ...r.normal, r.planeDist].map(f64ToHex),
-    `${r.plane} ${r.brush} ${r.contents} ${r.surfaceFlags} ${r.entity}`,
-    `${r.startSolid} ${r.allSolid}`,
-  ];
+/**
+ * traceBoxBrute on one brush stripped of its bevels. createCollisionWorld refuses such brushes
+ * (they break the bounds contract the BVH culls by), so this packs them unchecked to show the
+ * phantom hits the bevels prevent.
+ */
+function bevelless(b: CollisionBrushSource, start: Vec3, end: Vec3): TraceResult {
+  const out = new TraceResult();
+  traceBoxBrute(uncheckedWorldOf(withoutBevels(b)), start, end, MINS, STAND, MASK_PLAYERSOLID, out);
+  return out;
 }
 
 function expectFinite(r: TraceResult): void {
@@ -81,7 +89,7 @@ describe("TraceResult", () => {
     const r = trace(floorWorld, v(0, 0, 100), v(0, 0, 0));
     expect(r.fraction).toBeLessThan(1);
     r.reset();
-    expect(bits(r)).toEqual(bits(fresh));
+    expect(traceBits(r)).toEqual(traceBits(fresh));
     expect(fresh.entity).toBe(ENTITY_NONE);
     expect(fresh.plane).toBe(-1);
     expect(fresh.brush).toBe(-1);
@@ -91,7 +99,7 @@ describe("TraceResult", () => {
     const r = new TraceResult();
     traceBox(floorWorld, v(0, 0, 100), v(0, 0, 0), MINS, STAND, MASK_PLAYERSOLID, r);
     traceBox(floorWorld, v(0, 0, 100), v(10, 0, 100), MINS, STAND, MASK_PLAYERSOLID, r);
-    expect(bits(r)).toEqual(bits(trace(floorWorld, v(0, 0, 100), v(10, 0, 100))));
+    expect(traceBits(r)).toEqual(traceBits(trace(floorWorld, v(0, 0, 100), v(10, 0, 100))));
     expect(r.entity).toBe(ENTITY_NONE);
   });
 });
@@ -388,7 +396,7 @@ describe("rotated boxes and wedges (axial bevels)", () => {
     const end = v(tip + 15 + 1, 200, 0);
     expect(trace(diamond, start, end).fraction).toBe(1);
     // Without the bevel the expanded faces overlap the hull there.
-    expect(trace(worldOf(withoutBevels(diamondBrush)), start, end).fraction).toBeLessThan(1);
+    expect(bevelless(diamondBrush, start, end).fraction).toBeLessThan(1);
     // And it still hits when the hull really reaches the corner.
     const hit = trace(diamond, v(tip + 15 - 1, -200, 0), v(tip + 15 - 1, 200, 0));
     expect(hit.fraction).toBeLessThan(1);
@@ -421,7 +429,7 @@ describe("rotated boxes and wedges (axial bevels)", () => {
     expect(r.surfaceFlags).toBe(0);
     expect(Math.abs(r.endpos[2] - 24 - (64 + EPS))).toBeLessThan(1e-12);
     // Without bevels the extended slope plane stops it in mid-air.
-    const phantom = trace(worldOf(withoutBevels(wedgeBrush)), v(138, 0, 124), v(138, 0, 64));
+    const phantom = bevelless(wedgeBrush, v(138, 0, 124), v(138, 0, 64));
     expect(phantom.endpos[2]).toBeGreaterThan(24 + 70);
     expect(phantom.normal[2]).toBeLessThan(1);
   });
@@ -430,7 +438,7 @@ describe("rotated boxes and wedges (axial bevels)", () => {
     const start = v(-16, -200, 14);
     const end = v(-16, 200, 14);
     expect(trace(wedge, start, end).fraction).toBe(1);
-    expect(trace(worldOf(withoutBevels(wedgeBrush)), start, end).fraction).toBeLessThan(1);
+    expect(bevelless(wedgeBrush, start, end).fraction).toBeLessThan(1);
   });
 
   it("landing on the slope reports the slope normal", () => {
@@ -535,7 +543,7 @@ describe("rays", () => {
       const start = v(r(), r(), r() * 0.3 + 40);
       const end = v(r(), r(), r() * 0.3 + 40);
       traceRay(world, start, end, MASK_PLAYERSOLID, ray);
-      expect(bits(ray)).toEqual(bits(trace(world, start, end, ZERO, ZERO)));
+      expect(traceBits(ray)).toEqual(traceBits(trace(world, start, end, ZERO, ZERO)));
     }
   });
 
@@ -713,7 +721,7 @@ describe("robustness", () => {
       const end = v(r(500), r(500), r(60));
       traceBox(floorWorld, start, end, MINS, STAND, MASK_PLAYERSOLID, a);
       traceBoxBrute(floorWorld, start, end, MINS, STAND, MASK_PLAYERSOLID, b);
-      expect(bits(a)).toEqual(bits(b));
+      expect(traceBits(a)).toEqual(traceBits(b));
     }
   });
 });

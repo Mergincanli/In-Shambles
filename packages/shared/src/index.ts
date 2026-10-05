@@ -14,6 +14,7 @@ export * from "./sim/playerState";
 export * from "./sim/usercmd";
 export * from "./time";
 export * from "./world/brushBuild";
+export * from "./world/bvh";
 export * from "./world/collisionWorld";
 export * from "./world/contents";
 export * from "./world/polygonize";
