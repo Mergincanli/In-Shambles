@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CvarFlag, CvarRegistry } from "../src/cvars";
 
 let cvars: CvarRegistry;
@@ -134,6 +134,24 @@ describe("register", () => {
   });
 });
 
+describe("hot-path reads", () => {
+  it("never lowercase the registered spelling (no per-call string allocation)", () => {
+    const lower = vi.spyOn(String.prototype, "toLowerCase");
+    let calls: number;
+    try {
+      cvars.get("pm_maxWallJumps");
+      cvars.has("pm_gravity");
+      cvars.info("pm_gravity");
+      cvars.set("pm_maxWallJumps", 4);
+      calls = lower.mock.calls.length;
+    } finally {
+      lower.mockRestore();
+    }
+    expect(calls).toBe(0);
+    expect(cvars.get("PM_GRAVITY")).toBe(800);
+  });
+});
+
 describe("flags", () => {
   it("uses one distinct bit per flag", () => {
     const bits = Object.values(CvarFlag).filter((bit) => bit !== 0);
@@ -219,11 +237,20 @@ describe("set", () => {
     expect(cvars.get("pm_gravity")).toBe(800);
   });
 
-  it("returns applied LATCH names sorted", () => {
+  it("returns applied LATCH names sorted, not in registration order", () => {
+    // Registered after pm_gravity and sv_fps, but sorts first (and in a different case).
+    cvars.register({
+      name: "ai_Level",
+      type: "int",
+      default: 0,
+      description: "x",
+      flags: CvarFlag.LATCH,
+    });
     cvars.setAllowCheats(true);
     cvars.set("sv_fps", 30);
     cvars.set("pm_gravity", 600);
-    expect(cvars.applyLatched()).toEqual(["pm_gravity", "sv_fps"]);
+    cvars.set("ai_Level", 2);
+    expect(cvars.applyLatched()).toEqual(["ai_Level", "pm_gravity", "sv_fps"]);
   });
 
   it("cancels a pending LATCH value when set back to the current value", () => {
