@@ -1,23 +1,49 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { parseJsonc } from "../../src/jsonc";
 import { fromRoot } from "../../src/paths";
 
-/** tsconfig files are JSONC: drop comments before parsing (no string in them contains //). */
-function readJsonc(...path: string[]): { compilerOptions?: Record<string, unknown> } {
-  const text = readFileSync(fromRoot(...path), "utf8")
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/^\s*\/\/.*$/gm, "");
-  return JSON.parse(text);
+interface TsConfig {
+  extends?: string;
+  compilerOptions?: Record<string, unknown>;
 }
+
+const read = (file: string) => parseJsonc(readFileSync(file, "utf8")) as TsConfig;
+const base = fromRoot("tsconfig.base.json");
+
+/** Every tsconfig*.json at the root and in each package. */
+const configs = [
+  fromRoot("tsconfig.json"),
+  ...readdirSync(fromRoot("packages")).flatMap((dir) => {
+    const pkg = fromRoot("packages", dir);
+    if (!existsSync(join(pkg, "package.json"))) return [];
+    return readdirSync(pkg)
+      .filter((file) => /^tsconfig.*\.json$/.test(file))
+      .map((file) => join(pkg, file));
+  }),
+];
 
 // The compiler is the first line of defence for golden rule 4 and docs/06 §2.
 describe("tsconfig guard", () => {
-  it("keeps TypeScript strict everywhere", () => {
-    expect(readJsonc("tsconfig.base.json").compilerOptions?.strict).toBe(true);
+  it("keeps the base strict and free of DOM and Node types", () => {
+    const options = read(base).compilerOptions;
+    expect(options?.strict).toBe(true);
+    expect(options?.lib).toEqual(["ES2023"]);
+    expect(options?.types).toEqual([]);
   });
 
+  it.each(configs.map((file) => [file.slice(fromRoot().length + 1), file]))(
+    "%s extends the base and keeps strict on",
+    (_name, file) => {
+      const config = read(file);
+      expect(resolve(dirname(file), config.extends ?? "")).toBe(base);
+      expect(config.compilerOptions?.strict ?? true).toBe(true);
+    },
+  );
+
   it("keeps DOM and Node types out of packages/shared and checks indexed access", () => {
-    const options = readJsonc("packages", "shared", "tsconfig.json").compilerOptions;
+    const options = read(fromRoot("packages", "shared", "tsconfig.json")).compilerOptions;
     expect(options?.lib).toEqual(["ES2023"]);
     expect(options?.types).toEqual([]);
     expect(options?.noUncheckedIndexedAccess).toBe(true);
