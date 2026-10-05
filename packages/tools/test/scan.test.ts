@@ -29,5 +29,17 @@ describe("scanSource", () => {
 
   it("treats a / after a value as division", () => {
     expect(scanSource("const r = a / b / c;").code).toBe("const r = a / b / c;");
+    expect(scanSource("const m = arr[i]! / n; f(x)! / 2;").code).toBe(
+      "const m = arr[i]! / n; f(x)! / 2;",
+    );
+    expect(scanSource("const k = i++ / 2;").code).toBe("const k = i++ / 2;");
+  });
+
+  it("treats a / after a keyword or a prefix ! as a regex", () => {
+    expect(scanSource("return /\\/\\//.test(s); Date.now();").code).toBe(
+      "return / /.test(s); Date.now();",
+    );
+    expect(scanSource("if (!/ab/.test(s)) x();").code).toBe("if (!/ /.test(s)) x();");
+    expect(scanSource("const t = typeof /x/;").code).toBe("const t = typeof / /;");
   });
 });

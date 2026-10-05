@@ -34,6 +34,21 @@ const REGEX_AFTER = new Set([
   "^",
 ]);
 
+// A `/` after one of these keywords starts a regex, not a division (`return /x/.test(s)`).
+const KEYWORD_BEFORE_EXPRESSION =
+  /(?:^|[^\w$])(return|typeof|case|do|else|in|of|new|delete|void|throw|instanceof|yield|await)\s*$/;
+const OPERAND_END = /[\w$)\]]$/;
+
+/** Whether a `/` at this point starts a regex literal, given the code so far. */
+function regexAllowed(codeSoFar: string): boolean {
+  const before = codeSoFar.trimEnd();
+  if (KEYWORD_BEFORE_EXPRESSION.test(before)) return true;
+  // A postfix `!` (non-null assertion) or `++`/`--` ends an operand: a following `/` divides.
+  if (before.endsWith("!") && OPERAND_END.test(before.slice(0, -1))) return false;
+  if (/(\+\+|--)$/.test(before) && OPERAND_END.test(before.slice(0, -2))) return false;
+  return REGEX_AFTER.has(before.at(-1) ?? "");
+}
+
 export function scanSource(source: string): ScannedSource {
   const strings: string[] = [];
   let code = "";
@@ -42,7 +57,6 @@ export function scanSource(source: string): ScannedSource {
   const templateDepths: number[] = [];
   let depth = 0;
 
-  const lastSignificant = () => code.trimEnd().at(-1) ?? "";
   const readTemplateText = () => {
     // From just after ` or }, up to the closing ` or the next ${.
     let text = "";
@@ -95,7 +109,7 @@ export function scanSource(source: string): ScannedSource {
       code += "}";
       i++;
       readTemplateText();
-    } else if (c === "/" && REGEX_AFTER.has(lastSignificant())) {
+    } else if (c === "/" && regexAllowed(code)) {
       // A regex literal: skip to the closing / (outside a [...] class), then its flags.
       let j = i + 1;
       let inClass = false;
