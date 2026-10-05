@@ -8,13 +8,17 @@ import { fromRoot } from "../../src/paths";
 // CLAUDE.md golden rule 4 and .claude/rules/shared-simulation.md. shared's tsconfig (pinned by
 // tsconfig-guard.test.ts) already rejects DOM and Node APIs: process, window, document,
 // performance, timers, fetch, require and node: imports don't compile there. This scan covers
-// what does compile: hidden randomness and wall-clock time, engine-approximated math (D-016), and
-// DEV_ASSERT calls that allocate.
+// what does compile: hidden randomness and wall-clock time, engine-approximated math (D-016),
+// locale-dependent APIs, and DEV_ASSERT calls that allocate. Any bare `Date` is flagged, so an
+// alias can't reach Date.now, and so is any \u escape outside strings: an escaped identifier
+// would slip past every name rule here.
 const FORBIDDEN: (readonly [string, RegExp])[] = [
   ["Math.random", /\bMath\s*\.\s*random\b/],
   ["destructured Math.random", /\{[^}]*\brandom\b[^}]*\}\s*=\s*Math\b/],
-  ["Date", /\bDate\s*(\.|\(|\[)|\bnew\s+Date\b/],
+  ["Date", /\bDate\b/],
   ["globalThis", /\bglobalThis\b/],
+  ["locale-dependent API", /\blocaleCompare\b|\btoLocale\w*|\bIntl\b/],
+  ["unicode escape outside a string", /\\u/],
   ...DETERMINISTIC_MATH_RULES,
 ];
 
@@ -94,6 +98,15 @@ describe("shared purity guard", () => {
     ["const url = `http://${host}`; const t = Date.now();", "Date"],
     ["const re = /\\/\\//; const t = Date.now();", "Date"],
     ["globalThis.x;", "globalThis"],
+    ["const clock = Date; const t = clock.now();", "Date"],
+    ["const { now } = Date;", "Date"],
+    ["const t = Date?.now();", "Date"],
+    ["const order = a.localeCompare(b);", "locale-dependent API"],
+    ["const c = new Intl.Collator();", "locale-dependent API"],
+    ["const s = x.toLocaleString();", "locale-dependent API"],
+    ["const s = name.toLocaleUpperCase();", "locale-dependent API"],
+    ["const s = \\u004dath.sin(a);", "unicode escape outside a string"],
+    ["const t = \\u{44}ate.now();", "unicode escape outside a string"],
     ["DEV_ASSERT(v >= 0, `speed out of range`);", "DEV_ASSERT non-literal message"],
     ['DEV_ASSERT(v >= 0, "speed " + v);', "DEV_ASSERT non-literal message"],
     ['DEV_ASSERT(v >= 0, "speed out of range", String(v));', "DEV_ASSERT computed detail"],
@@ -149,6 +162,9 @@ describe("shared purity guard", () => {
     ["const cosine = dcos(x); const sine = sinU16(a); const logger = log;"],
     ["const s = table.sin(x) + wave.cos;"],
     ["const re = /Math.sin|a**b/;"],
+    ["const updated = lastDate + DateLike + toDate(x);"],
+    ['const s = "Date.now, Intl and \\u0041 in a string";'],
+    ["const t = `\\u${hex}`;"],
   ])("allows %j", (source) => {
     expect(violations(source)).toEqual([]);
   });

@@ -102,6 +102,7 @@
 
 **Consequences:**
 - The shared purity guard rejects the banned names and `**`, and flags any use of `Math` other than `Math.<allowed member>` (computed access, optional chaining, aliasing, destructuring). The rules live in `packages/tools/src/code/deterministicMath.ts`, so compiler code can reuse them.
+- The same guard flags any bare `Date` (an alias would reach `Date.now`), locale-dependent APIs (`localeCompare`, `toLocale*`, `Intl`), whose results vary by engine and locale, and `\u` escapes outside strings, which would hide a banned identifier from every name rule.
 - Committed determinism vectors (`packages/shared/test/vectors/determinism.ts`, input bits → output bits for dtrig, quantizers, `quantizePlayerState`, `sanitizeUserCmd`, Mulberry32 and hash32) are recomputed by the tests; M2 replays them in Chrome, Firefox and Safari (`docs/09` M2, `docs/10` §1).
 - Constants that were written with `**` in shared (the cvar registry's i32 range) are now literals.
 
