@@ -10,16 +10,14 @@ This pack contains everything Claude Code needs to build the game:
 
 ## 1. Install (≈10 minutes)
 
-1. Create an empty repo folder, e.g. `game/`, and run `git init` in it.
-2. Copy **everything** from this pack into the repo root, including the hidden `.claude/` folder. On macOS/Linux, hidden files may need `cp -a` or "show hidden files".
-3. Install the prerequisites:
-   - Node.js (current LTS)
-   - pnpm (`corepack enable`)
+1. Install the prerequisites:
+   - Node.js 24 LTS (22.12+ and 26+ also work)
+   - pnpm 10: `corepack enable` (Node 25+ no longer ships corepack: run `npm install -g corepack` first)
    - Git
    - Claude Code
    - TrenchBroom (only needed from M5 on)
-4. Open a terminal in the repo, run `claude`, and accept the folder-trust prompt. Project rules, skills and agents only load in trusted folders.
-5. Optional: commit the pack as your first commit (`chore: add Claude Code pack`).
+2. Clone the repo and set it up as in `README.md` → Setup: `pnpm install`, then `pnpm typecheck && pnpm lint && pnpm test`. Clone with Git rather than copying files: hidden folders such as `.claude/` are easy to lose in a copy or a browser upload.
+3. Open a terminal in the repo, run `claude`, and accept the folder-trust prompt. Project rules, skills and agents only load in trusted folders.
 
 ## 2. Decide what you can (5 minutes)
 
@@ -69,6 +67,8 @@ UrT's game code was closed, so some movement and weapon numbers are **ESTIMATE**
 3. Paste your measurements with the **P-CAPTURE** prompt. Claude Code updates the data, tests and decision log.
 
 ## 5. What's in the pack
+
+The game's code lives in `packages/` and its data in `content/` (see `README.md` → Layout). The pack itself:
 
 ```
 START_HERE.md                     ← this file (for you)

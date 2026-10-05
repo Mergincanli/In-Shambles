@@ -34,6 +34,7 @@ packages/shared/src/
   math/                vec3 (pooled, out-params), plane, aabb, quant (quantizers), angles
   rng/                 mulberry32, hash32 (seeding: match/shooter/tick/shot)
   cvars/               registry, flags, replicated block (hash), defaults from docs
+  debug/               DEV_ASSERT / setDevAsserts (dev-only checks behind a runtime flag)
   world/
     cmap.ts            compiled map format types (docs/07)
     brush.ts           convex brush = planes + bounds + contents flags
@@ -93,6 +94,9 @@ packages/tools/src/
   bots/                headless clients
   reports/             feel-report, balance-report
   replay/              demo inspection
+  docs/                Markdown section/table parsing for doc-golden tests (BAL-01)
+  content/             content-vs-docs helpers (weapon IDs, damage table)
+  paths.ts             repo-root resolution
 ```
 
 ## 4. Runtime topology
@@ -185,5 +189,5 @@ DEV / OFFLINE                                  ONLINE
 
 ## 11. Scripts and CI (created in M0, extended later)
 
-- `pnpm dev`, `pnpm server`, `pnpm test`, `pnpm test:movement`, `pnpm test:net`, `pnpm test:balance`, `pnpm typecheck`, `pnpm lint`, `pnpm bench`, `pnpm bots`, `pnpm feel-report`, `pnpm balance-report`, `pnpm mapc` (M5).
-- **CI** (when a remote repo exists): typecheck, lint, unit tests, a short bot soak (2 min, 8 bots, `wan-100-loss1`), and a bundle-size check.
+- `pnpm dev`, `pnpm dev:server`, `pnpm build`, `pnpm test`, `pnpm test:movement`, `pnpm test:net`, `pnpm test:balance`, `pnpm typecheck`, `pnpm lint`, `pnpm format`, `pnpm bench`, `pnpm bots`, `pnpm feel-report`, `pnpm balance-report`, `pnpm mapc` (M5).
+- **CI** (GitHub Actions, `.github/workflows/ci.yml`): typecheck, lint, unit tests and build since M0. Added in M9 (bots exist from M3): a short bot soak (2 min, 8 bots, `wan-100-loss1`) and bundle-size/perf budget checks.

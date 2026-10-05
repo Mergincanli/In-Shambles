@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // Pure sim code: no DOM, no Node APIs (CLAUDE.md golden rule 4).
+    "lib": ["ES2023"],
+    "types": [],
+    "noUncheckedIndexedAccess": true
+  },
+  "include": ["src", "test"]
+}

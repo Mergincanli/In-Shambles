@@ -60,16 +60,22 @@ docs/       specs, roadmap, decisions, handoffs.
 |---|---|
 | `pnpm install` | Install dependencies |
 | `pnpm dev` | Client + in-browser Worker server (loopback) |
-| `pnpm server` | Dedicated Node server |
+| `pnpm dev:server` | Dedicated Node server from source (not `pnpm server`, a pnpm built-in; D-015) |
+| `pnpm build` | Production client build + server bundle (`packages/server/dist/main.js`) |
 | `pnpm test` | All tests (Vitest) |
 | `pnpm test:movement` | Movement tests |
 | `pnpm test:net` | Netcode tests |
 | `pnpm test:balance` | Balance tests |
 | `pnpm typecheck` | Type-check all packages |
 | `pnpm lint` | Biome lint + format check |
-| `pnpm bots -- --count 16 --profile wan-150` | Headless bot load test |
+| `pnpm format` | Apply Biome formatting and safe fixes |
+| `pnpm bench` | Microbenchmarks |
+| `pnpm bots --count 16 --profile wan-150-loss2` | Headless bot load test |
 | `pnpm feel-report` | Movement metrics vs. targets |
 | `pnpm balance-report` | Hits-to-kill / TTK tables |
+| `pnpm mapc` | TrenchBroom `.map` compiler |
+
+Until their milestone, these are stubs that print "added in M#": `bench` (M1); `test:movement`, `test:net`, `feel-report` (M2); `bots` (M3); `mapc` (M5); `balance-report` (M6). Until M2, `pnpm dev` serves the client only.
 
 ## Conventions
 
