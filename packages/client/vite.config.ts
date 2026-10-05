@@ -1,6 +1,6 @@
 import { execSync } from "node:child_process";
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { realpathSync } from "node:fs";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 
@@ -19,7 +19,9 @@ function buildHash(): string {
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
   try {
-    if (!existsSync(join(git("rev-parse --show-toplevel"), "pnpm-workspace.yaml"))) return "dev";
+    // Only this repo's own checkout counts, not a parent repo (even a pnpm monorepo).
+    const repoRoot = realpathSync(resolve(configDir, "..", ".."));
+    if (realpathSync(git("rev-parse --show-toplevel")) !== repoRoot) return "dev";
     const hash = git("rev-parse --short HEAD");
     return git("status --porcelain") === "" ? hash : `${hash}-dirty`;
   } catch {
