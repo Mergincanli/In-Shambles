@@ -2,6 +2,7 @@
 
 > Append-only. Format: `D-### — Title (date, status)`, then Context / Decision / Consequences. Superseded decisions stay, marked `superseded by D-###`.
 > Open decisions owned by Mustafa are tracked in `docs/01` (O-#). When one is decided, add a D-entry here.
+> "M1 plan" (its increments, open questions and risks) and "M1 design" (sections A–J, also cited bare as "A.4" or "design G") refer to the records in `docs/design/M1-plan.md` and `docs/design/M1-design.md`.
 
 ---
 
@@ -107,7 +108,7 @@
 - Constants that were written with `**` in shared (the cvar registry's i32 range) are now literals.
 
 ### D-017 — Trace epsilon, touching, and snapping to the nearest clear grid point (2026-10-05, accepted)
-**Context:** M1 builds the brush traces (M1 design A) and needs a rule for contact. `docs/05` §4.1 and `docs/03` §6 rounded the origin to the nearest 1/32 u every tick. That is safe after a single stop, but not across repeated slides on a slope or a rotated wall: sliding keeps the distance to the plane unchanged, each tick's rounding moves the box by up to √3/64 u along the normal, and nothing pulls it back. Within tens of ticks the box sits inside the brush, the next trace starts solid and the player is stuck. Axis-aligned planes at grid distances can't drift, so only slopes and angled walls (the kick lanes) show it.
+**Context:** M1 builds the brush traces (M1 design A, `docs/design/M1-design.md`) and needs a rule for contact. `docs/05` §4.1 and `docs/03` §6 rounded the origin to the nearest 1/32 u every tick. That is safe after a single stop, but not across repeated slides on a slope or a rotated wall: sliding keeps the distance to the plane unchanged, each tick's rounding moves the box by up to √3/64 u along the normal, and nothing pulls it back. Within tens of ticks the box sits inside the brush, the next trace starts solid and the player is stuck. Axis-aligned planes at grid distances can't drift, so only slopes and angled walls (the kick lanes) show it.
 **Decision:**
 - **ε = 1/32 u** (`TRACE_EPSILON` in `packages/shared/src/world/trace.ts`): a trace stops one skin short of the surface it hits. It is a design constant, not a cvar: client and server must trace identically, and ε is not a feel knob. It is exact in binary and one origin grid step.
 - **Touching counts as outside.** Inside a brush means strictly behind every plane, so a box that exactly touches a brush is clear: a spawn with its feet on the floor, or a box flush against two brushes.
@@ -133,8 +134,8 @@
 **Decision:**
 - **Kick-eligible is not a button.** It reads as state derived from the player and the weapon, not an input, so it is left out until the kick is built in M4 (M1 plan, open question 1). `buttons` bits 0–11 are attack … drop in the `docs/05` order; bits 12–15 are spare.
 - **Stamina** is an integer count of hundredths (u16). `flags` bits 0–9 are the `docs/03` §6 flags in the listed order.
-- **Ranges:** `groundEntity` −1 (none) to 32767 (the world); `waterLevel` 0–3; move axes ±127 (the i8 never carries −128); pitch ±89°; `weaponSlot` 0–7 (the knife plus the seven `docs/04` §9 loadout slots); `tick` 0…2^30 − 1 (not the full u32), so ticks stay V8 small integers (about 207 days at 60 Hz).
-- `quantizePlayerState` maps a non-finite `groundEntity` to −1, not 0, because 0 is a real entity. `sanitizeUserCmd` clamps and masks untrusted input and never throws.
+- **Ranges:** `origin` ±16384 u and `velocity` ±(2^19 − 1)/16 u/s (±32767.9375, the i20 range) per axis, clamped by the end-of-tick quantizers so a stored value is exactly what the codec carries; `groundEntity` −1 (none) to 32767 (the world); `waterLevel` 0–3; move axes ±127 (the i8 never carries −128); pitch ±89°; `weaponSlot` 0–7 (the knife plus the seven `docs/04` §9 loadout slots); `tick` 0…2^30 − 1 (not the full u32), so ticks stay V8 small integers (about 207 days at 60 Hz).
+- `quantizePlayerState` maps a non-finite `groundEntity` to −1, not 0, because 0 is a real entity. `sanitizeUserCmd` clamps and masks untrusted input and never throws. It is idempotent, and the client applies it before predicting, storing and sending a cmd (`docs/05` §5), so client and server simulate the same cmd.
 
 **Consequences:**
 - `docs/03` §6 and `docs/05` §3.4 carry "Pinned down in M1" notes; the code is in `packages/shared/src/sim/`.
@@ -154,7 +155,7 @@
 **Consequences:**
 - `docs/07` §2 carries a "Pinned down in M1" note and `docs/06` §3 lists the world modules.
 - The shared polygonizer is the single implementation: the greybox compiler (M1), `mapc` (M5) and the trace fuzz oracle all use it, and its own tests cross-check it against brute-force triple-plane intersection.
-- Outward-rounded bevels make the traced brush reach up to one f32 step of the coordinate past its vertices (about 1e-4 u at 1000 u, 1e-3 u near the ±16384 u limit), and position tests call a box in that sliver solid. Traces stop ε short of bevels like any other plane and the snap only accepts clear points, so a player never ends up there. The trace fuzz test (`packages/tools/test/fuzz/`) compares traces with exact geometry, so wherever the runtime may report contact beyond the true brush (P2, P3, P4) it allows that brush's sliver on top of τ = 1e-5, capped at one f32 step of the brush's largest vertex coordinate so a misplaced bevel cannot widen its own tolerance. P1 inherits the allowance: it excuses the brushes the runtime puts the start inside, and by A.4 a box starting in the sliver may move through that brush; P2 bounds that set to τ + sliver, and such starts are unreachable in play. P4 checks the stop two-sided: at most design G's 2√3·ε + τ (+ sliver), and at least ε − 1e-6 when the trace moved, because the entering plane is then exactly ε away.
+- Outward-rounded bevels make the traced brush reach up to one f32 step of the coordinate past its vertices (about 1e-4 u at 1000 u, 1e-3 u near the ±16384 u limit), and position tests call a box in that sliver solid. Traces stop ε short of bevels like any other plane and the snap only accepts clear points, so a player never ends up there. The trace fuzz test (`packages/tools/test/fuzz/`) compares traces with exact geometry, so wherever the runtime may report contact beyond the true brush (P2, P3, P4) it allows that brush's sliver on top of τ = 1e-5, capped at one f32 step of the brush's largest vertex coordinate so a misplaced bevel cannot widen its own tolerance. P1 inherits the allowance: it excuses the brushes the runtime puts the start inside, and by M1 design A.4 (a box may move out of a brush it starts in) a box starting in the sliver may move through that brush; P2 bounds that set to τ + sliver, and such starts are unreachable in play. P4 checks the stop two-sided: at most M1 design G's 2√3·ε + τ (+ sliver), and at least ε − 1e-6 when the trace moved, because the entering plane is then exactly ε away.
 
 ### D-020 — cmap v1 layout: contentHash in a binary preamble (2026-10-05, accepted)
 **Context:** `docs/07` §2 put `contentHash` in the JSON header, which would make the hash cover a header that contains it, and allowed a `.cmap.json` + `.cmap.bin` pair in dev. D-008 fixes the format's role, not its layout (M1 plan, spec change 3).

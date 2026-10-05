@@ -120,8 +120,8 @@ The `INPUT` packet carries:
 ### 4.1 End-of-tick quantization (both sides, every tick)
 | Quantity | Quantum | Storage |
 |---|---|---|
-| Origin | 1/32 u (nearest clear grid point, D-017) | i32 per axis |
-| Velocity | 1/16 u/s | i32 (or i20 packed) |
+| Origin | 1/32 u (nearest clear grid point, D-017) | i32 per axis; clamped to ±16384 u |
+| Velocity | 1/16 u/s | i20 per axis; clamped to ±(2^19 − 1)/16 = ±32767.9375 u/s |
 | Angles | 360/65536° | u16 |
 | Stamina | 0.01 | u16 |
 | Timers | 1 ms or ticks | u16 |
@@ -151,7 +151,7 @@ The origin is not simply rounded: pmove snaps it to the nearest clear 1/32 u gri
 ## 5. Client prediction and reconciliation
 
 1. **Each client tick:**
-   - sample input → UserCmd
+   - sample input → UserCmd → `sanitizeUserCmd` (§3.4)
    - store `cmds[tick]`
    - run shared `pmove` + `weaponPredict` from the current predicted state
    - store `predicted[tick]`
@@ -170,6 +170,8 @@ The origin is not simply rounded: pmove snaps it to the nearest clear 1/32 u gri
    - Apply a decaying **render offset** (old render pos − new render pos), decaying to 0 over ~100 ms.
    - Teleports (> 64 u) snap instantly.
 5. **Target:** zero corrections during steady play on a lossless link (`docs/03` MV-20). Corrections on lossy links must be rare and small.
+
+The client predicts with, stores and sends the sanitized cmd. The server sanitizes every cmd it receives anyway, and sanitizing is idempotent, so both sides simulate the same cmd even when the sampler produces an out-of-range value (a −128 axis, pitch past ±89°, a spare button bit). M2's parity tests include such input.
 
 ## 6. Remote entity interpolation
 

@@ -82,7 +82,7 @@ export function movementLab(): Cmap {                                        // 
   m.ladder({ wallMin: [916,0,0], wallMax: [932,64,256], face: "-x" });         // wall + LADDER volume
   m.spawn("info_player_start", [0,0,24], 0);                                    // yaw in degrees
   m.timer("start", {...}); m.timer("stop", {...});
-  m.anchor("gap_96_takeoff", [128,0,0]);                                        // named place for tests
+  m.anchor("gap_96_takeoff", [128,0,24]);                                       // named place for tests: ground + 24
   return m.compile();
 }
 ```
@@ -95,7 +95,7 @@ export function movementLab(): Cmap {                                        // 
   - `rotatedBox({center, halfExtents, cos, sin, contents?})`: a box rotated about +Z, for kick lanes. Callers pass closed forms (sin 15° = (√6 − √2)/4) or dtrig values, never `Math.cos`.
   - `volume(kind, {min, max, material?})`: a non-solid box; `kind` is `WATER`, `LADDER`, `PLAYERCLIP`, `TRIGGER` or `NODRAW`.
   - `ladder({wallMin, wallMax, face, material?})`: the solid wall with the ladder surface flag on the `face` side and a 16 u LADDER volume in front of that whole face. M2 decides which of the two the movement code reads (`docs/03` §4.14).
-  - Every solid primitive also takes `material?` and `surfaceFlags?`, applied to all of its faces. `box`, `wall`, `rotatedBox` and `volume` return the brush index (for entity `brushes` lists); directions and faces are checked at run time too.
+  - Every other solid primitive also takes `material?` and `surfaceFlags?`, applied to all of its faces (`ladder` takes `material?` only: its flags are fixed). `box`, `wall`, `rotatedBox` and `volume` return the brush index (for entity `brushes` lists); directions and faces are checked at run time too.
 - **Entities** (§4.2 classnames), in call order: `spawn(classname, origin, yaw, props?)` for `info_player_start`, `info_spawn_red`, `info_spawn_blue`; `timer("start" | "stop", {min, max})` makes an invisible TRIGGER brush and an `info_timer_start` / `info_timer_stop` entity whose `brushes` lists it; `anchor(name, origin, yaw?)` makes an `info_target` with `targetname` = name (snake_case, unique per map), so tests name places instead of hard-coding coordinates. Yaw goes in the entity's `angles` as [0, yaw, 0] degrees (§2); yaw 0 faces +x. Origins stay within ±16384 u like brushes, and prop keys are snake_case starting with a letter.
 - **Checks:** each call builds and checks its brushes at once, so a bad shape throws at that call, naming the map and brush (`movement_lab brush 12 (ramp): …`), and a call that throws adds none of its brushes. Besides the brush rules of §2, a brush is refused when it would need edge bevels: for every edge e (between faces with normals n1, n2) and axis k, take u = e × axis_k with the sign that makes u·(n1 + n2) ≥ 0, the side the expanded brush's face would face; u must be parallel (within 1e-6) to an axis or point the same way as one of the brush's face normals. Boxes, boxes rotated about Z and axis-aligned wedges pass.
 - **Materials** default from the contents: `grey/floor` (box, stairs, ramp, slope), `grey/wall` (wall, rotated box, ladder wall), `grey/water`, `tool/clip`, `tool/trigger`, `tool/nodraw`, `tool/ladder`. The cmap `materials` table lists them in order of first use, brush by brush and face by face.

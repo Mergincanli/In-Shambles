@@ -387,7 +387,7 @@ This makes the client's predicted state **bit-identical** to the server's state 
 - M1 implements `origin` through `waterLevel`, plus `stamina`. `wallJumps` and the fields below `stamina` are added by the milestone that first simulates them.
 - `stamina` is stored as an integer count of hundredths (0–65535), so 100 is one stamina point.
 - `flags` bits 0–9 are the ten flags above, in the order listed; new flags take the next bit.
-- Every scalar field holds an integer. Quantize also wraps the view angles to u16, clamps `groundEntity` to −1…32767 (32767 is the world) and `waterLevel` to 0–3, truncating toward zero.
+- Every scalar field holds an integer. Quantize clamps `origin` to ±16384 u and `velocity` to ±(2^19 − 1)/16 u/s (the i20 range) per axis, wraps the view angles to u16, clamps `groundEntity` to −1…32767 (32767 is the world) and `waterLevel` to 0–3, truncating toward zero.
 - A non-finite value is a bug (a dev assert). With asserts off it falls back to 0, except `groundEntity`, which falls back to −1 (none) because 0 is a real entity.
 - Rounding biases: stamina rounds to 0.01 every tick, so a per-second rate moves in steps of 0.6/s at 60 Hz (an 11/s drain runs at 10.8/s, 5/s regen at 4.8/s); M2 tunes the `st_*` cvars with this in mind. Origin rounding to 1/32 u each tick can add about 0.2% distance at 320 u/s, so feel tests measure velocity, not distance travelled.
 

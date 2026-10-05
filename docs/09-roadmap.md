@@ -49,6 +49,8 @@
 
 **Out of scope:** rendering, networking, movement rules.
 
+**Records:** the approved plan and the design it builds on are `docs/design/M1-plan.md` and `docs/design/M1-design.md`.
+
 **Acceptance**
 - Trace unit tests: start-solid, all-solid, grazing edges, corners, epsilon behavior.
 - Fuzz test: random box sweeps never tunnel through brushes.
