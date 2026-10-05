@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { scanSource } from "../../src/code/scan";
 import { parseWeaponIdsDoc } from "../../src/content/weaponDocs";
 import { fromRoot } from "../../src/paths";
 
@@ -126,23 +127,7 @@ const CODE = /\.[cm]?[jt]sx?$/;
 
 /** The text of every string and template literal in a source file, without comments or code. */
 function stringLiterals(source: string): string {
-  const out: string[] = [];
-  for (let i = 0; i < source.length; i++) {
-    const c = source[i];
-    if (c === "/" && source[i + 1] === "/") {
-      i = source.indexOf("\n", i);
-      if (i === -1) break;
-    } else if (c === "/" && source[i + 1] === "*") {
-      i = source.indexOf("*/", i + 2) + 1;
-      if (i === 0) break;
-    } else if (c === '"' || c === "'" || c === "`") {
-      let j = i + 1;
-      while (j < source.length && source[j] !== c) j += source[j] === "\\" ? 2 : 1;
-      out.push(source.slice(i + 1, j));
-      i = j;
-    }
-  }
-  return out.join("\n");
+  return scanSource(source).strings.join("\n");
 }
 
 /** What a player could see in a file: string literals for code, the whole text otherwise. */

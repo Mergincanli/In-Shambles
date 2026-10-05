@@ -23,8 +23,8 @@ export function devAssertsEnabled(): boolean {
  * Throws in dev builds when `condition` is falsy. In prod it's a no-op, so callers must still clamp.
  *
  * Hot paths run this every tick, so keep the success path allocation-free:
- * - `message` must be a string literal; never build it with a template at the call site.
- * - Pass a value worth seeing as `detail`; it's formatted only when the assert fails.
+ * - `message` must be a plain string literal: no template, no `+` concatenation at the call site.
+ * - Pass a value worth seeing as `detail` (a variable, not a call); it's formatted only on failure.
  * - Put expensive conditions behind `if (devAssertsEnabled())`, because prod still evaluates them.
  */
 export function DEV_ASSERT(
