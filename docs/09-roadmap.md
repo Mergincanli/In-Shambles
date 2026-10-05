@@ -7,7 +7,7 @@
 
 | ID | Milestone | Status | Last handoff |
 |---|---|---|---|
-| M0 | Bootstrap & guardrails | ☐ not started | |
+| M0 | Bootstrap & guardrails | ☑ done | [2026-10-05](handoffs/2026-10-05-M0-bootstrap.md) |
 | M1 | Simulation core: tick, math, brush collision, greybox builder | ☐ | |
 | M2 | Base Q3 movement + client shell + Worker server + prediction | ☐ | |
 | — | *Optional:* Style spike: toon material, hull outline, crease lines on greybox (`docs/08` §18) | ☐ | |
