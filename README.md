@@ -32,10 +32,11 @@ pnpm typecheck && pnpm lint && pnpm test
 | `pnpm lint` | Biome lint and format check |
 | `pnpm format` | Apply Biome formatting and safe fixes |
 | `pnpm greybox` | Recompile the greybox courses into `content/maps/` (commit the result) |
+| `pnpm bench` | Sim microbenchmarks against the `docs/10` §4.4 budgets (`--strict` exits 1 on a miss) |
 
 `pnpm dev:server` runs under pnpm, which doesn't forward signals to the server. To stop it from a script or process manager, signal its process group (Ctrl+C does this), or run the bundle directly with `node packages/server/dist/main.js`.
 
-Commands for later milestones (`test:movement`, `test:net`, `bench`, `bots`, `feel-report`, `balance-report`, `mapc`) already exist and print the milestone that adds them. `CLAUDE.md` has the full list.
+Commands for later milestones (`test:movement`, `test:net`, `bots`, `feel-report`, `balance-report`, `mapc`) already exist and print the milestone that adds them. `CLAUDE.md` has the full list.
 
 ## Layout
 

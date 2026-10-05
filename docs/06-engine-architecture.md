@@ -101,13 +101,19 @@ packages/client/src/
 
 packages/tools/src/
   mapc/                TrenchBroom .map → cmap compiler (M5)
-  greybox/             MapBuilder, brush compiler and cmap encoder; code-built test courses (movement lab etc.)
+  greybox/             MapBuilder, brush compiler and cmap encoder; code-built test courses (movement lab etc.);
+                       cli.ts is pnpm greybox
+  vectors/             determinism test vectors for packages/shared/test/vectors (pnpm --filter @game/tools vectors)
+  code/                source scanner (code vs. strings/comments) and the D-016 banned-math list, for the guards
   bots/                headless clients
   reports/             feel-report, balance-report
   replay/              demo inspection
   docs/                Markdown section/table parsing for doc-golden tests (BAL-01)
   content/             content-vs-docs helpers (weapon IDs, damage table)
+  jsonc.ts             JSON-with-comments parser (tsconfig and config guards)
   paths.ts             repo-root resolution
+
+packages/tools/bench/  pnpm bench: run.ts (entry), trace.bench.ts (traceBox on movement_lab, docs/10 §4.4)
 ```
 
 ## 4. Runtime topology

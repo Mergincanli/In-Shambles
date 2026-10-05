@@ -85,6 +85,12 @@
 
 Budgets are checked by `perf-auditor` before closing a milestone. A regression > 20% needs a decision-log entry.
 
+**How `pnpm bench` measures the trace** (`packages/tools/bench/trace.bench.ts`, since M1):
+- **Workload:** `content/maps/movement_lab.cmap`, decoded and built as the game loads it. A seeded Mulberry32 draws 4096 cases per category before the clock runs, into typed arrays. Every case is built from a clear 1/32 u grid spot (`snapOrigin`) on the ground beside a random brush, for 60% of moves swept against a wall, step or slope first, with the standing or crouched hull. Categories, weighted by our ESTIMATE of one pmove player-tick (`docs/03` §3): hull moves ≤ 12 u (3), 0.25 u ground probes (2), 18 u step-up and step-down traces (2) and snap position tests (1; a position test is the zero-length box trace). Long rays (1024–8192 u) are timed but kept out of the average.
+- **Timing:** 1e5 warm-up calls per category, in 100 short rounds so the loops are optimized as whole functions (a loop only ever optimized on-stack can box its doubles and allocate), then 1e6 timed calls per category with `process.hrtime.bigint()`. Results feed a printed sink. A `PerformanceObserver` counts GC events inside the timed loops: anything above 0 means a query allocates.
+- **Report:** ns/op, BVH nodes and brushes tested per call, blocked share and GCs per category, then the weighted box-trace average against the 1 µs budget with PASS/FAIL. The exit code is 0 unless `--strict` is given and the budget or the GC count is missed. `--calls` and `--warmup` change the counts.
+- **M1 result** (Node 22.22, Intel Xeon @ 2.10 GHz cloud VM, 3 runs): weighted average 238–338 ns, about a third of the budget (moves 310–359, ground probes 195–369, step traces 211–335, position tests 161–225, rays 507–605 ns; about 20 of 133 BVH nodes and 1.7 brushes tested per move), 0 GCs. Re-run on the reference machines in §5.
+
 ## 5. Reference machines (fill in)
 
 | Role | Machine |

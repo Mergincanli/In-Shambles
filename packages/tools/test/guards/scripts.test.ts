@@ -242,7 +242,8 @@ describe("test:balance", () => {
 });
 
 describe("stub scripts", () => {
-  // CLAUDE.md: "Until their milestone, these are stubs that print "added in M#": `bench` (M1); ..."
+  // CLAUDE.md: "Until their milestone, these are stubs that print "added in M#": `test:movement`,
+  // `test:net`, `feel-report` (M2); ..."
   const sentence = /Until their milestone, these are stubs[^\n]*/.exec(claudeMd)?.[0] ?? "";
   const documented = new Map(
     sentence.split(";").flatMap((part) => {
@@ -257,6 +258,13 @@ describe("stub scripts", () => {
     expect(
       Object.fromEntries(stubs.map(([name, command]) => [name, command.split(" ").at(-1)])),
     ).toEqual(Object.fromEntries(documented));
+  });
+
+  it("match the later-milestone list in README.md", () => {
+    const readme = readFileSync(fromRoot("README.md"), "utf8");
+    const line = /Commands for later milestones \(([^)]*)\)/.exec(readme)?.[1] ?? "";
+    const listed = [...line.matchAll(/`([a-z:-]+)`/g)].map((m) => m[1]);
+    expect(listed.sort()).toEqual(stubs.map(([name]) => name).sort());
   });
 
   it.each(stubs)("%s prints the milestone that adds it and exits 0", (name, command) => {

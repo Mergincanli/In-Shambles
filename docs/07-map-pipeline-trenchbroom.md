@@ -36,7 +36,7 @@ Both A and B produce the **same compiled format**, so the engine never cares whe
 - `buildBrush` adds only axial bevels, which make boxes, boxes rotated about Z and axis-aligned wedges exact; the greybox builder rejects shapes that would need edge bevels until `mapc` adds them in M5.
 - A brush is rejected (compile error naming the brush) unless it has ≥ 4 faces, is closed (every edge on exactly 2 faces, V − E + F = 2), every vertex lies on ≥ 3 faces and inside all planes within 1e-4 u, every edge is ≥ 1/8 u (8× the weld distance, so welding never joins the two ends of an edge), no two vertices of a face are within the 1/64 u weld distance, its volume is > 1 u³ and it stays within ±16384 u.
 
-**cmap v1 layout** (M1; decoder `packages/shared/src/world/cmap.ts`, encoder `packages/tools/src/greybox/cmapEncode.ts`). Integers are u32 unless marked i32, floats are f32, all little-endian:
+**cmap v1 layout** (M1, D-020; decoder `packages/shared/src/world/cmap.ts`, encoder `packages/tools/src/greybox/cmapEncode.ts`). Integers are u32 unless marked i32, floats are f32, all little-endian:
 
 | Offset | Field |
 |---|---|
