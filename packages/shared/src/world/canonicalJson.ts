@@ -1,7 +1,8 @@
 /**
- * Canonical JSON for compiler output (cmap metadata): the same value always gives the same bytes,
- * in every engine and locale. JSON.stringify can't do this for objects, because it writes
- * integer-like keys ("10") before the others whatever order they were inserted in.
+ * Canonical JSON for cmap metadata (docs/07 §2): the same value always gives the same bytes, in
+ * every engine and locale, and decodeCmap accepts only text this reproduces. JSON.stringify can't
+ * do this for objects, because it writes integer-like keys ("10") before the others whatever order
+ * they were inserted in.
  * - object keys sorted by UTF-16 code unit; keys whose value is undefined are left out;
  * - numbers via String(n), finite only, so −0 is written as 0;
  * - strings via JSON.stringify, then every character above 0x7E escaped as \uXXXX, so the text is

@@ -15,9 +15,9 @@ import {
   CMAP_VERTEX_FLOATS,
   type CmapData,
   CmapError,
+  canonicalJson,
   cmapContentHash,
 } from "@game/shared";
-import { canonicalJson } from "./canonicalJson";
 
 /**
  * Writes a cmap v1 file (layout in shared/world/cmap.ts, docs/07 §2): the exact inverse of

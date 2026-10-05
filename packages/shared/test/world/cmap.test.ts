@@ -101,9 +101,10 @@ describe("decodeCmap on a hand-written file", () => {
     expect(buildCollisionWorld(cmap).brushCount).toBe(0);
   });
 
-  it("normalizes -0 in JSON numbers", () => {
-    const cmap = decodeCmap(emptyMap(JSON_TEXT.replace("[0,0,24]", "[-0,0,24]")));
-    expect(Object.is(cmap.entities[0]?.origin?.[0], 0)).toBe(true);
+  it("refuses -0 in JSON numbers: the canonical form writes 0", () => {
+    expect(() => decodeCmap(emptyMap(JSON_TEXT.replace("[0,0,24]", "[-0,0,24]")))).toThrow(
+      /JSON is not canonical .* differs at character \d+, "-0,0,24/,
+    );
   });
 
   it("refuses a bad magic, another version and a stale hash with CmapError", () => {
@@ -122,16 +123,19 @@ describe("decodeCmap on a hand-written file", () => {
 });
 
 describe("decodeCmap reads every record field at its documented offset", () => {
-  // One rotated box (faces, then axial bevels), one surface, four vertices: field values are
-  // chosen pairwise distinct so a swap of two fields on both encoder and decoder shows up here.
+  // One rotated box (faces, then axial bevels), two surfaces, four vertices: field values of
+  // surface 1 are chosen pairwise distinct so a swap of two fields on both encoder and decoder
+  // shows up here.
   const brush = buildBrush(rotatedBoxPlanes([10, 20, 30], [16, 8, 4], Math.sqrt(3) / 2, 0.5));
   const planeCount = brush.planes.length / 4;
   const flags = (p: number) => (p === 1 ? SURF_LADDER : p === 2 ? SURF_SLICK : 0);
   const material = (p: number) => (p < brush.faceCount ? p % 2 : -1);
   const vertex = (i: number, k: number) => 100 * i + k + 0.5;
   const indices = [0, 0, 0, 2, 0, 1];
+  const b = Array.from(brush.bounds);
   const json =
-    '{"bounds":{"maxs":[1,2,3],"mins":[-1,-2,-3]},"compiler":{"name":"hand","version":7},' +
+    `{"bounds":{"maxs":[${b.slice(3).join(",")}],"mins":[${b.slice(0, 3).join(",")}]},` +
+    '"compiler":{"name":"hand","version":7},' +
     '"entities":[],"materials":["m0","m1"],"name":"fields","units":"inch","up":"z"}';
   const bytes = handMap(json, [
     {
@@ -167,12 +171,13 @@ describe("decodeCmap reads every record field at its documented offset", () => {
     {
       tag: CMAP_TAG_SURFACES,
       recordBytes: 24,
-      count: 1,
-      write: (v, at) => {
-        v.setUint32(at, 1, true); // material
-        v.setUint32(at + 4, 1, true); // firstVertex
-        v.setUint32(at + 8, 3, true); // vertexCount
-        v.setUint32(at + 12, 3, true); // firstIndex
+      count: 2,
+      write: (v, at, i) => {
+        // Surface 0 is one vertex and one triangle; surface 1 follows it.
+        v.setUint32(at, i, true); // material
+        v.setUint32(at + 4, i, true); // firstVertex
+        v.setUint32(at + 8, i === 0 ? 1 : 3, true); // vertexCount
+        v.setUint32(at + 12, 3 * i, true); // firstIndex
         v.setUint32(at + 16, 3, true); // indexCount; +20 reserved stays 0
       },
     },
@@ -196,7 +201,7 @@ describe("decodeCmap reads every record field at its documented offset", () => {
     expect(planeCount).toBeGreaterThan(brush.faceCount);
     const cmap = decodeCmap(bytes);
     expect(cmap.compiler).toEqual({ name: "hand", version: 7 });
-    expect(cmap.bounds).toEqual({ mins: [-1, -2, -3], maxs: [1, 2, 3] });
+    expect(cmap.bounds).toEqual({ mins: b.slice(0, 3), maxs: b.slice(3) });
     expect(Array.from(cmap.planes)).toEqual(Array.from(brush.planes));
     expect(Array.from(cmap.planeSurfaceFlags)).toEqual(
       Array.from({ length: planeCount }, (_, p) => flags(p)),
@@ -209,11 +214,11 @@ describe("decodeCmap reads every record field at its documented offset", () => {
     expect(Array.from(cmap.brushes.faceCount)).toEqual([brush.faceCount]);
     expect(Array.from(cmap.brushes.contents)).toEqual([CONTENTS_SOLID | CONTENTS_LADDER]);
     expect(Array.from(cmap.brushes.bounds)).toEqual(Array.from(brush.bounds));
-    expect(Array.from(cmap.surfaces.material)).toEqual([1]);
-    expect(Array.from(cmap.surfaces.firstVertex)).toEqual([1]);
-    expect(Array.from(cmap.surfaces.vertexCount)).toEqual([3]);
-    expect(Array.from(cmap.surfaces.firstIndex)).toEqual([3]);
-    expect(Array.from(cmap.surfaces.indexCount)).toEqual([3]);
+    expect(Array.from(cmap.surfaces.material)).toEqual([0, 1]);
+    expect(Array.from(cmap.surfaces.firstVertex)).toEqual([0, 1]);
+    expect(Array.from(cmap.surfaces.vertexCount)).toEqual([1, 3]);
+    expect(Array.from(cmap.surfaces.firstIndex)).toEqual([0, 3]);
+    expect(Array.from(cmap.surfaces.indexCount)).toEqual([3, 3]);
     expect(Array.from(cmap.vertices)).toEqual(
       Array.from({ length: 32 }, (_, n) => vertex(n >> 3, n & 7)),
     );

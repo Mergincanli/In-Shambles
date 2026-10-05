@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canonicalJson } from "../../src/greybox/canonicalJson";
+import { canonicalJson } from "../../src/world/canonicalJson";
 
 describe("canonicalJson", () => {
   it("sorts keys by code unit, where JSON.stringify puts integer-like keys first", () => {

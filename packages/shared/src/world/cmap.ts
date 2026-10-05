@@ -1,3 +1,5 @@
+import { ORIGIN_LIMIT } from "../math/quant";
+import { canonicalJson } from "./canonicalJson";
 import { CMAP_HASH_OFFSET, cmapContentHash, cmapHashHex } from "./cmapHash";
 import {
   type CollisionBrushSource,
@@ -270,7 +272,15 @@ function entity(v: unknown, where: string, brushCount: number): CmapEntity {
     classname: text(o.classname, `${where}.classname`),
     props: props as Record<string, string>,
   };
-  if (o.origin !== undefined) result.origin = vec3(o.origin, `${where}.origin`);
+  if (o.origin !== undefined) {
+    const origin = vec3(o.origin, `${where}.origin`);
+    for (let k = 0; k < 3; k++) {
+      if (Math.abs(origin[k] as number) > ORIGIN_LIMIT) {
+        fail(`${where}.origin[${k}] is outside the ±${ORIGIN_LIMIT} u world limit`);
+      }
+    }
+    result.origin = origin;
+  }
   if (o.angles !== undefined) result.angles = vec3(o.angles, `${where}.angles`);
   if (o.brushes !== undefined) {
     const list = array(o.brushes, `${where}.brushes`);
@@ -285,6 +295,13 @@ function entity(v: unknown, where: string, brushCount: number): CmapEntity {
     result.brushes = brushes;
   }
   return result;
+}
+
+/** Where `json` first departs from its canonical form, for the error message. */
+function firstDifference(json: string, canonical: string): string {
+  let i = 0;
+  while (i < json.length && json.charCodeAt(i) === canonical.charCodeAt(i)) i++;
+  return `: it differs at character ${i}, ${JSON.stringify(json.slice(i, i + 16))}`;
 }
 
 type CmapMeta = Pick<
@@ -331,6 +348,15 @@ function parseMeta(json: string, brushCount: number): CmapMeta {
   }
   if (root.units !== "inch") fail(`units must be "inch"`);
   if (root.up !== "z") fail(`up must be "z"`);
+  // Spacing, key order, escapes and number spellings would otherwise give one map many hashes.
+  let canonical = "";
+  try {
+    canonical = canonicalJson(parsed);
+  } catch (e) {
+    fail(`JSON has no canonical form: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  if (canonical !== json)
+    fail(`JSON is not canonical (docs/07 §2)${firstDifference(json, canonical)}`);
   return {
     name: text(root.name, "name"),
     bounds: { mins, maxs },
@@ -476,6 +502,7 @@ export function decodeCmap(bytes: Uint8Array, options?: DecodeCmapOptions): Cmap
     }
   }
   validateBrushes(meta.materials.length, planes, planeSurfaceFlags, planeMaterial, brushes);
+  validateMapBounds(meta.bounds, brushes.bounds);
 
   const vertices = readF32(view, vtxs, CMAP_VERTEX_FLOATS, "VTXS");
   const indices = readU32Field(view, idxs, 4, 0);
@@ -590,17 +617,37 @@ function validateBrushes(
   }
 }
 
+/** The header bounds are exactly the union of the brush bounds, and all 0 without brushes. */
+function validateMapBounds(bounds: CmapBounds, brushBounds: Float32Array): void {
+  const brushCount = brushBounds.length / 6;
+  for (let k = 0; k < 3; k++) {
+    let lo = brushCount === 0 ? 0 : Number.POSITIVE_INFINITY;
+    let hi = brushCount === 0 ? 0 : Number.NEGATIVE_INFINITY;
+    for (let i = 0; i < brushCount; i++) {
+      lo = Math.min(lo, brushBounds[6 * i + k] as number);
+      hi = Math.max(hi, brushBounds[6 * i + 3 + k] as number);
+    }
+    if (bounds.mins[k] !== lo || bounds.maxs[k] !== hi) {
+      fail(
+        `bounds on axis ${k} are [${bounds.mins[k]}, ${bounds.maxs[k]}], the brushes span [${lo}, ${hi}]`,
+      );
+    }
+  }
+}
+
+/**
+ * Surfaces tile the vertex and index lists in order, one non-empty surface per material in
+ * increasing material order (docs/07 §2). Every index then belongs to exactly one surface, so the
+ * index check is linear in the file size, and an accepted file has no stray geometry.
+ */
 function validateSurfaces(
   materialCount: number,
   vertexTotal: number,
   indices: Uint32Array,
   surfaces: CmapSurfaces,
 ): void {
-  // Covers indices no surface references; the per-surface bound below is the tighter one.
-  for (let k = 0; k < indices.length; k++) {
-    const index = indices[k] as number;
-    if (index >= vertexTotal) fail(`index ${k} is ${index}, past the ${vertexTotal} vertices`);
-  }
+  let nextVertex = 0;
+  let nextIndex = 0;
   for (let i = 0; i < surfaces.material.length; i++) {
     const material = surfaces.material[i] as number;
     const firstVertex = surfaces.firstVertex[i] as number;
@@ -608,12 +655,22 @@ function validateSurfaces(
     const firstIndex = surfaces.firstIndex[i] as number;
     const indexCount = surfaces.indexCount[i] as number;
     if (material >= materialCount) fail(`surface ${i}: material ${material} out of range`);
+    if (i > 0 && material <= (surfaces.material[i - 1] as number)) {
+      fail(`surface ${i}: material ${material} is not above the previous surface's`);
+    }
+    if (firstVertex !== nextVertex) {
+      fail(`surface ${i}: firstVertex ${firstVertex}, expected ${nextVertex} (surfaces tile VTXS)`);
+    }
+    if (firstIndex !== nextIndex) {
+      fail(`surface ${i}: firstIndex ${firstIndex}, expected ${nextIndex} (surfaces tile IDXS)`);
+    }
     if (firstVertex + vertexCount > vertexTotal) {
       fail(`surface ${i}: vertices ${firstVertex}+${vertexCount} past ${vertexTotal}`);
     }
     if (firstIndex + indexCount > indices.length) {
       fail(`surface ${i}: indices ${firstIndex}+${indexCount} past ${indices.length}`);
     }
+    if (indexCount === 0) fail(`surface ${i}: has no triangles`);
     if (indexCount % 3 !== 0) fail(`surface ${i}: indexCount ${indexCount} is not triangles`);
     for (let k = firstIndex; k < firstIndex + indexCount; k++) {
       const index = indices[k] as number;
@@ -621,6 +678,13 @@ function validateSurfaces(
         fail(`surface ${i}: index ${k} is ${index}, past its ${vertexCount} vertices`);
       }
     }
+    nextVertex = firstVertex + vertexCount;
+    nextIndex = firstIndex + indexCount;
+  }
+  if (nextVertex !== vertexTotal)
+    fail(`surfaces cover ${nextVertex} of the ${vertexTotal} vertices`);
+  if (nextIndex !== indices.length) {
+    fail(`surfaces cover ${nextIndex} of the ${indices.length} indices`);
   }
 }
 

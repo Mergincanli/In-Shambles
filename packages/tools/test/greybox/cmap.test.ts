@@ -20,6 +20,7 @@ import {
   CONTENTS_SOLID,
   CONTENTS_TRIGGER,
   type CollisionWorld,
+  canonicalJson,
   cmapContentHash,
   cmapHashHex,
   cmapTag,
@@ -38,7 +39,6 @@ import {
   wedgePlanes,
 } from "@game/shared";
 import { describe, expect, it } from "vitest";
-import { canonicalJson } from "../../src/greybox/canonicalJson";
 import { encodeCmap } from "../../src/greybox/cmapEncode";
 
 // M1 design E: encodeCmap and decodeCmap are exact inverses, the hash covers every byte but its
@@ -85,7 +85,7 @@ function sample(): CmapData {
   });
   const entities: CmapEntity[] = [
     { classname: "info_player_start", origin: [0, 0, 24], angles: [0, 90, 0], props: {} },
-    { classname: "info_target", origin: [-0.5, 1e-7, 1e21], props: { b: "1", "10": "x", a: "" } },
+    { classname: "info_target", origin: [-0.5, 1e-7, -16384], props: { b: "1", "10": "x", a: "" } },
     {
       classname: "trigger_timer",
       props: { name: "café ☕ \u{1f600}", note: 'quote" back\\ tab\t' },
@@ -104,7 +104,8 @@ function sample(): CmapData {
   ]);
   return {
     name: "cmap_unit_test",
-    bounds: { mins: [-512, -512, -16], maxs: [512, 512, 128] },
+    // The union of the brush bounds: the box's x and y, the rotated box's z.
+    bounds: { mins: [-512, -512, -16], maxs: [512, 512, 240] },
     compiler: { name: "greybox", version: 1 },
     entities,
     materials: MATERIALS,
@@ -347,9 +348,9 @@ describe("encodeCmap / decodeCmap round trip", () => {
     expect(jsonLength % 8).toBe(0);
     expect(padded).toBe(json.padEnd(jsonLength, " "));
     expect(json).toMatch(/^[\x20-\x7e]*$/);
-    expect(json.startsWith('{"bounds":{"maxs":[512,512,128],"mins":[-512,-512,-16]},')).toBe(true);
+    expect(json.startsWith('{"bounds":{"maxs":[512,512,240],"mins":[-512,-512,-16]},')).toBe(true);
     expect(json).toContain('"props":{"10":"x","a":"","b":"1"}');
-    expect(json).toContain('"origin":[-0.5,1e-7,1e+21]');
+    expect(json).toContain('"origin":[-0.5,1e-7,-16384]');
     expect(json).toContain("caf\\u00e9 \\u2615 \\ud83d\\ude00");
     expect(json.endsWith('"name":"cmap_unit_test","units":"inch","up":"z"}')).toBe(true);
   });
@@ -527,6 +528,41 @@ function editSection(tag: number, edit: (payload: DataView) => void): Uint8Array
 function face(d: Mutable, brush: number, plane: number, material: number): void {
   d.planeMaterial = d.planeMaterial.slice();
   d.planeMaterial[(d.brushes.firstPlane[brush] as number) + plane] = material;
+}
+
+/** JSON that parses to the sample's metadata but is not the text canonicalJson writes for it. */
+function nonCanonicalJson(): (readonly [string, () => Uint8Array, RegExp])[] {
+  const json = disassemble(BYTES).json;
+  const variant = (from: string, to: string) => () => {
+    expect(json).toContain(from);
+    return withJsonText(BYTES, json.replace(from, to));
+  };
+  const notCanonical = /JSON is not canonical \(docs\/07 §2\): it differs at character \d+/;
+  return [
+    ["JSON with inner whitespace", variant('"units":', '"units" :'), notCanonical],
+    [
+      "JSON with keys out of order",
+      variant('"units":"inch","up":"z"', '"up":"z","units":"inch"'),
+      notCanonical,
+    ],
+    [
+      "JSON with a duplicate key",
+      variant('"name":"cmap_unit_test"', '"name":"x","name":"cmap_unit_test"'),
+      notCanonical,
+    ],
+    [
+      "JSON with a needless escape",
+      variant('"cmap_unit_test"', '"cmap_unit_tes\\u0074"'),
+      notCanonical,
+    ],
+    [
+      "JSON with a raw DEL character",
+      variant('"cmap_unit_test"', '"cmap_unit_test\x7f"'),
+      notCanonical,
+    ],
+    ["JSON with another number spelling", variant('"version":1', '"version":1.0e0'), notCanonical],
+    ["JSON with -0", variant("[0,0,24]", "[-0,0,24]"), notCanonical],
+  ];
 }
 
 const rejections: readonly (readonly [string, () => Uint8Array, RegExp])[] = [
@@ -878,8 +914,81 @@ const rejections: readonly (readonly [string, () => Uint8Array, RegExp])[] = [
   [
     "an index past the vertex list",
     () => editSection(CMAP_TAG_INDICES, (v) => v.setUint32(4 * 2, 7, true)),
-    /index 2 is 7, past the 7 vertices/,
+    /surface 0: index 2 is 7, past its 4 vertices/,
   ],
+  [
+    "a surface whose indices overlap the previous surface's",
+    () => u32(BYTES, surfaceRecord(1, 3), 0),
+    /surface 1: firstIndex 0, expected 6 \(surfaces tile IDXS\)/,
+  ],
+  [
+    "a surface whose vertices overlap the previous surface's",
+    () => u32(BYTES, surfaceRecord(1, 1), 0),
+    /surface 1: firstVertex 0, expected 4 \(surfaces tile VTXS\)/,
+  ],
+  [
+    "a gap between two surfaces' vertices",
+    () => u32(u32(BYTES, surfaceRecord(1, 1), 5), surfaceRecord(1, 2), 2),
+    /surface 1: firstVertex 5, expected 4/,
+  ],
+  [
+    "a material repeated by the next surface",
+    () => u32(BYTES, surfaceRecord(1, 0), 0),
+    /surface 1: material 0 is not above the previous surface's/,
+  ],
+  [
+    "surfaces out of material order",
+    () => u32(u32(BYTES, surfaceRecord(0, 0), 2), surfaceRecord(1, 0), 1),
+    /surface 1: material 1 is not above the previous surface's/,
+  ],
+  [
+    "a surface with no triangles",
+    () =>
+      encodeEdited((d) => {
+        d.surfaces = {
+          material: Uint32Array.of(0, 1, 2),
+          firstVertex: Uint32Array.of(0, 4, 7),
+          vertexCount: Uint32Array.of(4, 3, 0),
+          firstIndex: Uint32Array.of(0, 6, 9),
+          indexCount: Uint32Array.of(6, 3, 0),
+        };
+      }),
+    /surface 2: has no triangles/,
+  ],
+  [
+    "vertices no surface covers",
+    () =>
+      encodeEdited((d) => {
+        d.vertices = Float32Array.from([...d.vertices, 0, 0, 0, 0, 0, 1, 0, 0]);
+      }),
+    /surfaces cover 7 of the 8 vertices/,
+  ],
+  [
+    "indices no surface covers",
+    () => encodeEdited((d) => (d.indices = Uint32Array.from([...d.indices, 0, 0, 0]))),
+    /surfaces cover 9 of the 12 indices/,
+  ],
+  [
+    "JSON bounds that are not the union of the brush bounds",
+    () => withJson(BYTES, (r) => (r.bounds = { mins: [0, 0, 0], maxs: [1, 1, 1] })),
+    /bounds on axis 0 are \[0, 1\], the brushes span \[-512, 512\]/,
+  ],
+  [
+    "JSON bounds that contain the brushes but are larger",
+    () => withJson(BYTES, (r) => (r.bounds = { mins: [-512, -512, -16], maxs: [512, 512, 241] })),
+    /bounds on axis 2 are \[-16, 241\], the brushes span \[-16, 240\]/,
+  ],
+  [
+    "an entity origin outside the world limit",
+    () => withJson(BYTES, (r) => (entityOf(r, 1).origin = [-0.5, 16384.5, 0])),
+    /entities\[1\]\.origin\[1\] is outside the ±16384 u world limit/,
+  ],
+  [
+    "an entity origin far outside the world limit",
+    () => withJson(BYTES, (r) => (entityOf(r, 0).origin = [1e30, 0, 0])),
+    /entities\[0\]\.origin\[0\] is outside the ±16384 u world limit/,
+  ],
+  ...nonCanonicalJson(),
   [
     "a non-zero surface reserved word",
     () => u32(BYTES, surfaceRecord(0, 5), 1),

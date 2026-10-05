@@ -15,6 +15,7 @@ export * from "./sim/usercmd";
 export * from "./time";
 export * from "./world/brushBuild";
 export * from "./world/bvh";
+export * from "./world/canonicalJson";
 export * from "./world/cmap";
 export * from "./world/cmapHash";
 export * from "./world/collisionWorld";
