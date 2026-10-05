@@ -152,6 +152,17 @@
 - `docs/07` §2 carries a "Pinned down in M1" note and `docs/06` §3 lists the world modules.
 - The shared polygonizer is the single implementation: the greybox compiler (M1), `mapc` (M5) and the trace fuzz oracle all use it, and its own tests cross-check it against brute-force triple-plane intersection.
 
+### D-020 — cmap v1 layout: contentHash in a binary preamble (2026-10-05, accepted)
+**Context:** `docs/07` §2 put `contentHash` in the JSON header, which would make the hash cover a header that contains it, and allowed a `.cmap.json` + `.cmap.bin` pair in dev. D-008 fixes the format's role, not its layout (M1 plan, spec change 3).
+**Decision:**
+- One little-endian file: a 32-byte preamble (magic, `formatVersion`, JSON length, section count, the 64-bit `contentHash`, total length), a section table, canonical ASCII JSON metadata, then 8-aligned binary sections (`PLNS`, `PLSF`, `BRSH`, `SURF`, `VTXS`, `IDXS`). No dev file pair: the greybox compiler writes the single file directly.
+- `contentHash` is two Murmur3 x86_32 lanes over the whole file with the hash field read as zero: every other byte is covered, the hash never covers itself. This includes the preamble (the M1 plan said bytes [32, EOF)), so a corrupted `formatVersion`, length or reserved word also changes it. Identity and caching only, not security.
+- The decoder accepts only the exact layout the encoder writes (sections contiguous in table order, zero padding, nothing after the last section, JSON followed by fewer than 8 spaces), so no two accepted files differ only in filler bytes.
+- The BVH is built at load time, deterministically, not stored. Unknown section tags are ignored; `formatVersion` changes when the layout breaks, `compiler.version` when output changes on purpose.
+
+**Consequences:**
+- `docs/07` §2 carries the layout tables; `decodeCmap` validates everything and throws `CmapError`; `*.cmap` is `binary` in `.gitattributes`. Tests: `packages/tools/test/greybox/cmap.test.ts`, `packages/shared/test/world/cmap{,Hash}.test.ts`.
+
 ---
 
 <!-- Template

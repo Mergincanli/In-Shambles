@@ -74,7 +74,11 @@ function isF32(x: number): boolean {
   return Number.isFinite(x) && Math.fround(x) === x;
 }
 
-function validateBrush(b: CollisionBrushSource, i: number): number {
+/**
+ * Checks one brush against createCollisionWorld's rules and returns its plane count; throws
+ * CollisionWorldError naming brush `i`. Loaders call it to reject a file before building anything.
+ */
+export function validateCollisionBrush(b: CollisionBrushSource, i: number): number {
   const fail = (what: string): never => {
     throw new CollisionWorldError(`brush ${i}: ${what}`);
   };
@@ -153,7 +157,7 @@ function validateBrush(b: CollisionBrushSource, i: number): number {
 export function createCollisionWorld(brushes: readonly CollisionBrushSource[]): CollisionWorld {
   let planeCount = 0;
   for (let i = 0; i < brushes.length; i++) {
-    planeCount += validateBrush(brushes[i] as CollisionBrushSource, i);
+    planeCount += validateCollisionBrush(brushes[i] as CollisionBrushSource, i);
   }
   if (planeCount > 0xffffffff) throw new CollisionWorldError(`${planeCount} planes in total`);
   const bounds = new Float64Array(6 * brushes.length);

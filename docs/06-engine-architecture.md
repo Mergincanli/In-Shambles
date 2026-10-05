@@ -37,7 +37,9 @@ packages/shared/src/
   cvars/               registry, flags, replicated block (hash), defaults from docs
   debug/               DEV_ASSERT / setDevAsserts (dev-only checks behind a runtime flag)
   world/
-    cmap.ts            compiled map format types (docs/07)
+    cmap.ts            compiled map format v1 (docs/07 §2): types, validating decodeCmap → CmapError,
+                       buildCollisionWorld (f32 planes widened to f64, BVH built at load)
+    cmapHash.ts        64-bit contentHash (two Murmur3 lanes; identity and caching, not security)
     collisionWorld.ts  typed-array brushes (planes, faces then bevels, contents, bounds)
     shapes.ts          plane sets: box, box rotated about Z, axis-aligned wedge
     polygonize.ts      planes → welded, validated face polygons (build time)

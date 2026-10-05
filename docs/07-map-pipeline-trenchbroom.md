@@ -14,15 +14,15 @@ Both A and B produce the **same compiled format**, so the engine never cares whe
 
 ## 2. Compiled map format (`cmap`, version 1)
 
-- **Container:** one binary file + JSON header (or a `.cmap.json` + `.cmap.bin` pair in dev).
-- **Header:** `version`, `name`, `contentHash`, `bounds`, `units: "inch"`, `up: "z"`.
+- **Container:** one little-endian binary file, `<name>.cmap` (layout below).
+- **Header:** a 32-byte binary preamble (`formatVersion`, `contentHash`, lengths) plus canonical ASCII JSON metadata: `bounds`, `compiler: {name, version}`, `entities`, `materials`, `name`, `units: "inch"`, `up: "z"`. All geometry is in binary sections.
 - **Brushes:** for each brush:
   - planes (normal xyz f32 + dist f32), bounds
   - `contents` bitflags: SOLID, PLAYERCLIP, WATER, LADDER, SLICK, NODAMAGE, TRIGGER, NODRAW
   - optional `surfaceFlags` per side (ladder face, footstep material)
-- **BVH:** prebuilt node array over brush bounds (or built at load time, deterministically).
+- **BVH:** built at load time over the brush bounds, deterministically (not stored in v1).
 - **Render surfaces:**
-  - per material: vertex buffer (position, normal, uv0, optional uv1 for lightmaps), index buffer
+  - per material: vertex buffer (position, normal, uv0; a later uv1 for lightmaps comes as a new section or format version), index buffer
   - static, merged
 - **Entities:** `{ classname, origin?, angles?, props: Record<string,string>, brushes?: number[] }` (spawns, flags, triggers, items, lights, timers).
 - **Optional (later):** cluster visibility (PVS-like) for relevance (`docs/05` §9.1); lightmap atlas.
@@ -35,6 +35,34 @@ Both A and B produce the **same compiled format**, so the engine never cares whe
 - Loaders reject a brush whose bounds are not exactly the distances of six axial planes among its faces and bevels: the BVH culls by the bounds, so a brush reaching past them would hide hits from `traceBox` that `traceBoxBrute` reports.
 - `buildBrush` adds only axial bevels, which make boxes, boxes rotated about Z and axis-aligned wedges exact; the greybox builder rejects shapes that would need edge bevels until `mapc` adds them in M5.
 - A brush is rejected (compile error naming the brush) unless it has ≥ 4 faces, is closed (every edge on exactly 2 faces, V − E + F = 2), every vertex lies on ≥ 3 faces and inside all planes within 1e-4 u, every edge is ≥ 1/8 u (8× the weld distance, so welding never joins the two ends of an edge), no two vertices of a face are within the 1/64 u weld distance, its volume is > 1 u³ and it stays within ±16384 u.
+
+**cmap v1 layout** (M1; decoder `packages/shared/src/world/cmap.ts`, encoder `packages/tools/src/greybox/cmapEncode.ts`). Integers are u32 unless marked i32, floats are f32, all little-endian:
+
+| Offset | Field |
+|---|---|
+| 0 | magic `"CMAP"` (4 ASCII bytes) |
+| 4 | `formatVersion` = 1 |
+| 8 | `jsonByteLength`: the JSON's length, padded with spaces to a multiple of 8 |
+| 12 | `sectionCount` |
+| 16, 20 | `hashLo`, `hashHi`: the `contentHash` |
+| 24 | `totalByteLength`: the file length |
+| 28 | reserved, 0 |
+| 32 | section table: `sectionCount` × {fourcc `tag`, `offset`, `byteLength`, `count`} (16 B each) |
+| … | the JSON (no leading or trailing whitespace, then fewer than 8 padding spaces), then the sections in table order, each at the first 8-aligned offset after the previous one and zero-padded to 8 bytes; the last one's padding ends the file |
+
+| Tag | Record | Contents |
+|---|---|---|
+| `PLNS` | 16 B | plane nx, ny, nz, d (n·x ≤ d is inside); each brush's faces, then its bevels, brush by brush |
+| `PLSF` | 8 B | per plane: `surfaceFlags`, i32 material index (−1 exactly for bevels) |
+| `BRSH` | 40 B | `firstPlane`, `planeCount`, `faceCount`, `contents`, f32 bounds min xyz, max xyz |
+| `SURF` | 24 B | render surface: material, `firstVertex`, `vertexCount`, `firstIndex`, `indexCount`, reserved 0 |
+| `VTXS` | 32 B | vertex: position xyz, normal xyz, uv0 |
+| `IDXS` | 4 B | triangle index, relative to its surface's `firstVertex` |
+
+- **JSON** is canonical so compiles are byte-identical: keys sorted by UTF-16 code unit, numbers written with `String(n)` (finite only, −0 as 0), every character above 0x7E escaped as `\uXXXX`, no whitespace. Entities are `{classname, origin?, angles?, props, brushes?}` with `brushes` indexing `BRSH`; `materials` is the list `PLSF` and `SURF` index. Nothing in a file depends on time, paths or the machine.
+- **contentHash:** 64 bits, two Murmur3 x86_32 lanes (seeds `0x636d6170` low, `0x9e3779b9` high) over the whole file with the 8 hash bytes read as zero, so it covers every other byte, the preamble included, and never itself. It is written as 16 lowercase hex digits, high lane first. It is for identity and caching (did client and server load the same map?), not security.
+- **Versions:** `formatVersion` changes only when the layout breaks; `compiler.version` changes whenever compiler output changes on purpose, which explains a changed committed `.cmap`. Readers skip section tags they don't know, so new sections can be added without a new format version; the JSON keys are fixed for a format version (entities extend through `props`).
+- **Validation:** the decoder checks everything before returning (magic, version, lengths, alignment, the exact layout above with no gaps, overlaps, trailing bytes or non-zero padding, record sizes, ASCII JSON and its structure, index ranges, finite floats, known contents and surface bits, each brush's bounds against its axial planes, brushes covering the plane list in order, materials per plane, render-surface ranges, the hash) and throws `CmapError`; it never returns partial data. `*.cmap` files are `binary` in `.gitattributes`.
 
 ## 3. Phase A: greybox builder and test courses
 

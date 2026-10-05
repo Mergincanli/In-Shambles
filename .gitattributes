@@ -14,3 +14,4 @@
 *.woff binary
 *.woff2 binary
 *.zip binary
+*.cmap binary
