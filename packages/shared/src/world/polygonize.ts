@@ -32,7 +32,7 @@ export {
 /** Half-size of the starting square on each plane: well past the ±16384 u world limit. */
 const BASE_HALF_SIZE = 65536;
 /** Clip classification band: a vertex this close to a plane counts as on it. */
-const ON_EPSILON = 1e-5;
+const CLIP_PLANE_EPSILON = 1e-5;
 /** A face smaller than this (u²) means its plane only touches the brush: redundant. */
 const MIN_FACE_AREA = 1e-3;
 /** Consecutive polygon vertices this close merge; a vertex this close to its neighbours' line goes. */
@@ -164,8 +164,11 @@ function clipPolygon(poly: number[], dist: number[]): number[] {
     const dq = at(dist, k2);
     const p = 3 * k;
     const q = 3 * k2;
-    if (dp <= ON_EPSILON) out.push(at(poly, p), at(poly, p + 1), at(poly, p + 2));
-    if ((dp > ON_EPSILON && dq < -ON_EPSILON) || (dp < -ON_EPSILON && dq > ON_EPSILON)) {
+    if (dp <= CLIP_PLANE_EPSILON) out.push(at(poly, p), at(poly, p + 1), at(poly, p + 2));
+    if (
+      (dp > CLIP_PLANE_EPSILON && dq < -CLIP_PLANE_EPSILON) ||
+      (dp < -CLIP_PLANE_EPSILON && dq > CLIP_PLANE_EPSILON)
+    ) {
       const t = dp / (dp - dq);
       out.push(
         at(poly, p) + (at(poly, q) - at(poly, p)) * t,
@@ -288,8 +291,8 @@ function facePolygon(planes: Float64Array, count: number, j: number): number[] |
     for (let k = 0; k < poly.length; k += 3) {
       const s = mx * at(poly, k) + my * at(poly, k + 1) + mz * at(poly, k + 2) - md;
       dist.push(s);
-      if (s > ON_EPSILON) front++;
-      else if (s < -ON_EPSILON) back++;
+      if (s > CLIP_PLANE_EPSILON) front++;
+      else if (s < -CLIP_PLANE_EPSILON) back++;
     }
     if (front === 0 && back === 0) {
       // Coplanar. Facing away, the brush has no thickness here; facing the same way, the copies
@@ -324,7 +327,7 @@ function duplicatesKeptFace(
     let on = true;
     for (let k = 0; k < poly.length && on; k += 3) {
       const s = mx * at(poly, k) + my * at(poly, k + 1) + mz * at(poly, k + 2) - md;
-      on = Math.abs(s) <= ON_EPSILON;
+      on = Math.abs(s) <= CLIP_PLANE_EPSILON;
     }
     if (on) return true;
   }
@@ -351,7 +354,7 @@ function snapToAxialFaces(planes: Float64Array, verts: number[]): void {
     const d = at(planes, f + 3);
     for (let v = axis; v < verts.length; v += 3) {
       const s = sign * at(verts, v) - d;
-      if (s >= -ON_EPSILON && s <= VERTEX_PLANE_EPSILON) verts[v] = sign * d + 0;
+      if (s >= -CLIP_PLANE_EPSILON && s <= VERTEX_PLANE_EPSILON) verts[v] = sign * d + 0;
     }
   }
 }

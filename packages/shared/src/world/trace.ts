@@ -63,7 +63,7 @@ export class TraceResult {
   entity = ENTITY_NONE;
   /** The box started inside a brush. The trace still runs, so a box can move out of one. */
   startSolid = false;
-  /** The box is inside one brush for the whole move; fraction is then 0. */
+  /** The box is inside one brush for the whole move; fraction is then 0 and nothing is hit. */
   allSolid = false;
 
   reset(): void {
@@ -269,7 +269,8 @@ function finishTrace(world: CollisionWorld, start: Vec3, end: Vec3, out: TraceRe
     pos[1] = start[1] + f * (end[1] - start[1]);
     pos[2] = start[2] + f * (end[2] - start[2]);
   }
-  const b = w.brush;
+  // An allSolid box never moves, so a brush it would have hit later is no hit at all.
+  const b = w.allSolid ? -1 : w.brush;
   const n = out.normal;
   if (b >= 0) {
     const p = w.plane;

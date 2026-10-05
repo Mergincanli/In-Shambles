@@ -192,6 +192,24 @@ describe("start-solid and all-solid", () => {
     expect(r.contents).toBe(CONTENTS_SOLID);
   });
 
+  it("allSolid reports no hit, even when a later brush lies on the path", () => {
+    const world = worldOf(
+      brush(boxPlanes([-64, -64, -64], [64, 64, 64])),
+      brush(boxPlanes([32, -64, -64], [264, 64, 64])),
+    );
+    // Brush 1 would be entered at x = 17 − ε; brush 0 holds both ends.
+    const r = trace(world, v(0, 0, 0), v(40, 0, 0));
+    expect(r.allSolid).toBe(true);
+    expect(r.fraction).toBe(0);
+    expect(r.brush).toBe(-1);
+    expect(r.plane).toBe(-1);
+    expect([...r.normal]).toEqual([0, 0, 0]);
+    expect(r.planeDist).toBe(0);
+    expect(r.surfaceFlags).toBe(0);
+    expect(r.contents).toBe(CONTENTS_SOLID);
+    expect(r.entity).toBe(ENTITY_WORLD);
+  });
+
   it("ending exactly touching from inside is not allSolid (touching = outside)", () => {
     const r = trace(block, v(0, 0, 0), v(79, 0, 0));
     expect(r.startSolid).toBe(true);
