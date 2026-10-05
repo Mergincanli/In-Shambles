@@ -24,7 +24,7 @@ Both A and B produce the **same compiled format**, so the engine never cares whe
 - **Render surfaces:**
   - per material: vertex buffer (position, normal, uv0; a later uv1 for lightmaps comes as a new section or format version), index buffer
   - static, merged
-- **Entities:** `{ classname, origin?, angles?, props: Record<string,string>, brushes?: number[] }` (spawns, flags, triggers, items, lights, timers).
+- **Entities:** `{ classname, origin?, angles?, props: Record<string,string>, brushes?: number[] }` (spawns, flags, triggers, items, lights, timers). `angles` is [pitch, yaw, roll] in degrees; yaw 0 faces +x and 90 faces +y (D-021).
 - **Optional (later):** cluster visibility (PVS-like) for relevance (`docs/05` §9.1); lightmap atlas.
 - **Determinism:** compiling the same source twice produces byte-identical output (tested).
 
@@ -66,20 +66,40 @@ Both A and B produce the **same compiled format**, so the engine never cares whe
 
 ## 3. Phase A: greybox builder and test courses
 
-`packages/tools/src/greybox/` exposes a tiny API:
+`packages/tools/src/greybox/` exposes a tiny API (`MapBuilder.ts`; the brush compiler is `brushCompiler.ts`):
 
 ```ts
 const m = new MapBuilder("movement_lab");
 m.box({ min: [-1024,-1024,-16], max: [1024,1024,0] });                        // floor
-m.stairs({ origin: [256,0,0], steps: 6, stepHeight: 16, stepDepth: 24, width: 128 });
-m.ramp({ from: [512,-128,0], to: [768,-128,96], width: 128 });                // slope tests
+m.stairs({ origin: [256,0,0], steps: 6, stepHeight: 16, stepDepth: 24, width: 128 }); // → top z
+m.ramp({ from: [512,-128,0], to: [768,-128,96], width: 128 });                // axis-aligned only
+const top = m.slope({ from: [0,-512,0], run: 256, normalZ: 0.71, width: 128 }); // → crest z
+m.box({ min: [256,-576,0], max: [512,-448,top] });                            // platform at the crest
 m.wall({ min: [0,300,0], max: [512,316,256] });                               // wall-jump wall
+m.rotatedBox({ center: [0,600,112], halfExtents: [256,8,128], cos: Math.sqrt(3)/2, sin: 0.5 }); // 30° kick lane
 m.volume("WATER", { min: [-600,-600,-128], max: [-300,-300,0] });
-m.volume("LADDER", { min: [900,0,0], max: [916,64,256] });
-m.spawn("info_player_start", [0,0,24], 0);
+m.ladder({ wallMin: [916,0,0], wallMax: [932,64,256], face: "-x" });         // wall + LADDER volume
+m.spawn("info_player_start", [0,0,24], 0);                                    // yaw in degrees
 m.timer("start", {...}); m.timer("stop", {...});
+m.anchor("gap_96_takeoff", [128,0,0]);                                        // named place for tests
 export default m.compile();
 ```
+
+- **Primitives:**
+  - `box({min, max, material?, contents?, surfaceFlags?})`, `wall({min, max})` (wall grey).
+  - `stairs({origin, steps, stepHeight, stepDepth, width, direction?})`: one solid column per step from the origin (the bottom of the first riser, centred across the width), climbing `direction` (`"+x"` default, or `"-x"`, `"+y"`, `"-y"`). Returns the top step's z.
+  - `ramp({from, to, width})`: a solid wedge whose floor is the lower end's z. `from` and `to` may differ along x or y, not both: **ramps must be axis-aligned until edge bevels arrive in M5** (D-019), and the builder throws on any other ramp.
+  - `slope({from, run, normalZ, width, direction?})`: a wedge with rise = run·√(1 − nz²)/nz (computed with `Math.sqrt`, D-016), so the stored normal z is exactly `Math.fround(normalZ)`. Returns the compiled wedge's top (its +z bound, the f32 crest rounded up, not the f64 `from.z + rise`, which can sit several f32 steps lower far from the origin): a platform whose top is that value shares the plane distance with the crest, so the crest has no lip.
+  - `rotatedBox({center, halfExtents, cos, sin, contents?})`: a box rotated about +Z, for kick lanes. Callers pass closed forms (sin 15° = (√6 − √2)/4) or dtrig values, never `Math.cos`.
+  - `volume(kind, {min, max, material?})`: a non-solid box; `kind` is `WATER`, `LADDER`, `PLAYERCLIP`, `TRIGGER` or `NODRAW`.
+  - `ladder({wallMin, wallMax, face, material?})`: the solid wall with the ladder surface flag on the `face` side and a 16 u LADDER volume in front of that whole face. M2 decides which of the two the movement code reads (`docs/03` §4.14).
+  - Every solid primitive also takes `material?` and `surfaceFlags?`, applied to all of its faces. `box`, `wall`, `rotatedBox` and `volume` return the brush index (for entity `brushes` lists); directions and faces are checked at run time too.
+- **Entities** (§4.2 classnames), in call order: `spawn(classname, origin, yaw, props?)` for `info_player_start`, `info_spawn_red`, `info_spawn_blue`; `timer("start" | "stop", {min, max})` makes an invisible TRIGGER brush and an `info_timer_start` / `info_timer_stop` entity whose `brushes` lists it; `anchor(name, origin, yaw?)` makes an `info_target` with `targetname` = name (snake_case, unique per map), so tests name places instead of hard-coding coordinates. Yaw goes in the entity's `angles` as [0, yaw, 0] degrees (§2); yaw 0 faces +x. Origins stay within ±16384 u like brushes, and prop keys are snake_case starting with a letter.
+- **Checks:** each call builds and checks its brushes at once, so a bad shape throws at that call, naming the map and brush (`movement_lab brush 12 (ramp): …`), and a call that throws adds none of its brushes. Besides the brush rules of §2, a brush is refused when it would need edge bevels: for every edge e (between faces with normals n1, n2) and axis k, take u = e × axis_k with the sign that makes u·(n1 + n2) ≥ 0, the side the expanded brush's face would face; u must be parallel (within 1e-6) to an axis or point the same way as one of the brush's face normals. Boxes, boxes rotated about Z and axis-aligned wedges pass.
+- **Materials** default from the contents: `grey/floor` (box, stairs, ramp, slope), `grey/wall` (wall, rotated box, ladder wall), `grey/water`, `tool/clip`, `tool/trigger`, `tool/nodraw`, `tool/ladder`. The cmap `materials` table lists them in order of first use, brush by brush and face by face.
+- **Render surfaces:** one merged surface per material, in material order. Solid brushes and water volumes render; PLAYERCLIP, TRIGGER and NODRAW brushes and other non-solid volumes (LADDER) don't. Each face polygon is a triangle fan from its canonical start vertex (the lexicographically smallest (x, y, z)), counter-clockwise seen from outside, with f32 positions and the face normal as every vertex's normal.
+- **uv0 convention** (M2's grid texture relies on it): a planar projection in world space on the face normal's dominant axis, **1 uv per 64 u**: z-dominant faces get (u, v) = (x, y)/64, x-dominant (y, z)/64, y-dominant (x, z)/64; ties go to z, then x, so a 45° ramp maps like the floor. A 64 u grid tile therefore lines up across brushes.
+- **Determinism:** `compile()` returns the map as a loader reads it (it goes through `encodeCmap` and `decodeCmap`, so it is validated and carries its `contentHash`), and the same calls always give byte-identical files. `compiler` is `{name: "greybox", version}`; the version starts at 1 and is bumped whenever the output changes on purpose. The greybox modules are under the D-016 math ban and read no clock, randomness, locale or environment (guard: `packages/tools/test/guards/greybox-determinism.test.ts`).
 
 **Required courses** (each doubles as an automated test fixture, `docs/03` §8):
 

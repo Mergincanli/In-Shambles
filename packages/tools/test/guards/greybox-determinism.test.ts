@@ -1,13 +1,15 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { DETERMINISTIC_MATH_RULES } from "../../src/code/deterministicMath";
 import { scanSource } from "../../src/code/scan";
 import { fromRoot } from "../../src/paths";
 
 // docs/07 §2 and .claude/rules/content-and-ip.md: compiled maps are byte-identical for identical
 // input, so the greybox modules that produce .cmap bytes read no clock, randomness, locale or
-// environment. Only the CLI entry (cli.ts, M1 increment 8) may touch the process and file paths;
-// the bytes it writes still come from the other modules.
+// environment, and (D-016) no engine-approximated math, since a map compiled on one machine must
+// match one compiled on any other. Only the CLI entry (cli.ts, M1 increment 8) may touch the
+// process and file paths; the bytes it writes still come from the other modules.
 const CLI_ENTRY = "cli.ts";
 
 const EVERYWHERE: (readonly [string, RegExp])[] = [
@@ -17,6 +19,7 @@ const EVERYWHERE: (readonly [string, RegExp])[] = [
   ["localeCompare", /\blocaleCompare\b/],
   ["Intl", /\bIntl\b/],
   ["toLocale*", /\btoLocale\w*\b/],
+  ...DETERMINISTIC_MATH_RULES,
 ];
 
 const OUTSIDE_CLI: (readonly [string, RegExp])[] = [
@@ -49,6 +52,10 @@ describe("greybox determinism guard", () => {
     ["const here = __dirname;", "__dirname"],
     ["const url = import.meta.url;", "import.meta"],
     ['import { readFileSync } from "node:fs";', "node: import"],
+    ["const s = Math.sin(a);", "Math.sin"],
+    ["const h = Math.hypot(x, y);", "Math.hypot"],
+    ["const rise = run * (1 - nz ** 2) ** 0.5;", "exponent operator **"],
+    ['const c = Math["cos"](a);', "Math outside the exact-op allowlist"],
   ])("flags %j", (source, label) => {
     expect(violations(source, false)).toContain(label);
   });
@@ -57,6 +64,7 @@ describe("greybox determinism guard", () => {
     ['const s = "Date.now and localeCompare in a string";'],
     ["// never Date.now() or process.cwd() here"],
     ["const updated = dateless + processed;"],
+    ["const rise = (run * Math.sqrt(1 - nz * nz)) / nz + Math.fround(x) + Math.max(a, b);"],
   ])("allows %j", (source) => {
     expect(violations(source, false)).toEqual([]);
   });
@@ -70,7 +78,17 @@ describe("greybox determinism guard", () => {
   const files = readdirSync(root, { recursive: true, encoding: "utf8" }).filter((name) =>
     /\.[cm]?[jt]sx?$/.test(name),
   );
-  it.each(files)("%s reads no clock, randomness, locale or environment", (name) => {
-    expect(violations(readFileSync(join(root, name), "utf8"), name === CLI_ENTRY)).toEqual([]);
+  it.each(files)(
+    "%s reads no clock, randomness, locale, environment or approximate math",
+    (name) => {
+      expect(violations(readFileSync(join(root, name), "utf8"), name === CLI_ENTRY)).toEqual([]);
+    },
+  );
+
+  it("catches a banned Math call added to the compiler", () => {
+    const source = readFileSync(join(root, "brushCompiler.ts"), "utf8");
+    expect(violations(source, false)).toEqual([]);
+    const probed = `${source}\nexport const probe = Math.atan2(1, 2);\n`;
+    expect(violations(probed, false)).toContain("Math.atan2");
   });
 });

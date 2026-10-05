@@ -101,7 +101,7 @@ packages/client/src/
 
 packages/tools/src/
   mapc/                TrenchBroom .map → cmap compiler (M5)
-  greybox/             code-built test courses (movement lab etc.)
+  greybox/             MapBuilder, brush compiler and cmap encoder; code-built test courses (movement lab etc.)
   bots/                headless clients
   reports/             feel-report, balance-report
   replay/              demo inspection

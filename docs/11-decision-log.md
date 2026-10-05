@@ -163,6 +163,21 @@
 **Consequences:**
 - `docs/07` §2 carries the layout tables; `decodeCmap` validates everything and throws `CmapError`; `*.cmap` is `binary` in `.gitattributes`. Tests: `packages/tools/test/greybox/cmap.test.ts`, `packages/shared/test/world/cmap{,Hash}.test.ts`.
 
+### D-021 — Greybox builder API and render-surface conventions (2026-10-05, accepted)
+**Context:** M1 increment 7 builds the greybox compiler and `MapBuilder` (`docs/07` §3). The doc's API sketch has no slopes with a target normal, rotated boxes, ladders with a face flag or named anchors, which the courses need (M1 design I), and it leaves open where entity yaw goes, which faces render and how uv0 is mapped.
+**Decision:**
+- `MapBuilder` adds `slope` (rise = run·√(1 − nz²)/nz, returns the compiled wedge's f32 top so a platform at that z shares the crest's plane distance), `rotatedBox` (closed-form cos/sin, D-016), `ladder` (wall with the ladder surface flag plus a 16 u LADDER volume, both until M2 picks one, D-019) and `anchor` (`info_target` with `targetname`). `stairs`, `ramp` and `slope` return their top z.
+- `ramp` must be axis-aligned; the builder throws otherwise. Every brush also passes an exactness check (each edge × axis, oriented outward between the edge's two face normals, is parallel within 1e-6 to an axis or points the same way as a face normal), so nothing that needs edge bevels compiles before `mapc` adds them in M5. A call that throws adds none of its brushes.
+- Entity `angles` are [pitch, yaw, roll] in degrees, yaw 0 facing +x (now stated in `docs/07` §2); the builder stores yaw there as [0, yaw, 0], not in `props`.
+- Render surfaces: one per material in material order (the table is in order of first use); solid brushes and water volumes render, clip, trigger, nodraw and other non-solid volumes don't; fans from each polygon's canonical start vertex, counter-clockwise from outside, f32 positions, flat face normals.
+- uv0 is a world-space planar projection on the normal's dominant axis (ties to z, then x) at 1 uv per 64 u, which M2's grid texture relies on.
+- `compile()` returns the decoded file (validated, with its hash); `compiler.version` starts at 1.
+
+**Consequences:**
+- `docs/07` §3 lists the API and conventions. Courses (increment 8) use anchors instead of coordinates in tests.
+- The D-016 math ban now also guards `packages/tools/src/greybox` (`greybox-determinism.test.ts`), as D-016 already required.
+- Tests: `packages/tools/test/greybox/{brushCompiler,mapBuilder}.test.ts`.
+
 ---
 
 <!-- Template
