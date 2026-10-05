@@ -20,10 +20,11 @@ export const PMF_MASK = 0x3ff;
 export const WATER_LEVEL_MAX = 3;
 
 /**
- * Everything movement simulates (docs/03 §6), predicted and replicated. Every scalar holds an
- * integer so V8 keeps it a small integer, and all fields are initialised here in a fixed order so
- * every instance shares one shape. New fields go at the end, and into copy, equals, diff and
- * quantize below.
+ * The movement state (docs/03 §6), predicted and replicated. The rest of the §6 table
+ * (wallJumps, health, armor, breath, climbTarget, timers, events) comes with the milestone that
+ * first simulates it (D-018). Every scalar holds an integer so V8 keeps it a
+ * small integer, and all fields are initialised here in a fixed order so every instance shares
+ * one shape. New fields go at the end, and into copy, equals, diff and quantize below.
  */
 export class PlayerState {
   /** u, on the 1/32 grid. */

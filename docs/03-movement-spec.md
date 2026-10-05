@@ -384,6 +384,7 @@ Return whether any plane was hit (used by step-slide).
 This makes the client's predicted state **bit-identical** to the server's state for the same inputs (`docs/05` §4).
 
 **Pinned down in M1** (D-018, `packages/shared/src/sim/playerState.ts`):
+- M1 implements `origin` through `waterLevel`, plus `stamina`. `wallJumps` and the fields below `stamina` are added by the milestone that first simulates them.
 - `stamina` is stored as an integer count of hundredths (0–65535), so 100 is one stamina point.
 - `flags` bits 0–9 are the ten flags above, in the order listed; new flags take the next bit.
 - Every scalar field holds an integer. Quantize also wraps the view angles to u16, clamps `groundEntity` to −1…32767 (32767 is the world) and `waterLevel` to 0–3, truncating toward zero.
