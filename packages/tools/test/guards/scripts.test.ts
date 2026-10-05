@@ -132,8 +132,11 @@ function filteredRuns(command: string) {
       if (token === "--filter" || token === "-F") pkg = tokens[++i];
       else if (token.startsWith("--filter=")) pkg = token.slice("--filter=".length);
       else if (!token.startsWith("-") && script === undefined) script = token;
+      // `pnpm ... run <script>` runs <script>; exec/dlx run a binary, not a package script.
+      else if (!token.startsWith("-") && script === "run") script = token;
     }
     if (pkg === undefined) return [];
+    if (script === "exec" || script === "dlx") script = undefined;
     return [{ pkg, script, failIfNoMatch: tokens.includes("--fail-if-no-match") }];
   });
 }
@@ -157,9 +160,12 @@ describe("root scripts", () => {
       for (const run of filteredRuns(command)) {
         expect(packageScripts.has(run.pkg), `${name}: ${run.pkg}`).toBe(true);
         expect(run.failIfNoMatch, `${name}: --fail-if-no-match`).toBe(true);
-        expect(Object.keys(packageScripts.get(run.pkg) ?? {}), `${name}: ${run.script}`).toContain(
-          run.script,
-        );
+        if (run.script !== undefined) {
+          expect(
+            Object.keys(packageScripts.get(run.pkg) ?? {}),
+            `${name}: ${run.script}`,
+          ).toContain(run.script);
+        }
       }
     }
   });
@@ -167,7 +173,8 @@ describe("root scripts", () => {
   it.each([
     ["pnpm --filter @game/server --fail-if-no-match start", [["@game/server", "start", true]]],
     ["pnpm --filter=@game/client dev", [["@game/client", "dev", false]]],
-    ["pnpm -F @game/tools --fail-if-no-match run x --flag", [["@game/tools", "run", true]]],
+    ["pnpm -F @game/tools --fail-if-no-match run x --flag", [["@game/tools", "x", true]]],
+    ["pnpm -F @game/tools --fail-if-no-match exec tsx bin.ts", [["@game/tools", undefined, true]]],
     [
       "pnpm -F a --fail-if-no-match build && pnpm --filter b test",
       [
@@ -180,7 +187,20 @@ describe("root scripts", () => {
   });
 });
 
+// Any pnpm invocation with a standalone `--` before more arguments, on one line of a code span.
+const DOUBLE_DASH = /pnpm\b[^\n`|]*?\s--\s/;
+
 describe("docs", () => {
+  it.each([
+    ["`pnpm bots -- --count 16`", true],
+    ["`pnpm run bots -- --count 16`", true],
+    ["`pnpm --filter @game/tools bench -- --x`", true],
+    ["`pnpm bots --count 16 --profile wan-150-loss2`", false],
+    ["`pnpm typecheck && pnpm lint`", false],
+  ])("double-dash check on %s → %s", (text, flagged) => {
+    expect(DOUBLE_DASH.test(text)).toBe(flagged);
+  });
+
   // pnpm 10 hands `--` to the script as an argument, so `pnpm bots -- --count 16` would reach a
   // parseArgs-based CLI as positionals. Document `pnpm <script> --flag` instead.
   it("never pass `--` between a pnpm script and its flags", () => {
@@ -193,7 +213,7 @@ describe("docs", () => {
             .map((file) => fromRoot(entry, file)),
     );
     for (const file of files) {
-      expect(readFileSync(file, "utf8"), file).not.toMatch(/pnpm [a-z:-]+ -- /);
+      expect(readFileSync(file, "utf8"), file).not.toMatch(DOUBLE_DASH);
     }
   });
 });

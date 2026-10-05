@@ -9,6 +9,19 @@ interface TsConfig {
   compilerOptions?: Record<string, unknown>;
 }
 
+const STRICT_FAMILY = [
+  "strict",
+  "noImplicitAny",
+  "strictNullChecks",
+  "strictFunctionTypes",
+  "strictBindCallApply",
+  "strictPropertyInitialization",
+  "strictBuiltinIteratorReturn",
+  "noImplicitThis",
+  "useUnknownInCatchVariables",
+  "alwaysStrict",
+];
+
 const read = (file: string) => parseJsonc(readFileSync(file, "utf8")) as TsConfig;
 const base = fromRoot("tsconfig.base.json");
 
@@ -38,7 +51,10 @@ describe("tsconfig guard", () => {
     (_name, file) => {
       const config = read(file);
       expect(resolve(dirname(file), config.extends ?? "")).toBe(base);
-      expect(config.compilerOptions?.strict ?? true).toBe(true);
+      // `strict` and every flag it turns on must stay on (none may be set to false).
+      for (const flag of STRICT_FAMILY) {
+        expect(config.compilerOptions?.[flag] ?? true, flag).toBe(true);
+      }
     },
   );
 
