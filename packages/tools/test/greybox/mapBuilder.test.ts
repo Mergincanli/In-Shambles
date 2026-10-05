@@ -629,7 +629,7 @@ describe("MapBuilder.compile", () => {
   });
 
   it("refuses a map without brushes", () => {
-    expect(() => lab().compile()).toThrow(/at least one brush/);
+    expect(() => lab().compile()).toThrow(/^unit_lab: a map needs at least one brush$/);
   });
 
   it("round-trips through the file and traces as built", () => {

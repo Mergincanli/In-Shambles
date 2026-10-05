@@ -465,6 +465,7 @@ export class MapBuilder {
    * gives the file bytes. Compiling does not change the builder.
    */
   compile(): Cmap {
+    if (this.brushes.length === 0) throw this.error("a map needs at least one brush");
     const geometry = assembleBrushes(this.brushes);
     const data: CmapData = {
       name: this.name,
