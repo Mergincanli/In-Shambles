@@ -18,6 +18,7 @@
     "typecheck": "pnpm -r typecheck && tsc --noEmit -p tsconfig.json",
     "lint": "biome check .",
     "format": "biome check --write .",
+    "greybox": "pnpm --filter @game/tools --fail-if-no-match greybox",
     "bench": "node scripts/not-yet.mjs bench M1",
     "bots": "node scripts/not-yet.mjs bots M3",
     "feel-report": "node scripts/not-yet.mjs feel-report M2",

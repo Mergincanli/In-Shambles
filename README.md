@@ -31,6 +31,7 @@ pnpm typecheck && pnpm lint && pnpm test
 | `pnpm typecheck` | Type-check all packages |
 | `pnpm lint` | Biome lint and format check |
 | `pnpm format` | Apply Biome formatting and safe fixes |
+| `pnpm greybox` | Recompile the greybox courses into `content/maps/` (commit the result) |
 
 `pnpm dev:server` runs under pnpm, which doesn't forward signals to the server. To stop it from a script or process manager, signal its process group (Ctrl+C does this), or run the bundle directly with `node packages/server/dist/main.js`.
 

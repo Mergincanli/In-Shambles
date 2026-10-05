@@ -69,20 +69,22 @@ Both A and B produce the **same compiled format**, so the engine never cares whe
 `packages/tools/src/greybox/` exposes a tiny API (`MapBuilder.ts`; the brush compiler is `brushCompiler.ts`):
 
 ```ts
-const m = new MapBuilder("movement_lab");
-m.box({ min: [-1024,-1024,-16], max: [1024,1024,0] });                        // floor
-m.stairs({ origin: [256,0,0], steps: 6, stepHeight: 16, stepDepth: 24, width: 128 }); // → top z
-m.ramp({ from: [512,-128,0], to: [768,-128,96], width: 128 });                // axis-aligned only
-const top = m.slope({ from: [0,-512,0], run: 256, normalZ: 0.71, width: 128 }); // → crest z
-m.box({ min: [256,-576,0], max: [512,-448,top] });                            // platform at the crest
-m.wall({ min: [0,300,0], max: [512,316,256] });                               // wall-jump wall
-m.rotatedBox({ center: [0,600,112], halfExtents: [256,8,128], cos: Math.sqrt(3)/2, sin: 0.5 }); // 30° kick lane
-m.volume("WATER", { min: [-600,-600,-128], max: [-300,-300,0] });
-m.ladder({ wallMin: [916,0,0], wallMax: [932,64,256], face: "-x" });         // wall + LADDER volume
-m.spawn("info_player_start", [0,0,24], 0);                                    // yaw in degrees
-m.timer("start", {...}); m.timer("stop", {...});
-m.anchor("gap_96_takeoff", [128,0,0]);                                        // named place for tests
-export default m.compile();
+export function movementLab(): Cmap {                                        // a course is a function returning its Cmap
+  const m = new MapBuilder("movement_lab");
+  m.box({ min: [-1024,-1024,-16], max: [1024,1024,0] });                        // floor
+  m.stairs({ origin: [256,0,0], steps: 6, stepHeight: 16, stepDepth: 24, width: 128 }); // → top z
+  m.ramp({ from: [512,-128,0], to: [768,-128,96], width: 128 });                // axis-aligned only
+  const top = m.slope({ from: [0,-512,0], run: 256, normalZ: 0.71, width: 128 }); // → crest z
+  m.box({ min: [256,-576,0], max: [512,-448,top] });                            // platform at the crest
+  m.wall({ min: [0,300,0], max: [512,316,256] });                               // wall-jump wall
+  m.rotatedBox({ center: [0,600,112], halfExtents: [256,8,128], cos: Math.sqrt(3)/2, sin: 0.5 }); // 30° kick lane
+  m.volume("WATER", { min: [-600,-600,-128], max: [-300,-300,0] });
+  m.ladder({ wallMin: [916,0,0], wallMax: [932,64,256], face: "-x" });         // wall + LADDER volume
+  m.spawn("info_player_start", [0,0,24], 0);                                    // yaw in degrees
+  m.timer("start", {...}); m.timer("stop", {...});
+  m.anchor("gap_96_takeoff", [128,0,0]);                                        // named place for tests
+  return m.compile();
+}
 ```
 
 - **Primitives:**
@@ -101,15 +103,18 @@ export default m.compile();
 - **uv0 convention** (M2's grid texture relies on it): a planar projection in world space on the face normal's dominant axis, **1 uv per 64 u**: z-dominant faces get (u, v) = (x, y)/64, x-dominant (y, z)/64, y-dominant (x, z)/64; ties go to z, then x, so a 45° ramp maps like the floor. A 64 u grid tile therefore lines up across brushes.
 - **Determinism:** `compile()` returns the map as a loader reads it (it goes through `encodeCmap` and `decodeCmap`, so it is validated and carries its `contentHash`), and the same calls always give byte-identical files. `compiler` is `{name: "greybox", version}`; the version starts at 1 and is bumped whenever the output changes on purpose. The greybox modules are under the D-016 math ban and read no clock, randomness, locale or environment (guard: `packages/tools/test/guards/greybox-determinism.test.ts`).
 
-**Required courses** (each doubles as an automated test fixture, `docs/03` §8):
+**Required courses** (each doubles as an automated test fixture, `docs/03` §8). Sizes not set by `docs/03` or §6 are our design values, not ESTIMATEs of the original game:
 
 | Course | Contents |
 |---|---|
-| `movement_lab` | flat runway (1024 u+), step ladder (16/18/19 u), slope set (normal.z 0.69/0.71/0.8), stairs, ladder, water pool (deep + wade), ceiling-height crouch tunnel |
-| `jump_lab` | gap series (64…320 u step 32), ledge heights (24…120 u step 8), wall-jump chimney (walls 64 u apart, 512 u tall), single-wall kick lanes at 15/30/45/60°, curb (24 u) to verify no kick |
-| `slide_lab` | long flat lane with distance markers, door frames (48 u wide), slide-under gaps (41–44 u high), ramp into slide |
-| `fall_tower` | platforms at 128/256/384/512/640/768/1024 u above a floor, water landing pool, ledge-grab catch rails |
-| `arena_greybox` | small combat map for netcode/combat tests: cover, verticality, 16 spawns |
+| `movement_lab` | open flat area 6144 × 6144 u (room for strafe and circle jumps) of 128 u floor tiles in alternating greys, as strips across x in one half and across y in the other, so coplanar seams run both ways; runway on it, timed by 16 u deep start and stop triggers whose matching faces are 2048 u apart (entering both or leaving both measures 2048 u), with `runway_start`/`runway_end` standing just outside them; single steps of 16/18/19 u; stairs (8 × 16 u); slope set (normal.z 0.69/0.71/0.8, 256 u runs) with a platform at each crest; ladder on a 384 u wall; water pool with wading (12 u), waist-deep (36 u) and deep (128 u) sections, i.e. water levels 1/2/3 standing on the bottom; crouch tunnel with 48 u clearance (crouched passes, standing does not) |
+| `jump_lab` | gap series (64…320 u step 32) from a 64 u take-off deck; ledge heights (24…120 u step 8); wall-jump chimney (walls 64 u apart, 512 u tall); single-wall kick lanes at 15/30/45/60° (512 × 16 × 256 u, sunk 16 u into the floor, standing alone); curb (24 u) to verify no kick |
+| `slide_lab` | 4096 u flat lane with alternating 128 u distance-marker tiles, fed by a 64 u ramp; door frames (48 × 96 u); slide-under gaps 41, 42 and 44 u high, plus a 40 u gap that must block (D-017) |
+| `fall_tower` | platforms at 128/256/384/512/640/768/1024 u above a floor (pillar tops with a ladder up the back); 128 u deep water landing pool beside the 1024 u platform; ledge-grab catch rails at 256/512/768 u on a 1024 u wall, each 32 u deep (a crouched hull fits on top) and 64 u tall (so the once-per-tick chest probe cannot skip the face at the speed of a 768 u fall), in its own column below a drop spot on the wall top, so `rail_256` catches a 768 u fall (MV-13) |
+| `arena_greybox` | small combat map for netcode/combat tests: walled yard with a base room per team (96 × 128 u doors), a 128 u centre platform with ramps (176 u clear between the north ramp's foot and the corridor), a 96 u ledge, a covered 128 u corridor, cover; 16 `info_player_start` in the yard plus 8 `info_spawn_red` and 8 `info_spawn_blue` inside their bases |
+
+- **Anchors:** every feature has named anchors (`step_18_base`, `slope_069_top`, `gap_96_takeoff`, `slide_gap_40_blocked_entry`, …). An anchor, like a spawn, is a standing spot: its origin is the ground + 24 u (feet on the ground, which counts as outside, D-017), and the standing hull fits there. Ground off the 1/32 u grid (a slope crest's f32 top) is rounded up to it.
+- **Where they live:** `packages/tools/src/greybox/courses/` builds them; `pnpm greybox` compiles them into `content/maps/<name>.cmap`, which is committed (binary in `.gitattributes`). `packages/tools/test/greybox/courses.test.ts` compiles each course twice, requires identical bytes equal to the committed file (otherwise it fails with "run pnpm greybox and commit"), and checks the fixtures through `decodeCmap` + `buildCollisionWorld` and traces: valid brushes, bounds, clear spawns and anchors with ground below, spawn spacing, step, slope, water, ladder, tunnel, gap, door, timer, rail and cover metrics. It also requires one module per course and no orphan `.cmap` in `content/maps/`.
 
 ## 4. Phase B: TrenchBroom integration (M5)
 

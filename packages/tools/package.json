@@ -8,6 +8,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
+    "greybox": "node --import tsx src/greybox/cli.ts",
     "vectors": "node --import tsx src/vectors/generate.ts"
   },
   "dependencies": {

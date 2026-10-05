@@ -177,6 +177,7 @@
 - `docs/07` §3 lists the API and conventions. Courses (increment 8) use anchors instead of coordinates in tests.
 - The D-016 math ban now also guards `packages/tools/src/greybox` (`greybox-determinism.test.ts`), as D-016 already required.
 - Tests: `packages/tools/test/greybox/{brushCompiler,mapBuilder}.test.ts`.
+- Courses (increment 8): each course in `packages/tools/src/greybox/courses/` is a function that builds and returns its Cmap, listed in a fixed order in `courses/index.ts`. `pnpm greybox` writes them to `content/maps/<name>.cmap`, which is committed (M1 plan); a test fails with "run pnpm greybox and commit" when a file is stale. Anchors and spawns are standing spots (origin = ground + 24 u). `docs/07` §3 lists the sizes the courses pin down (lab area, water depths 12/36/128 u, slide gaps 41/42/44 u plus a blocking 40 u gap, 48 u tunnel, runway timers 2048 u apart, catch rails 64 u tall in separate columns so one catches a 768 u fall); they are design values, not ESTIMATEs of the original game.
 
 ---
 

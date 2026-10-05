@@ -78,6 +78,19 @@ describe("greybox determinism guard", () => {
   const files = readdirSync(root, { recursive: true, encoding: "utf8" }).filter((name) =>
     /\.[cm]?[jt]sx?$/.test(name),
   );
+  it("scans the compiler, the builder, the CLI and every course", () => {
+    for (const name of [
+      "brushCompiler.ts",
+      "MapBuilder.ts",
+      CLI_ENTRY,
+      join("courses", "index.ts"),
+      join("courses", "movement_lab.ts"),
+      join("courses", "arena_greybox.ts"),
+    ]) {
+      expect(files).toContain(name);
+    }
+  });
+
   it.each(files)(
     "%s reads no clock, randomness, locale, environment or approximate math",
     (name) => {
