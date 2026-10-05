@@ -90,6 +90,21 @@
 **Decision:** the root script is `dev:server`. It runs the server from source with tsx. Production runs the esbuild bundle that `pnpm build` produces (`node packages/server/dist/main.js`).
 **Consequences:** CLAUDE.md, `docs/06` §11, `docs/09` M0 and the M0 prompt say `pnpm dev:server`. New root scripts must not reuse a pnpm built-in command name, and root scripts that use `pnpm --filter` pass `--fail-if-no-match`, so a wrong filter fails instead of silently succeeding.
 
+### D-016 — Deterministic math (2026-10-05, accepted)
+**Context:** prediction needs client and server to compute bit-identical results. ECMA-262 lets engines approximate `Math.sin`, `cos`, `atan2`, `pow`, `exp`, `log`, `hypot` and the other transcendental functions, so Chrome, Firefox and Safari can return different bits for the same input. A one-ulp difference is enough to diverge a predicted state from the server's.
+**Decision:**
+- **Banned** in `packages/shared` and in compiler code that produces output (the greybox compiler from M1, `mapc` later): `Math.acos`, `acosh`, `asin`, `asinh`, `atan`, `atanh`, `atan2`, `cbrt`, `cos`, `cosh`, `exp`, `expm1`, `hypot`, `log`, `log1p`, `log10`, `log2`, `pow`, `sin`, `sinh`, `tan`, `tanh`, and the `**`/`**=` operators (they are `pow`).
+- **Allowed**, because the spec rounds them exactly: `+ − * / %`, `Math.sqrt`, `fround`, `round` (halves toward +∞), `floor`, `ceil`, `trunc`, `abs`, `sign`, `min`, `max`, `imul`, `clz32`, bitwise operators, number literal parsing, and constants such as `Math.PI`.
+- **Trig:** `math/dtrig.ts` builds `dsin`/`dcos` from exact operations only (Cody–Waite reduction, Taylor polynomials, |x| < 1e5), plus a quarter-wave table for u16 angles: `sinU16`/`cosU16` are exact at the cardinal angles and exactly odd and even.
+- **Vectors** are `Float64Array`s with out-params. Modules keep named scratch vectors instead of sharing a general pool, which would add bookkeeping and aliasing bugs for no allocation benefit (`docs/06` §3 and §5).
+- Never route sim values through a `Float32Array` (render code copies, never writes back), never store NaN, normalize −0 to +0 when quantizing, and never enable "unsafe math" minifier options.
+- `dpow` (from deterministic exp and log) follows in M4 for the fall-damage curve.
+
+**Consequences:**
+- The shared purity guard rejects the banned names and `**`, and flags any use of `Math` other than `Math.<allowed member>` (computed access, optional chaining, aliasing, destructuring). The rules live in `packages/tools/src/code/deterministicMath.ts`, so compiler code can reuse them.
+- Committed determinism vectors (`packages/shared/test/vectors/determinism.ts`, input bits → output bits for dtrig, quantizers, Mulberry32 and hash32) are recomputed by the tests; M2 replays them in Chrome, Firefox and Safari (`docs/09` M2, `docs/10` §1).
+- Constants that were written with `**` in shared (the cvar registry's i32 range) are now literals.
+
 ---
 
 <!-- Template

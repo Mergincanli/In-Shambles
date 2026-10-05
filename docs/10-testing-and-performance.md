@@ -9,6 +9,7 @@
 | Unit | Vitest | math, quantization, traces, pmove steps, damage rules, codecs | `packages/*/test` |
 | Scenario (sim) | Vitest + greybox courses | movement feel targets (MV-xx), balance rules (BAL-xx) | `packages/shared/test/scenarios` |
 | Parity / determinism | Vitest | client vs. server sim, recorded input streams | `packages/shared/test/parity` |
+| Determinism vectors (D-016) | Vitest; real browsers from M2 | frozen input → output bits for dtrig, quantizers, PRNG and hash | `packages/shared/test/vectors` (regenerate with `pnpm --filter @game/tools vectors`) |
 | Netcode integration | Vitest + in-process server + NetSim | NET-xx under profiles | `packages/server/test/net` |
 | Load / soak | bots CLI | 16–32 bots, minutes to hours, metrics | `packages/tools/bots` |
 | Perf benchmarks | `pnpm bench` | µs per op for hot paths | `packages/*/bench` |

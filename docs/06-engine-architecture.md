@@ -31,7 +31,8 @@
 ```
 packages/shared/src/
   time.ts              TICK_RATE, TICK_DT, tick math
-  math/                vec3 (pooled, out-params), plane, aabb, quant (quantizers), angles
+  math/                vec3 (Float64Array, out-params, per-module scratch), plane, aabb,
+                       quant (quantizers), dtrig (deterministic sin/cos, u16 table), angles (D-016)
   rng/                 mulberry32, hash32 (seeding: match/shooter/tick/shot)
   cvars/               registry, flags, replicated block (hash), defaults from docs
   debug/               DEV_ASSERT / setDevAsserts (dev-only checks behind a runtime flag)
@@ -126,6 +127,7 @@ DEV / OFFLINE                                  ONLINE
 - **Rays (bullets):** ray vs. brushes (world) → nearest; then ray vs. player zone volumes (lag-compensated) → nearest player hit before the world hit.
 - **Events:** sim steps append to small fixed-size rings; the client (presentation) and server (network) consume them.
 - **No hidden time sources:** sim functions receive `tick` and `dt` explicitly.
+- **Deterministic math (D-016):** only operations ECMAScript rounds exactly (`+ − * /`, `sqrt`, `fround`, `round`, `floor`, `abs`, `imul`, bitwise…). Trig comes from `math/dtrig`, never `Math.sin`/`cos`; `pow`, `exp`, `log`, `atan2`, `hypot` and `**` are banned too. Vectors are `Float64Array`s with out-params and named per-module scratch, not a shared pool, and sim values never pass through a `Float32Array`.
 
 ## 6. Cvars and console (Q3-style)
 

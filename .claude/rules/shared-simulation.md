@@ -13,7 +13,8 @@ These load whenever you work in `packages/shared`. They protect determinism and 
 - **Quantize at end of tick.** Any change to `PlayerState`/`EntityState` fields must go through `quantize()` and be reflected in the net codec and delta masks (`docs/05` §4).
 - **Every simulated field is networked.** If you add a field that affects simulation, also add it to serialization, delta encoding and the prediction parity test. Otherwise client and server will diverge.
 - **Tunables are replicated cvars** (`REPLICATED` flag). Never read client-local settings inside the sim.
-- **No allocations in hot paths.** Use out-parameters, pooled vectors and preallocated arrays. No closures or array helpers (`map`/`filter`/`forEach`) inside per-tick loops.
+- **Deterministic math only** (D-016). No `Math.sin`/`cos`/`pow`/`exp`/`log`/`atan2`/`hypot` (or the other approximate functions) and no `**`: use `math/dtrig` and exact operations. The purity guard enforces it.
+- **No allocations in hot paths.** Use out-parameters, named per-module scratch vectors (`Float64Array`, not a shared pool; D-016) and preallocated arrays. No closures or array helpers (`map`/`filter`/`forEach`) inside per-tick loops.
 - **Labels.** When implementing a value from `docs/03` or `docs/04`, keep its FACT/INFERRED/ESTIMATE label in a comment next to the default.
 - **Tests.** Every behavior change needs a unit or scenario test. Movement changes run `pnpm test:movement`; anything touching state also runs the parity tests.
 - **Clean room.** Implement from the docs' algorithm descriptions only. Do not reproduce Quake III / ioquake3 source code.
