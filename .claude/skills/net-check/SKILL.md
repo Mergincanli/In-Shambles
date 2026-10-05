@@ -8,7 +8,7 @@ argument-hint: "[optional: profile name or 'all']"
 
 1. **Run the tests.** Run `pnpm test:net`. If it doesn't exist yet, say it's added in M2/M3 and stop.
 2. **Run bot sessions**, one per profile. Use the profile named in `$ARGUMENTS`; otherwise use `wan-100-loss1` and `wan-150-loss2`:
-   `pnpm bots -- --count 16 --profile <p> --minutes 2 --map arena_greybox`
+   `pnpm bots --count 16 --profile <p> --minutes 2 --map arena_greybox`
 3. **Collect** from each bot summary:
    - tick time p50/p99 and maximum GC pause
    - bytes up/down per client and snapshot size p95

@@ -25,7 +25,7 @@
 | `pnpm test:balance` | BAL-01…BAL-11 (`docs/04` §13): every test whose name starts with `BAL-`, so each BAL test's top-level `describe` starts with its ID (`BAL-07: …`) |
 | `pnpm test:net` | NET-01…NET-12 (`docs/05` §14), with profiles |
 | `pnpm bench` | trace, pmove, snapshot build, codec, render-frame microbenchmarks |
-| `pnpm bots -- --count N --profile P --minutes M --map X` | load/soak with a metrics summary (JSON + markdown) |
+| `pnpm bots --count N --profile P --minutes M --map X` | load/soak with a metrics summary (JSON + markdown) |
 | `pnpm feel-report` | table of movement metrics vs. targets (also writes `reports/feel.md`) |
 | `pnpm balance-report` | HTK/TTK/DPS tables (`reports/balance.md`) |
 
