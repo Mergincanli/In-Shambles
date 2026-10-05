@@ -13,8 +13,10 @@ describe.each([
     expect(render() === committed).toBe(true);
   });
 
-  it("is plain data: no imports, so browsers can load it as is", () => {
+  it("is plain JavaScript with no imports, so browsers can load it as is", () => {
     const committed = readFileSync(fromRoot(...file), "utf8");
     expect(committed).not.toMatch(/^\s*import\b|\brequire\(/m);
+    // A type annotation or any other TS-only syntax would not parse as a script body.
+    expect(() => new Function(committed.replace(/^export /gm, ""))).not.toThrow();
   });
 });

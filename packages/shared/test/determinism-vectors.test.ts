@@ -22,6 +22,7 @@ import {
   QUANT_ORIGIN_VECTORS,
   QUANT_STAMINA_VECTORS,
   QUANT_VELOCITY_VECTORS,
+  U16_TRIG_DIGEST_VECTORS,
   U16_TRIG_VECTORS,
   USERCMD_SANITIZE_VECTORS,
 } from "./vectors/determinism";
@@ -46,6 +47,7 @@ describe("determinism vectors (D-016)", () => {
   it.each([
     ["DTRIG_VECTORS", DTRIG_VECTORS, 150],
     ["U16_TRIG_VECTORS", U16_TRIG_VECTORS, 256],
+    ["U16_TRIG_DIGEST_VECTORS", U16_TRIG_DIGEST_VECTORS, 4],
     ["QUANT_ORIGIN_VECTORS", QUANT_ORIGIN_VECTORS, 30],
     ["QUANT_VELOCITY_VECTORS", QUANT_VELOCITY_VECTORS, 30],
     ["QUANT_STAMINA_VECTORS", QUANT_STAMINA_VECTORS, 8],
@@ -73,6 +75,22 @@ describe("determinism vectors (D-016)", () => {
       return `${a} ${f64ToHex(sinU16(v))} ${f64ToHex(cosU16(v))}`;
     });
     expect(got).toEqual([]);
+  });
+
+  it("sinU16 and cosU16 over all 65536 angles, by digest", () => {
+    // FNV-1a 32 over the rows in U16_TRIG_VECTORS format, each followed by a newline.
+    let covered = 0;
+    const got = mismatches(U16_TRIG_DIGEST_VECTORS, ([first, last]) => {
+      let h = 0x811c9dc5;
+      for (let a = Number(first); a <= Number(last); a++) {
+        const row = `${a} ${f64ToHex(sinU16(a))} ${f64ToHex(cosU16(a))}\n`;
+        for (let i = 0; i < row.length; i++) h = Math.imul(h ^ row.charCodeAt(i), 0x01000193);
+        covered++;
+      }
+      return `${first} ${last} ${(h >>> 0).toString(16).padStart(8, "0")}`;
+    });
+    expect(got).toEqual([]);
+    expect(covered).toBe(65536);
   });
 
   it("quantizers", () => {

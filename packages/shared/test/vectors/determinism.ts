@@ -4,11 +4,11 @@
 //
 // Frozen input → output bits for the deterministic math (D-016). Each row is one string of
 // space-separated fields: f64 values as the 16 hex digits of their IEEE-754 bits, u32 values
-// as 8 hex digits, small integers in decimal. Plain data with no imports, so M2 can replay it
-// in real browsers.
+// as 8 hex digits, small integers in decimal. Plain JavaScript (no imports, no type
+// annotations), so M2 can load it in real browsers as is.
 
 /** x, dsin(x), dcos(x) */
-export const DTRIG_VECTORS: readonly string[] = [
+export const DTRIG_VECTORS = [
   "0000000000000000 0000000000000000 3ff0000000000000",
   "8000000000000000 0000000000000000 3ff0000000000000",
   "0000000000000001 0000000000000001 3ff0000000000000",
@@ -229,7 +229,7 @@ export const DTRIG_VECTORS: readonly string[] = [
 ];
 
 /** a (decimal), sinU16(a), cosU16(a) */
-export const U16_TRIG_VECTORS: readonly string[] = [
+export const U16_TRIG_VECTORS = [
   "0 0000000000000000 3ff0000000000000",
   "256 3f992155f7a3667e 3feffd886084cd0d",
   "512 3fa91f65f10dd814 3feff621e3796d7e",
@@ -540,8 +540,16 @@ export const U16_TRIG_VECTORS: readonly string[] = [
   "5875 3fe116122cd4f268 3feb0e7f58d8716c",
 ];
 
+/** first, last (decimal), FNV-1a 32 of the U16_TRIG_VECTORS rows for every a in first…last, each row followed by \n */
+export const U16_TRIG_DIGEST_VECTORS = [
+  "0 16383 732f3946",
+  "16384 32767 e293d5d7",
+  "32768 49151 750fbe8b",
+  "49152 65535 e287642c",
+];
+
 /** x, quantizeOrigin(x) */
-export const QUANT_ORIGIN_VECTORS: readonly string[] = [
+export const QUANT_ORIGIN_VECTORS = [
   "0000000000000000 0000000000000000",
   "8000000000000000 0000000000000000",
   "0000000000000001 0000000000000000",
@@ -592,7 +600,7 @@ export const QUANT_ORIGIN_VECTORS: readonly string[] = [
 ];
 
 /** x, quantizeVelocity(x) */
-export const QUANT_VELOCITY_VECTORS: readonly string[] = [
+export const QUANT_VELOCITY_VECTORS = [
   "0000000000000000 0000000000000000",
   "8000000000000000 0000000000000000",
   "0000000000000001 0000000000000000",
@@ -643,7 +651,7 @@ export const QUANT_VELOCITY_VECTORS: readonly string[] = [
 ];
 
 /** x, quantizeStaminaHundredths(x) (decimal) */
-export const QUANT_STAMINA_VECTORS: readonly string[] = [
+export const QUANT_STAMINA_VECTORS = [
   "0000000000000000 0",
   "3fdffffffffffffe 0",
   "3fe0000000000000 1",
@@ -657,7 +665,7 @@ export const QUANT_STAMINA_VECTORS: readonly string[] = [
 ];
 
 /** deg, degreesToU16(deg) (decimal) */
-export const DEGREES_TO_U16_VECTORS: readonly string[] = [
+export const DEGREES_TO_U16_VECTORS = [
   "0000000000000000 0",
   "4046800000000000 8192",
   "4056400000000000 16202",
@@ -672,7 +680,7 @@ export const DEGREES_TO_U16_VECTORS: readonly string[] = [
 ];
 
 /** seed, index (decimal), index-th nextU32() */
-export const MULBERRY32_VECTORS: readonly string[] = [
+export const MULBERRY32_VECTORS = [
   "00000000 0 4434b462",
   "00000000 1 00159c37",
   "00000000 2 39285b08",
@@ -756,7 +764,7 @@ export const MULBERRY32_VECTORS: readonly string[] = [
 ];
 
 /** seed, row (decimal), then from Mulberry32(seed) after 5·row draws: nextFloat(), nextInt(3), nextInt(6), nextInt(100), nextInt(2097152) (decimal) */
-export const MULBERRY32_DRAW_VECTORS: readonly string[] = [
+export const MULBERRY32_DRAW_VECTORS = [
   "00000007 0 3f87f8a960000000 0 5 69 1093549",
   "00000007 1 3fd9f4113d000000 1 1 55 1530547",
   "00000007 2 3fd0800cd6c00000 0 4 51 413426",
@@ -792,7 +800,7 @@ export const MULBERRY32_DRAW_VECTORS: readonly string[] = [
 ];
 
 /** seed, a, b, c, d, hash32(seed, a, b, c, d) */
-export const HASH32_VECTORS: readonly string[] = [
+export const HASH32_VECTORS = [
   "00000000 00000000 00000000 00000000 00000000 8134cdf8",
   "00000001 00000000 00000000 00000000 00000000 90052b18",
   "00000000 00000001 00000002 00000003 00000004 4445ad00",
@@ -816,7 +824,7 @@ export const HASH32_VECTORS: readonly string[] = [
 ];
 
 /** 12 PlayerState fields in declaration order, then after quantizePlayerState with DEV_ASSERT off: origin and velocity (f64), viewYaw, viewPitch, flags, groundEntity, waterLevel, stamina (decimal) */
-export const PLAYER_STATE_QUANT_VECTORS: readonly string[] = [
+export const PLAYER_STATE_QUANT_VECTORS = [
   "0000000000000000 0000000000000000 0000000000000000 0000000000000000 0000000000000000 0000000000000000 0000000000000000 0000000000000000 0000000000000000 bff0000000000000 0000000000000000 0000000000000000 0000000000000000 0000000000000000 0000000000000000 0000000000000000 0000000000000000 0000000000000000 0 0 0 -1 0 0",
   "8000000000000000 bf90000000000000 3f90000000000000 8000000000000000 bfa0000000000000 3fa0000000000000 8000000000000000 bfe0000000000000 8000000000000000 bfe0000000000000 8000000000000000 8000000000000000 0000000000000000 0000000000000000 3fa0000000000000 0000000000000000 0000000000000000 3fb0000000000000 0 0 0 0 0 0",
   "405900a3d70a3d71 c0590147ae147ae1 3fa8000000000000 4074007ae147ae14 bf9eb851eb851eb8 4070e00000000000 40efffe000000000 40f0000000000000 408ff80000000000 4028000000000000 4000000000000000 40c387c000000000 4059000000000000 c059020000000000 3fb0000000000000 4074000000000000 0000000000000000 4070e00000000000 65535 0 1023 12 2 10000",
@@ -846,7 +854,7 @@ export const PLAYER_STATE_QUANT_VECTORS: readonly string[] = [
 ];
 
 /** 8 UserCmd fields in declaration order (tick, buttons, forward, right, up, yaw, pitch, weaponSlot), then the same fields after sanitizeUserCmd (decimal) */
-export const USERCMD_SANITIZE_VECTORS: readonly string[] = [
+export const USERCMD_SANITIZE_VECTORS = [
   "0000000000000000 0000000000000000 0000000000000000 0000000000000000 0000000000000000 0000000000000000 0000000000000000 0000000000000000 0 0 0 0 0 0 0 0",
   "40ac200000000000 40affe0000000000 405fc00000000000 c05fc00000000000 4014000000000000 40e3880000000000 40e816e000000000 401c000000000000 3600 4095 127 -127 5 40000 49335 7",
   "41d0000000000000 40efffe000000000 4060000000000000 c060000000000000 41cdcd6500000000 40f0000000000000 40cfa50000000000 4020000000000000 1073741823 4095 127 -127 127 0 16201 7",

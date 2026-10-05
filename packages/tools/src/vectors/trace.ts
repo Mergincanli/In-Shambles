@@ -325,7 +325,7 @@ function pointRows(world: CollisionWorld): string[] {
 function section(name: string, doc: string, rows: string[]): string {
   return [
     `/** ${doc} */`,
-    `export const ${name}: readonly string[] = [`,
+    `export const ${name} = [`,
     ...rows.map((r) => `  "${r}",`),
     "];",
     "",
@@ -343,8 +343,8 @@ export function renderTraceVectors(): string {
     "//",
     "// Frozen input → output bits for brush traces on a small fixed world. Fields as in",
     "// determinism.ts: f64 as 16 hex digits of the IEEE-754 bits, u32 as 8 hex digits, small",
-    "// integers and booleans (0/1) in decimal. Plain data with no imports, so M2 can replay it in",
-    "// real browsers.",
+    "// integers and booleans (0/1) in decimal. Plain JavaScript (no imports, no type annotations),",
+    "// so M2 can load it in real browsers as is.",
     "",
     section(
       "TRACE_WORLD",

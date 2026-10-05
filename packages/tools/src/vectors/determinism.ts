@@ -296,10 +296,33 @@ function userCmdRow(input: number[]): string {
   return [...input.map(f64Hex), ...out].join(" ");
 }
 
+/** FNV-1a (32-bit) of a string's UTF-16 code units: a digest a browser recomputes in a few lines. */
+function fnv1a32(text: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) h = Math.imul(h ^ text.charCodeAt(i), 0x01000193);
+  return h >>> 0;
+}
+
+/**
+ * The whole u16 table, one row per quarter turn: the sampled rows above cover about 300 of the
+ * 65536 angles, the digest all of them.
+ */
+function u16DigestRows(): string[] {
+  const rows: string[] = [];
+  for (let first = 0; first < 65536; first += 16384) {
+    let text = "";
+    for (let a = first; a < first + 16384; a++) {
+      text += `${a} ${f64Hex(sinU16(a))} ${f64Hex(cosU16(a))}\n`;
+    }
+    rows.push(`${first} ${first + 16383} ${u32Hex(fnv1a32(text))}`);
+  }
+  return rows;
+}
+
 function section(name: string, doc: string, rows: string[]): string {
   return [
     `/** ${doc} */`,
-    `export const ${name}: readonly string[] = [`,
+    `export const ${name} = [`,
     ...rows.map((r) => `  "${r}",`),
     "];",
     "",
@@ -365,11 +388,16 @@ export function renderDeterminismVectors(): string {
     "//",
     "// Frozen input → output bits for the deterministic math (D-016). Each row is one string of",
     "// space-separated fields: f64 values as the 16 hex digits of their IEEE-754 bits, u32 values",
-    "// as 8 hex digits, small integers in decimal. Plain data with no imports, so M2 can replay it",
-    "// in real browsers.",
+    "// as 8 hex digits, small integers in decimal. Plain JavaScript (no imports, no type",
+    "// annotations), so M2 can load it in real browsers as is.",
     "",
     section("DTRIG_VECTORS", "x, dsin(x), dcos(x)", trig),
     section("U16_TRIG_VECTORS", "a (decimal), sinU16(a), cosU16(a)", u16),
+    section(
+      "U16_TRIG_DIGEST_VECTORS",
+      "first, last (decimal), FNV-1a 32 of the U16_TRIG_VECTORS rows for every a in first…last, each row followed by \\n",
+      u16DigestRows(),
+    ),
     section("QUANT_ORIGIN_VECTORS", "x, quantizeOrigin(x)", origin),
     section("QUANT_VELOCITY_VECTORS", "x, quantizeVelocity(x)", velocity),
     section("QUANT_STAMINA_VECTORS", "x, quantizeStaminaHundredths(x) (decimal)", stamina),
