@@ -66,6 +66,10 @@ describe("mdSection edge cases", () => {
     expect(() => mdSection("```\n## 3. Hidden\n```\n", "3. Hidden")).toThrow(/not found/);
   });
 
+  it("ends a section at a higher-level heading too", () => {
+    expect(mdSection("## 1. A\ntext\n# Part II\nmore\n", "1. A")).toBe("text");
+  });
+
   it("throws when several headings match the prefix", () => {
     const doc = "## 4. Damage table notes\ntext\n## 4. Damage table (FACT)\n| A |\n|---|\n| 1 |\n";
     expect(() => mdSection(doc, "4. Damage table")).toThrow(/2 headings match "4. Damage table"/);
