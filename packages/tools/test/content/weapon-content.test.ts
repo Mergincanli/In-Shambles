@@ -105,11 +105,13 @@ const BRANDS = [
   "UMP45",
 ];
 const BANNED = [
-  "Urban Terror",
-  "UrT",
-  "FrozenSand",
-  ...BRANDS,
-  ...refs.flatMap((ref) => ref.reference.split(" / ")).filter((term) => !GENERIC.has(term)),
+  ...new Set([
+    "Urban Terror",
+    "UrT",
+    "FrozenSand",
+    ...BRANDS,
+    ...refs.flatMap((ref) => ref.reference.split(" / ")).filter((term) => !GENERIC.has(term)),
+  ]),
 ];
 // Short codes and anything with a digit (FN, M4, AK-47) match with exact case, so code-ish words
 // like `fn` or `m4` don't trip the guard; longer names match in any case.
@@ -125,15 +127,51 @@ function bannedTerms(text: string): string[] {
 
 const CODE = /\.[cm]?[jt]sx?$/;
 
-/** The text of every string and template literal in a source file, without comments or code. */
-function stringLiterals(source: string): string {
-  return scanSource(source).strings.join("\n");
+/** Decodes JS string escapes; control escapes (\n, \t, ...) become spaces. */
+function decodeEscapes(text: string): string {
+  return text.replace(
+    /\\(x[0-9a-fA-F]{2}|u\{[0-9a-fA-F]+\}|u[0-9a-fA-F]{4}|[\s\S])/g,
+    (_, e: string) => {
+      if (e.startsWith("x")) return String.fromCharCode(Number.parseInt(e.slice(1), 16));
+      if (e.startsWith("u{")) return String.fromCodePoint(Number.parseInt(e.slice(2, -1), 16));
+      if (e.startsWith("u") && e.length === 5)
+        return String.fromCharCode(Number.parseInt(e.slice(1), 16));
+      return "nrtbfv0".includes(e) ? " " : e;
+    },
+  );
 }
 
-/** What a player could see in a file: string literals for code, the whole text otherwise. */
-function playerText(file: string): string {
-  const text = readFileSync(file, "utf8");
-  return CODE.test(file) ? stringLiterals(text) : text;
+/** Every string value in a JSON document (keys are internal IDs, not player text). */
+function jsonStrings(value: unknown): string[] {
+  if (typeof value === "string") return [value];
+  if (Array.isArray(value)) return value.flatMap(jsonStrings);
+  if (value && typeof value === "object") return Object.values(value).flatMap(jsonStrings);
+  return [];
+}
+
+const VISIBLE_ATTRIBUTE =
+  /\b(?:title|alt|aria-label|aria-description|placeholder|label)\s*=\s*(["'])(.*?)\1/gi;
+
+/** Markup text a player can see: text nodes and visible attributes, never geometry or code. */
+function markupText(markup: string): string {
+  const withoutCode = markup.replace(/<(script|style)\b[\s\S]*?<\/\1>/gi, " ");
+  const attributes = [...withoutCode.matchAll(VISIBLE_ATTRIBUTE)].map((m) => m[2] ?? "");
+  const text = withoutCode.replace(/<[^>]*>/g, " ");
+  return [...attributes, text]
+    .join("\n")
+    .replace(/&amp;/g, "&")
+    .replace(/&#(\d+);/g, (_, n: string) => String.fromCharCode(Number(n)));
+}
+
+/** What a player could see in a file. */
+function playerVisibleText(file: string, text: string): string {
+  if (CODE.test(file)) return scanSource(text).strings.map(decodeEscapes).join("\n");
+  if (/\.(json|webmanifest)$/.test(file)) return jsonStrings(JSON.parse(text)).join("\n");
+  if (/\.(html?|svg)$/.test(file)) return markupText(text);
+  if (file.endsWith(".css")) {
+    return [...text.matchAll(/\bcontent\s*:\s*(["'])(.*?)\1/g)].map((m) => m[2]).join("\n");
+  }
+  return text;
 }
 
 const TEXT_FILE = /\.([cm]?[jt]sx?|json|html?|css|svg|txt|md|webmanifest)$/;
@@ -179,10 +217,32 @@ describe("trademark guard", () => {
 
   it("reads code for its strings only, so identifiers and comments don't count", () => {
     const code = `// colt and FN in a comment\nconst fn = (m4: M, sig: S, p90: number) => m4.mul(sig);\nlabel("Grissino");`;
-    expect(bannedTerms(stringLiterals(code))).toEqual([]);
-    expect(bannedTerms(stringLiterals(`label("Colt Special"); hud(\`AK-47 \${n}\`);`))).toEqual(
+    expect(bannedTerms(playerVisibleText("hud.ts", code))).toEqual([]);
+    expect(
+      bannedTerms(playerVisibleText("hud.ts", 'label("Colt Special"); hud(`AK-47 ${n}`);')),
+    ).toEqual(expect.arrayContaining(["Colt", "AK-47"]));
+  });
+
+  it("decodes escapes, so a name after \\n is still caught", () => {
+    expect(bannedTerms(playerVisibleText("hud.ts", 'toast("Picked up:\\nBeretta");'))).toEqual([
+      "Beretta",
+    ]);
+  });
+
+  it("reads markup for visible text and attributes only, not path data", () => {
+    const icon = '<svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg>';
+    expect(bannedTerms(playerVisibleText("menu.svg", icon))).toEqual([]);
+    const labeled = '<svg aria-label="Colt badge"><title>AK-47</title><path d="M4 6"/></svg>';
+    expect(bannedTerms(playerVisibleText("badge.svg", labeled))).toEqual(
       expect.arrayContaining(["Colt", "AK-47"]),
     );
+  });
+
+  it("reads JSON string values, not keys", () => {
+    expect(bannedTerms(playerVisibleText("x.json", '{ "m4": "Grissino" }'))).toEqual([]);
+    expect(bannedTerms(playerVisibleText("x.json", '{ "rifle_ar": { "name": "M4" } }'))).toEqual([
+      "M4",
+    ]);
   });
 
   it("scans the names files and the client's player-facing files", () => {
@@ -195,7 +255,7 @@ describe("trademark guard", () => {
   it.each(playerFacingFiles().map((file) => [file.slice(fromRoot().length + 1), file]))(
     "%s has no trademarks or real gun names",
     (_name, file) => {
-      expect(bannedTerms(playerText(file))).toEqual([]);
+      expect(bannedTerms(playerVisibleText(file, readFileSync(file, "utf8")))).toEqual([]);
     },
   );
 });

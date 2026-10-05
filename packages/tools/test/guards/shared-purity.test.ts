@@ -19,10 +19,14 @@ const FORBIDDEN: [string, RegExp][] = [
 function topLevelArgs(code: string, start: number): string[] {
   const args: string[] = [];
   let depth = 0;
+  let inTemplate = false;
   let current = "";
   for (let i = start; i < code.length; i++) {
     const c = code[i] ?? "";
-    if (c === "(" || c === "[" || c === "{") depth++;
+    if (c === "`" && depth === 0) inTemplate = !inTemplate;
+    else if (inTemplate && depth === 0) {
+      // Template text: no argument boundaries in here.
+    } else if (c === "(" || c === "[" || c === "{") depth++;
     else if (c === ")" || c === "]" || c === "}") {
       if (depth === 0) break;
       depth--;
@@ -37,9 +41,13 @@ function topLevelArgs(code: string, start: number): string[] {
   return args;
 }
 
+// A detail that can't allocate: a variable, member or index access, a number, a string literal.
+const PLAIN_DETAIL = /^\s*(-?\s*[\w$]+(\s*(\.\s*[\w$]+|\[[^\]()]*\]))*|""|''|-?\d[\w.]*)\s*$/;
+
 /**
  * DEV_ASSERT(condition, "message", detail?): the message must be a plain string literal and the
- * detail must not be computed by a call, so the success path never allocates (assert.ts).
+ * detail a plain value (no call, template or concatenation), so the success path never allocates
+ * (assert.ts).
  */
 function devAssertViolations(code: string): string[] {
   // Calls only: `function DEV_ASSERT(` is the declaration itself.
@@ -48,7 +56,8 @@ function devAssertViolations(code: string): string[] {
     const message = args[1]?.trim() ?? "";
     const problems: string[] = [];
     if (message !== '""' && message !== "''") problems.push("DEV_ASSERT non-literal message");
-    if (args[2]?.includes("(")) problems.push("DEV_ASSERT computed detail");
+    const detail = args[2]?.trim() ?? "";
+    if (detail !== "" && !PLAIN_DETAIL.test(detail)) problems.push("DEV_ASSERT computed detail");
     return problems;
   });
 }
@@ -84,6 +93,8 @@ describe("shared purity guard", () => {
     ["DEV_ASSERT(v >= 0, `speed out of range`);", "DEV_ASSERT non-literal message"],
     ['DEV_ASSERT(v >= 0, "speed " + v);', "DEV_ASSERT non-literal message"],
     ['DEV_ASSERT(v >= 0, "speed out of range", String(v));', "DEV_ASSERT computed detail"],
+    ['DEV_ASSERT(ok, "bad position", `${x},${y}`);', "DEV_ASSERT computed detail"],
+    ['DEV_ASSERT(ok, "bad y", "y=" + y);', "DEV_ASSERT computed detail"],
   ])("flags %j", (source, label) => {
     expect(violations(source)).toContain(label);
   });
@@ -93,6 +104,9 @@ describe("shared purity guard", () => {
     ['const s = "Math.random and Date.now in a string";'],
     ['DEV_ASSERT(v >= 0, "speed must be >= 0", v);'],
     ['DEV_ASSERT(isFinite(v[0]), "speed must be finite", v[0]);'],
+    ['DEV_ASSERT(ok, "bad z", ps.pos[2]);'],
+    ['DEV_ASSERT(ok, "bad z", -z);'],
+    ['DEV_ASSERT(ok, "bad state", "falling");'],
     ["const { sqrt, abs } = Math;"],
     ["const window = [1, 2]; const n = window.length + window[0];"],
     ["const mathRandomSeed = rng.next();"],
