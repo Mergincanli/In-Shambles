@@ -1,22 +1,30 @@
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, onTestFinished } from "vitest";
 
 const serverDir = fileURLToPath(new URL("..", import.meta.url));
 const repoRoot = fileURLToPath(new URL("../../..", import.meta.url));
 const READY = /server ok t=(\d+\.\d{3})ms/;
+const POSIX = process.platform !== "win32";
+
+interface Exit {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  error?: Error;
+}
 
 interface Run {
   child: ChildProcess;
   output(): string;
-  exited: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
+  exited: Promise<Exit>;
   /** Kill the process (or, for detached runs, its whole process group) if it's still around. */
   kill(signal: NodeJS.Signals): void;
 }
 
+/** Spawns a process and makes sure it's killed when the test ends, even on a timeout. */
 function start(command: string, args: string[], cwd: string, detached = false): Run {
   const child = spawn(command, args, { cwd, detached });
   let output = "";
@@ -25,10 +33,12 @@ function start(command: string, args: string[], cwd: string, detached = false): 
   };
   child.stdout?.on("data", append);
   child.stderr?.on("data", append);
-  const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) =>
-    child.once("exit", (code, signal) => resolve({ code, signal })),
-  );
-  return {
+  const exited = new Promise<Exit>((resolve) => {
+    child.once("exit", (code, signal) => resolve({ code, signal }));
+    // A failed spawn (e.g. pnpm not on PATH) emits "error" and no "exit".
+    child.once("error", (error) => resolve({ code: null, signal: null, error }));
+  });
+  const run: Run = {
     child,
     output: () => output,
     exited,
@@ -42,6 +52,17 @@ function start(command: string, args: string[], cwd: string, detached = false): 
       }
     },
   };
+  onTestFinished(() => run.kill("SIGKILL"));
+  return run;
+}
+
+/** Rejects with `what` if `promise` takes longer than `ms`, well inside the test timeout. */
+function within<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} within ${ms} ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
 /** Resolves once `pattern` shows up in the output. Rejects on timeout, or on exit if `failOnExit`. */
@@ -62,12 +83,23 @@ function waitFor(run: Run, pattern: RegExp, timeoutMs: number, failOnExit: boole
     );
     run.child.stdout?.on("data", check);
     if (failOnExit) {
-      void run.exited.then(({ code, signal }) =>
-        done(new Error(`exited early (code ${code}, signal ${signal}):\n${run.output()}`)),
+      void run.exited.then(({ code, signal, error }) =>
+        done(
+          new Error(
+            `${error ? `failed to start: ${error.message}` : `exited early (code ${code}, signal ${signal})`}:\n${run.output()}`,
+          ),
+        ),
       );
     }
     check();
   });
+}
+
+/** pnpm the way the test run was started (pnpm sets npm_execpath), else from PATH. */
+function pnpm(args: string[]): [string, string[]] {
+  const execPath = process.env.npm_execpath ?? "";
+  if (!basename(execPath).includes("pnpm")) return ["pnpm", args];
+  return /\.[cm]?js$/.test(execPath) ? [process.execPath, [execPath, ...args]] : [execPath, args];
 }
 
 describe("server smoke test", () => {
@@ -75,18 +107,15 @@ describe("server smoke test", () => {
     "starts, logs server ok, and stops cleanly on %s",
     async (signal) => {
       const run = start(process.execPath, ["--import", "tsx", "src/main.ts"], serverDir);
-      try {
-        await waitFor(run, READY, 10_000, true);
-        // Monotonic time since process start, not a wall-clock epoch timestamp.
-        expect(Number(READY.exec(run.output())?.[1])).toBeLessThan(60_000);
-        run.kill(signal);
-        // Windows can't deliver signals to a handler; there the process is just terminated.
-        if (process.platform !== "win32") {
-          expect(await run.exited).toEqual({ code: 0, signal: null });
-          expect(run.output()).toContain(`server stopped (${signal})`);
-        }
-      } finally {
-        run.kill("SIGKILL");
+      await waitFor(run, READY, 10_000, true);
+      // Monotonic time since process start, not a wall-clock epoch timestamp.
+      expect(Number(READY.exec(run.output())?.[1])).toBeLessThan(60_000);
+      run.kill(signal);
+      const exit = await within(run.exited, 5_000, `no exit after ${signal}`);
+      // Windows can't deliver signals to a handler; there the process is just terminated.
+      if (POSIX) {
+        expect(exit).toEqual({ code: 0, signal: null });
+        expect(run.output()).toContain(`server stopped (${signal})`);
       }
     },
     15_000,
@@ -94,40 +123,33 @@ describe("server smoke test", () => {
 
   it("the production bundle runs with plain node", async () => {
     const outDir = mkdtempSync(join(tmpdir(), "server-bundle-"));
+    onTestFinished(() => rmSync(outDir, { recursive: true, force: true, maxRetries: 5 }));
+    // Run the bundle under the same module type as packages/server/dist/main.js.
+    const { type } = JSON.parse(readFileSync(join(serverDir, "package.json"), "utf8"));
+    writeFileSync(join(outDir, "package.json"), JSON.stringify({ type }));
     const outfile = join(outDir, "main.js");
-    try {
-      const build = spawnSync(process.execPath, ["build.mjs", outfile], {
-        cwd: serverDir,
-        encoding: "utf8",
-      });
-      expect(build.status, build.stderr).toBe(0);
-      const run = start(process.execPath, [outfile], outDir);
-      try {
-        await waitFor(run, READY, 10_000, true);
-        run.kill("SIGTERM");
-        if (process.platform !== "win32") {
-          expect(await run.exited).toEqual({ code: 0, signal: null });
-        }
-      } finally {
-        run.kill("SIGKILL");
-      }
-    } finally {
-      rmSync(outDir, { recursive: true, force: true });
-    }
+    const build = spawnSync(process.execPath, ["build.mjs", outfile], {
+      cwd: serverDir,
+      encoding: "utf8",
+    });
+    expect(build.status, build.stderr).toBe(0);
+
+    const run = start(process.execPath, [outfile], serverDir);
+    await waitFor(run, READY, 10_000, true);
+    run.kill("SIGTERM");
+    const exit = await within(run.exited, 5_000, "no exit after SIGTERM");
+    if (POSIX) expect(exit).toEqual({ code: 0, signal: null });
   }, 30_000);
 
   // The acceptance command itself, run the way a terminal's Ctrl+C or a process manager stops it.
-  it.skipIf(process.platform === "win32")(
+  it.skipIf(!POSIX)(
     "`pnpm dev:server` from the repo root starts the server and stops with its process group",
     async () => {
-      const run = start("pnpm", ["dev:server"], repoRoot, true);
-      try {
-        await waitFor(run, READY, 20_000, true);
-        run.kill("SIGTERM");
-        await waitFor(run, /server stopped \(SIGTERM\)/, 5_000, false);
-      } finally {
-        run.kill("SIGKILL");
-      }
+      const [command, args] = pnpm(["dev:server"]);
+      const run = start(command, args, repoRoot, true);
+      await waitFor(run, READY, 20_000, true);
+      run.kill("SIGTERM");
+      await waitFor(run, /server stopped \(SIGTERM\)/, 5_000, false);
     },
     30_000,
   );
