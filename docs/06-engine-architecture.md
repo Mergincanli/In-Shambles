@@ -38,10 +38,14 @@ packages/shared/src/
   debug/               DEV_ASSERT / setDevAsserts (dev-only checks behind a runtime flag)
   world/
     cmap.ts            compiled map format types (docs/07)
-    brush.ts           convex brush = planes + bounds + contents flags
+    collisionWorld.ts  typed-array brushes (planes, faces then bevels, contents, bounds)
+    shapes.ts          plane sets: box, box rotated about Z, axis-aligned wedge
+    polygonize.ts      planes → welded, validated face polygons (build time)
+    brushValidate.ts   brush build errors, thresholds and the topology/geometry checks
+    brushBuild.ts      polygonize + axial bevels + bounds (build time)
     bvh.ts             static BVH over brush bounds
     trace.ts           traceBox(start, end, mins, maxs, mask) → {fraction, endpos, plane, contents, entity, startSolid, allSolid}
-    contents.ts        SOLID, PLAYERCLIP, WATER, LADDER, SLICK, NODAMAGE, TRIGGER…
+    contents.ts        SOLID, PLAYERCLIP, WATER, LADDER, SLICK, NODAMAGE, TRIGGER, NODRAW; SURF_* flags
   sim/
     entity.ts          ENTITY_NONE (−1), ENTITY_WORLD (32767)
     hull.ts            player hulls (docs/03 §2)

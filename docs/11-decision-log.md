@@ -117,6 +117,19 @@
 - `docs/03` §6 and `docs/05` §3.4 carry "Pinned down in M1" notes; the code is in `packages/shared/src/sim/`.
 - Open for later milestones: whether kick-eligible needs any wire bit (M4), which `weaponSlot` index is which and whether out-of-range slots clamp or mean "no change" (weapon switching), and the hull label in `docs/03` §2.
 
+### D-019 — Brush contents, surface flags and build rules for M1 (2026-10-05, accepted)
+**Context:** M1 implements the collision brushes of `docs/07` §2. The doc names the contents flags and optional per-side surface flags but leaves their bits open, and §4.3 says to reject degenerate brushes without saying what degenerate means. Traces also need bevel planes, which the doc does not mention (M1 design B).
+**Decision:**
+- Contents bits 0–7 in the `docs/07` §2 order; masks `MASK_PLAYERSOLID` (solid + playerclip), `MASK_SOLID`, `MASK_WATER`.
+- Surface flags per side: ladder, slick and nodamage bits (`docs/03` §4.10, §4.14, §5.6), plus a 4-bit footstep material field (`docs/07` §6 prefixes). M2 decides whether ladders use the face flag or the LADDER volume; M1 provides both.
+- Brushes are built from f32-rounded planes, so polygons, bevels, bounds and render vertices agree with what traces use. Axial bevels follow the faces with outward-rounded distances; they make boxes, boxes rotated about Z and axis-aligned wedges exact. `buildBrush` adds only axial bevels, so other shapes build but trace inexactly: the greybox MapBuilder (increment 7) rejects shapes that would need edge bevels, and `mapc` adds edge bevels in M5.
+- Cleanup rules the design left open: a vertex near its neighbours' line (1e-4 u) is removed only when it lies on fewer than 3 kept faces, so a real corner where two faces meet almost flat stays; vertices within 1e-5 u of an exactly axial face snap onto it, so axial coordinates are exact and the face distance is a tight bound.
+- Validation thresholds: weld 1/64 u (§4.3), minimum edge 1/8 u, no two vertices of a face within the weld distance, minimum volume above 1 u³, vertex-on-plane tolerance 1e-4 u, world limit ±16384 u (a plane further than 16384·√3 + 1 u from the origin is rejected up front, since no face of an in-bounds brush can be there).
+
+**Consequences:**
+- `docs/07` §2 carries a "Pinned down in M1" note and `docs/06` §3 lists the world modules.
+- The shared polygonizer is the single implementation: the greybox compiler (M1), `mapc` (M5) and the trace fuzz oracle all use it, and its own tests cross-check it against brute-force triple-plane intersection.
+
 ---
 
 <!-- Template
