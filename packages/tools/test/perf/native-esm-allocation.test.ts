@@ -3,8 +3,9 @@ import { describe, expect, it } from "vitest";
 import { fromRoot } from "../../src/paths";
 
 // The per-tick paths (quantizePlayerState, snapOrigin, the state ring, copy/equals,
-// sanitizeUserCmd and the BVH queries) must not allocate under native ES modules either, where V8 boxes a double returned by a call it doesn't inline or joined with a
-// module constant in a ternary. Vitest's module runner hides that, so this runs a child process.
+// sanitizeUserCmd and the BVH queries) must not allocate under native ES modules either, where
+// V8 boxes a double returned by a call it doesn't inline or joined with a module constant in a
+// ternary. Vitest's module runner hides that, so this runs a child process.
 
 interface ChildResult {
   clean: boolean;
