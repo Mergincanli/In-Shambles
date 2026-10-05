@@ -53,7 +53,10 @@ const INT_MAX = 2 ** 31 - 1;
  * and the network, so they return a result instead of throwing.
  */
 export class CvarRegistry {
+  /** Keyed by lowercased name, for case-insensitive lookups. */
   private readonly entries = new Map<string, CvarEntry>();
+  /** Keyed by the registered spelling: code reads cvars without allocating a lowercased key. */
+  private readonly exact = new Map<string, CvarEntry>();
   private allowCheats = false;
 
   register<T extends CvarType>(def: CvarDef<T>): void {
@@ -82,19 +85,26 @@ export class CvarRegistry {
     if (!matchesType(def.type, value) || clampToRange(def, value) !== value) {
       throw new Error(`cvar "${def.name}": default ${String(value)} is not a valid ${def.type}`);
     }
-    this.entries.set(key, { def: { ...def }, value: normalize(value), latched: undefined });
+    const entry: CvarEntry = { def: { ...def }, value: normalize(value), latched: undefined };
+    this.entries.set(key, entry);
+    this.exact.set(def.name, entry);
+  }
+
+  /** Exact spelling first (no allocation); other spellings from consoles fall back to lowercase. */
+  private lookup(name: string): CvarEntry | undefined {
+    return this.exact.get(name) ?? this.entries.get(name.toLowerCase());
   }
 
   has(name: string): boolean {
-    return this.entries.has(name.toLowerCase());
+    return this.lookup(name) !== undefined;
   }
 
   get(name: string): CvarValue | undefined {
-    return this.entries.get(name.toLowerCase())?.value;
+    return this.lookup(name)?.value;
   }
 
   info(name: string): CvarInfo | undefined {
-    return this.entries.get(name.toLowerCase());
+    return this.lookup(name);
   }
 
   cheatsAllowed(): boolean {
@@ -113,14 +123,14 @@ export class CvarRegistry {
   }
 
   set(name: string, value: CvarValue): SetResult {
-    const entry = this.entries.get(name.toLowerCase());
+    const entry = this.lookup(name);
     if (!entry) return { ok: false, error: "unknown" };
     if (isCheat(entry) && !this.allowCheats) return { ok: false, error: "cheat" };
     return assign(entry, value);
   }
 
   setFromString(name: string, text: string): SetResult {
-    const entry = this.entries.get(name.toLowerCase());
+    const entry = this.lookup(name);
     if (!entry) return { ok: false, error: "unknown" };
     const value = parseValue(entry.def.type, text);
     if (value === undefined) return { ok: false, error: "type" };
@@ -129,7 +139,7 @@ export class CvarRegistry {
 
   /** Back to the default. Allowed for CHEAT cvars too; LATCH cvars still wait for `applyLatched()`. */
   reset(name: string): SetResult {
-    const entry = this.entries.get(name.toLowerCase());
+    const entry = this.lookup(name);
     if (!entry) return { ok: false, error: "unknown" };
     return assign(entry, entry.def.default);
   }

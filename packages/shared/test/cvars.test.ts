@@ -134,6 +134,14 @@ describe("register", () => {
   });
 });
 
+describe("flags", () => {
+  it("uses one distinct bit per flag", () => {
+    const bits = Object.values(CvarFlag).filter((bit) => bit !== 0);
+    for (const bit of bits) expect(bit & (bit - 1), `${bit} is one bit`).toBe(0);
+    expect(new Set(bits).size).toBe(bits.length);
+  });
+});
+
 describe("set", () => {
   it("sets values of the right type", () => {
     expect(cvars.set("sensitivity", 2.5)).toEqual({
@@ -169,6 +177,18 @@ describe("set", () => {
     expect(cvars.get("pm_maxWallJumps")).toBe(3);
   });
 
+  it("accepts the full int32 range and nothing beyond it", () => {
+    cvars.register({ name: "g_score", type: "int", default: 0, description: "x" });
+    expect(cvars.set("g_score", -(2 ** 31)).ok).toBe(true);
+    expect(cvars.set("g_score", -(2 ** 31) - 1)).toEqual({ ok: false, error: "type" });
+    expect(cvars.set("g_score", 2 ** 31 - 1).ok).toBe(true);
+  });
+
+  it("stores a -0 default as 0", () => {
+    cvars.register({ name: "pm_bias", type: "float", default: -0, description: "x" });
+    expect(Object.is(cvars.get("pm_bias"), 0)).toBe(true);
+  });
+
   it("stores -0 as 0", () => {
     cvars.register({ name: "pm_offset", type: "float", default: 1, description: "x" });
     cvars.set("pm_offset", -0);
@@ -197,6 +217,13 @@ describe("set", () => {
     expect(cvars.get("pm_gravity")).toBe(600);
     expect(cvars.applyLatched()).toEqual(["pm_gravity"]);
     expect(cvars.get("pm_gravity")).toBe(800);
+  });
+
+  it("returns applied LATCH names sorted", () => {
+    cvars.setAllowCheats(true);
+    cvars.set("sv_fps", 30);
+    cvars.set("pm_gravity", 600);
+    expect(cvars.applyLatched()).toEqual(["pm_gravity", "sv_fps"]);
   });
 
   it("cancels a pending LATCH value when set back to the current value", () => {
