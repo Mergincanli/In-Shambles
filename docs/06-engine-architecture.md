@@ -57,7 +57,8 @@ packages/shared/src/
     playerState.ts     PlayerState struct + quantize(), PlayerStateRing (128 ticks)
     usercmd.ts         UserCmd struct + sanitize(), BUTTON_* bits
     pmove/             cmdScale, friction, accelerate, walk, air, water, ladder, slideMove,
-                       stepSlideMove, groundTrace, crouch, jump  (docs/03 §4)
+                       stepSlideMove, groundTrace, crouch, jump  (docs/03 §4); the pipeline
+                       (pmove.ts, D-023) and a trace log for debug draw (debug.ts)
     urt/               sprint, stamina, wallJump, powerSlide, ledgeGrab, fall, goomba, kick (docs/03 §5)
     events.ts          movement events ring
   combat/

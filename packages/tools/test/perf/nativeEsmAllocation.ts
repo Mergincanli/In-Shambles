@@ -1,7 +1,10 @@
 import { PerformanceObserver } from "node:perf_hooks";
 import {
+  ACCEL_AIR,
+  ACCEL_GROUND,
   accelerate,
   applyFriction,
+  BUTTON_JUMP,
   BUTTON_WALK,
   boxContents,
   boxPlanes,
@@ -20,9 +23,17 @@ import {
   Mulberry32,
   PlayerState,
   PlayerStateRing,
+  PMEV_LAND,
+  PMEV_STEP,
+  PMF_CROUCHED,
+  PMF_GROUNDED,
   PMOVE_CVARS,
+  PmoveEvent,
+  PmoveEvents,
   PmoveParams,
+  PmoveTraceLog,
   playerStateEquals,
+  pmove,
   pointContents,
   positionContents,
   positionTest,
@@ -32,6 +43,7 @@ import {
   rotatedBoxPlanes,
   sanitizeUserCmd,
   snapOrigin,
+  TICK_DT,
   TraceResult,
   traceBox,
   traceRay,
@@ -210,15 +222,80 @@ function runPmoveBasics(n: number): void {
     vel[0] = e[0];
     vel[1] = e[1];
     vel[2] = e[2] - 50;
-    accelerate(vel, normal, params.runSpeed * 0.5, params.accelerate, 1 / 60);
+    accelerate(vel, wish, (i & 4) === 0 ? ACCEL_GROUND : ACCEL_AIR, params, 1 / 60);
     applyFriction(vel, (i & 1) === 0, params, 1 / 60);
-    clipVelocity(vel, vel, normal, params.overclip);
+    clipVelocity(vel, vel, normal, params);
     if (vel[2] + wish[0] > 0) outcomes[1] = (outcomes[1] as number) + 1;
     else outcomes[2] = (outcomes[2] as number) + 1;
   }
 }
 
+// A walled room with a slope, a rotated wall, an 18 u step and a 16 u step, for the whole tick.
+const room = createCollisionWorld([
+  solid(boxPlanes([-512, -512, -64], [512, 512, 0])),
+  solid(boxPlanes([-544, -544, 0], [-512, 544, 256])),
+  solid(boxPlanes([512, -544, 0], [544, 544, 256])),
+  solid(boxPlanes([-544, -544, 0], [544, -512, 256])),
+  solid(boxPlanes([-544, 512, 0], [544, 544, 256])),
+  solid(wedgePlanes([0, -256, 0], [256, 0, 200], "+x")),
+  solid(rotatedBoxPlanes([-200, 200, 48], [96, 12, 48], 0.6, 0.8)),
+  solid(boxPlanes([100, 150, 0], [300, 350, 18])),
+  solid(boxPlanes([-350, -350, 0], [-150, -150, 16])),
+]);
+const pps = new PlayerState();
+const pcmd = new UserCmd();
+const events = new PmoveEvents();
+const traceLog = new PmoveTraceLog();
+// Refreshed from a registry with fractional values, as the game does: the fields then hold
+// doubles, which V8 represents differently from the integer defaults.
+const pmoveCvars = new CvarRegistry();
+registerPmoveCvars(pmoveCvars);
+pmoveCvars.set("pm_gravity", 799.5);
+pmoveCvars.set("pm_runSpeed", 320.25);
+pmoveCvars.set("pm_accelerate", 10.5);
+pmoveCvars.set("pm_stepSize", 18.5);
+const pmoveParams = new PmoveParams();
+refreshPmoveParams(pmoveCvars, pmoveParams);
+const eventOut = new PmoveEvent();
+
+/**
+ * Whole pmove ticks: walk, strafe, jump, walk-modifier and crouched-hull input over slopes,
+ * steps and walls, with the events ring and (every other tick) the trace log attached.
+ */
+function runPmove(n: number): void {
+  for (let i = 0; i < n; i++) {
+    if ((i & 511) === 0) {
+      pps.origin[0] = ((i >> 9) & 7) * 40 - 140;
+      pps.origin[1] = 100;
+      pps.origin[2] = 24;
+      pps.velocity[0] = 0;
+      pps.velocity[1] = 0;
+      pps.velocity[2] = 0;
+      pps.flags = PMF_GROUNDED;
+    }
+    pcmd.forward = (i & 64) === 0 ? 127 : -90;
+    pcmd.right = ((i >> 5) & 3) * 60 - 90;
+    pcmd.buttons = ((i & 31) === 0 ? BUTTON_JUMP : 0) | ((i & 256) !== 0 ? BUTTON_WALK : 0);
+    pcmd.yaw = (i * 97) & 0xffff;
+    pcmd.pitch = (i * 31) & 0x3fff;
+    if ((i & 1023) === 512) pps.flags |= PMF_CROUCHED;
+    if ((i & 1023) === 0) pps.flags &= ~PMF_CROUCHED;
+    pmove(pps, pcmd, room, pmoveParams, TICK_DT, events, (i & 1) === 0 ? traceLog : null);
+    if ((pps.flags & PMF_GROUNDED) !== 0) outcomes[0] = (outcomes[0] as number) + 1;
+    else outcomes[1] = (outcomes[1] as number) + 1;
+    for (let k = 0; k < events.count; k++) {
+      events.read(k, eventOut);
+      if (eventOut.type === PMEV_STEP || eventOut.type === PMEV_LAND) {
+        outcomes[2] = (outcomes[2] as number) + 1;
+      }
+    }
+    events.clear();
+    if ((i & 63) === 0) traceLog.clear();
+  }
+}
+
 const WORKLOADS: Record<string, (n: number) => void> = {
+  pmove: runPmove,
   pmoveBasics: runPmoveBasics,
   quantize: runQuantize,
   snap: runSnap,

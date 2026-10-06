@@ -198,6 +198,44 @@
 - Firefox and WebKit are proven only in CI; the M2 acceptance box for them is ticked once the PR's `browsers` job is green.
 - Upgrading `playwright` means picking a release whose browser builds are available locally, or setting `CHROMIUM_PATH`.
 
+### D-023 — pmove contract (2026-10-06, accepted)
+**Context:** M2 increment 3 builds the base pmove pipeline (`docs/03` §3, §4.4–§4.11). The spec left four things open: what "starts in solid" means now that D-017 distinguishes `startSolid` from `allSolid`; where slick and nodamage come from, since bevel planes carry no face flags; what "crouch-blocked" means; and how the tick length and the movement events reach and leave pmove (M2 plan, "Spec decisions"; M2 design §2–§3).
+**Decision:**
+- **Signature:** `pmove(ps, cmd, world, params, dt, events | null, debugLog | null)` updates `ps` in place.
+  - `cmd` is already sanitized.
+  - `dt` is a parameter: `TICK_DT` in play, 1/120 s only in tests (MV-04).
+  - `params` is `PmoveParams`, refreshed outside the tick when `CvarRegistry.version` changes.
+  - `events` (step, jump, land) and the trace log are output only. No `PlayerState` fields are added, and the hull changes only in the pre-checks, at the tick's start origin.
+  - Each tick ends with `snapOrigin` (fallback: the start origin), then `quantizePlayerState`.
+- **Stuck rule (Q1):** the slide move stops only on an **allSolid** sweep: it zeroes vz, reports blocked and asserts in dev, since the snap keeps every start clear. A `startSolid` sweep that is not `allSolid` moves out of the brush and is accepted.
+- **Ground surface (Q3):** ground is slick or nodamage when the hit plane's `SURF_*` bit **or** the hit brush's `CONTENTS_SLICK`/`CONTENTS_NODAMAGE` bit is set. Bevels keep flags 0, but `trace.contents` keeps the brush bits, so ramp crests work with no map format change.
+- **Crouch-blocked:** crouched with the standing hull blocked at the origin, so no jump under a ceiling. Crouch-jumping in the open is allowed.
+- **LAND value:** the downward speed at the start of the landing tick.
+- **Landing clip:** when the ground trace turns an airborne player grounded, the velocity is clipped against the ground plane. Without it a fall that ended within `pm_groundTraceDist` of the floor, untouched by the slide sweep, kept its full vz, and the walk move's slope-following rescale turned it into horizontal speed (up to 690 u/s from a run-jump).
+- **Ground settle:** after the move, a grounded player is moved down to the ground trace's end point before the snap. A walk along a slope rounds by the same vector every tick, and the accumulated drift otherwise lifted the player past the probe every 3–4 ticks (an air tick and a spurious LAND each time).
+- **Step-down trace and ties:** the stepped path is traced back down by the raise plus `pm_groundTraceDist`, so it finds the floor at the start height. A stepped path within 1/16 u of the plain one (either way) is a tie: the plain origin, with whichever path's velocity kept more horizontal speed. Before this, a plain slide that touched a riser at a tick's end won with a velocity clipped to 0, and 7% (run) to 19% (walk) of stair approaches snagged to a stop.
+- **Steep crevices** (a V of non-walkable planes) can hold a player who can neither slide out nor jump. Accepted as base-movement behaviour; maps must avoid them, and a map-validation check is planned with the map pipeline.
+- **Slide-move clip order:** as `docs/03` §4.8 step 4 says, the plane just hit is clipped against first, then every stored plane the result still moves into. Starting from the first stored plane instead would let the flat ground plane (which a level walk only grazes, so its clip changes nothing) use up the pass, and an acute corner would then not stop the move.
+- **Design constants**, not cvars (the same code runs on client and server, and none is a feel knob):
+  - same plane: normals' dot > 0.99;
+  - a stored plane is cleared only when the velocity leaves it at more than 0.1 u/s;
+  - a stepped path must get 1/16 u farther than the plain one;
+  - a step event needs |Δz| ≥ 1/32 u.
+
+  In the seeded random-input property run (`pmoveProperty.test.ts`), the step margins remove spurious "steps" (−2.5 u while falling past edges, 0.05 u on a slope) and leave the run's other tallies unchanged. Walking up a slope still tries the stepped path whenever a sweep grazes the slope; the 1/16 u margin is what keeps those from becoming step events.
+
+**Consequences:**
+- `docs/03` §3 states the contract and §4.8–§4.11 the rules above. The code is in `packages/shared/src/sim/pmove/` (`slideMove`, `stepSlideMove`, `ground`, `walk`, `debug`, `pmove`). It is tested in `packages/shared/test/sim/pmove/`, including a seeded 1e4-tick random-input property on slopes and rotated walls: never in solid, no consecutive previous-origin fallbacks.
+- **Native ESM (M2 plan, risk 3):** pmove's move functions are too big for V8 to inline every call, and a double passed to a call that isn't inlined is boxed. So per-tick shared code passes no computed doubles across calls:
+  - `accelerate(v, wishVel, kind, params, dt)` and `clipVelocity(out, v, n, params)` replace the increment-2 forms that took wishSpeed, coefficient and overclip;
+  - `PmoveEvents.pushFrom` takes the event value from an array;
+  - `angleVectors` gets sine and cosine from `sinCosU16` (same bits as `sinU16`/`cosU16`) through an out-array;
+  - the slide move keeps its remaining time in a typed array.
+
+  The native-ESM `pmove` workload allocates nothing. Rarely run code (a landing, a step) still boxes about 16 B per event until V8 optimizes it.
+- **Bench:** `pnpm bench` times pmove on `movement_lab` against the `docs/10` §4.4 budget, at about 1.6–1.75 µs per player-tick with 0 GCs (`docs/10` §4.4).
+- **Tests** for the landing, settle and step rules sweep their phases: drops onto flat ground from 8–120 u in 1/8 u steps never exceed the run cap; 300-tick walks up and down 0.71–0.99 slopes at run and walk speed have no air tick and no LAND; stair climbs from 192 start offsets in 1/32 u steps never drop below 90% of the cap.
+
 ---
 
 <!-- Template

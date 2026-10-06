@@ -1,7 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { type Vec3, vec3, vec3Dot, vec3Length, vec3Normalize } from "../../../src/math/vec3";
 import { Mulberry32 } from "../../../src/rng/mulberry32";
-import { accelerate, applyFriction, clipVelocity, cmdScale } from "../../../src/sim/pmove/basics";
+import {
+  ACCEL_AIR,
+  ACCEL_GROUND,
+  ACCEL_WATER,
+  accelerate,
+  applyFriction,
+  clipVelocity,
+  cmdScale,
+} from "../../../src/sim/pmove/basics";
 import { PmoveParams } from "../../../src/sim/pmove/params";
 import { BUTTON_WALK, UserCmd } from "../../../src/sim/usercmd";
 import { TICK_DT } from "../../../src/time";
@@ -91,44 +99,61 @@ describe("cmdScale (docs/03 §4.1)", () => {
 });
 
 describe("accelerate (docs/03 §4.3)", () => {
-  const dir = (x: number, y: number, z = 0) => {
+  /** wishVel = unit(x, y, z) · speed. */
+  const wish = (speed: number, x: number, y: number, z = 0) => {
     const d = vec3(x, y, z);
     vec3Normalize(d, d);
-    return d;
+    return vec3(d[0] * speed, d[1] * speed, d[2] * speed);
   };
 
   it("adds coefficient × dt × wishSpeed along wishDir", () => {
     const v = vec3();
-    accelerate(v, dir(1, 0), 320, 10, TICK_DT);
+    accelerate(v, wish(320, 1, 0), ACCEL_GROUND, p, TICK_DT);
     expect(v[0]).toBeCloseTo((10 * 320) / 60, 12);
     expect(v[1]).toBe(0);
     expect(v[2]).toBe(0);
   });
 
+  it("picks pm_accelerate, pm_airAccelerate or pm_waterAccelerate by kind", () => {
+    const q = new PmoveParams();
+    q.accelerate = 7;
+    q.airAccelerate = 0.5;
+    q.waterAccelerate = 3;
+    for (const [kind, coefficient] of [
+      [ACCEL_GROUND, 7],
+      [ACCEL_AIR, 0.5],
+      [ACCEL_WATER, 3],
+    ] as const) {
+      const v = vec3();
+      accelerate(v, wish(120, 0, 1), kind, q, TICK_DT);
+      expect(v[1]).toBeCloseTo((coefficient * 120) / 60, 12);
+    }
+  });
+
   it("caps the component along wishDir at wishSpeed", () => {
     const v = vec3(310, 0, 0);
-    accelerate(v, dir(1, 0), 320, 10, TICK_DT);
+    accelerate(v, wish(320, 1, 0), ACCEL_GROUND, p, TICK_DT);
     expect(v[0]).toBe(320);
-    for (let i = 0; i < 100; i++) accelerate(v, dir(1, 0), 320, 10, TICK_DT);
+    for (let i = 0; i < 100; i++) accelerate(v, wish(320, 1, 0), ACCEL_GROUND, p, TICK_DT);
     expect(v[0]).toBe(320);
   });
 
   it("does nothing when add ≤ 0", () => {
     const v = vec3(400, 30, -5);
-    accelerate(v, dir(1, 0), 320, 10, TICK_DT);
+    accelerate(v, wish(320, 1, 0), ACCEL_GROUND, p, TICK_DT);
     expect([...v]).toEqual([400, 30, -5]);
     const w = vec3(320, 0, 0);
-    accelerate(w, dir(1, 0), 320, 10, TICK_DT);
+    accelerate(w, wish(320, 1, 0), ACCEL_GROUND, p, TICK_DT);
     expect([...w]).toEqual([320, 0, 0]);
     const z = vec3(1, 2, 3);
-    accelerate(z, dir(1, 0), 0, 10, TICK_DT);
+    accelerate(z, vec3(), ACCEL_GROUND, p, TICK_DT);
     expect([...z]).toEqual([1, 2, 3]);
   });
 
   it("gains total speed past wishSpeed when wishDir is perpendicular to the velocity", () => {
     // Air strafe: already at 320 along +x, wishing along +y with air acceleration 1.
     const v = vec3(320, 0, 0);
-    accelerate(v, dir(0, 1), 320, 1, TICK_DT);
+    accelerate(v, wish(320, 0, 1), ACCEL_AIR, p, TICK_DT);
     expect(v[0]).toBe(320);
     expect(v[1]).toBeCloseTo(320 / 60, 12);
     expect(vec3Length(v)).toBeGreaterThan(320);
@@ -136,14 +161,14 @@ describe("accelerate (docs/03 §4.3)", () => {
 
   it("gains nothing when hopping straight ahead at the cap", () => {
     const v = vec3(320, 0, 0);
-    accelerate(v, dir(1, 0), 320, 1, TICK_DT);
+    accelerate(v, wish(320, 1, 0), ACCEL_AIR, p, TICK_DT);
     expect(vec3Length(v)).toBe(320);
   });
 
   it("works in 3D (swimming)", () => {
     const v = vec3();
-    const d = dir(0, 0, -1);
-    for (let i = 0; i < 600; i++) accelerate(v, d, 60, 4, TICK_DT);
+    const w = wish(60, 0, 0, -1);
+    for (let i = 0; i < 600; i++) accelerate(v, w, ACCEL_WATER, p, TICK_DT);
     expect(v[2]).toBeCloseTo(-60, 9);
     expect(v[0]).toBe(0);
   });
@@ -233,43 +258,44 @@ describe("applyFriction (docs/03 §4.2, ground)", () => {
 
 describe("clipVelocity (docs/03 §4.7)", () => {
   const up = vec3(0, 0, 1);
+  const OVERCLIP = { overclip: 1.001 };
 
   it("pushes a velocity into the plane out by the overclip", () => {
-    const out = clipVelocity(vec3(), vec3(100, 0, -200), up, 1.001);
+    const out = clipVelocity(vec3(), vec3(100, 0, -200), up, OVERCLIP);
     expect(out[0]).toBe(100);
     expect(out[2]).toBeCloseTo(200 * 0.001, 12);
     expect(out[2]).toBeGreaterThan(0);
   });
 
   it("keeps a little of a velocity already leaving the plane", () => {
-    const out = clipVelocity(vec3(), vec3(100, 0, 200), up, 1.001);
+    const out = clipVelocity(vec3(), vec3(100, 0, 200), up, OVERCLIP);
     expect(out[0]).toBe(100);
     expect(out[2]).toBeCloseTo(200 - 200 / 1.001, 12);
     expect(out[2]).toBeGreaterThan(0);
   });
 
   it("leaves a velocity along the plane unchanged", () => {
-    const out = clipVelocity(vec3(), vec3(100, -50, 0), up, 1.001);
+    const out = clipVelocity(vec3(), vec3(100, -50, 0), up, OVERCLIP);
     expect([...out]).toEqual([100, -50, 0]);
   });
 
   it("removes the normal component exactly with overclip 1", () => {
-    const out = clipVelocity(vec3(), vec3(3, 4, -5), up, 1);
+    const out = clipVelocity(vec3(), vec3(3, 4, -5), up, { overclip: 1 });
     expect([...out]).toEqual([3, 4, 0]);
   });
 
   it("never writes −0", () => {
-    const out = clipVelocity(vec3(), vec3(-0, 5, -0), vec3(1, 0, 0), 1.001);
+    const out = clipVelocity(vec3(), vec3(-0, 5, -0), vec3(1, 0, 0), OVERCLIP);
     for (const x of out) expect(Object.is(x, -0)).toBe(false);
-    clipVelocity(out, vec3(-0, -0, -0), vec3(1, 0, 0), 1.001);
+    clipVelocity(out, vec3(-0, -0, -0), vec3(1, 0, 0), OVERCLIP);
     for (const x of out) expect(Object.is(x, 0)).toBe(true);
-    clipVelocity(out, vec3(3, -0, -0), vec3(0, 0, 1), 1.001);
+    clipVelocity(out, vec3(3, -0, -0), vec3(0, 0, 1), OVERCLIP);
     expect(Object.is(out[1], 0)).toBe(true);
   });
 
   it("may write in place", () => {
     const v = vec3(100, 0, -200);
-    expect(clipVelocity(v, v, up, 1.001)).toBe(v);
+    expect(clipVelocity(v, v, up, OVERCLIP)).toBe(v);
     expect(v[2]).toBeGreaterThan(0);
   });
 
@@ -291,7 +317,7 @@ describe("clipVelocity (docs/03 §4.7)", () => {
       const before = vec3Dot(v, n);
       if (before < 0) into++;
       else away++;
-      clipVelocity(out, v, n, 1.001);
+      clipVelocity(out, v, n, OVERCLIP);
       // Into the plane: exactly 0.1% of the approach speed comes back out (to rounding).
       const after = vec3Dot(out, n);
       expect(after).toBeGreaterThanOrEqual(-1e-12 * vec3Length(v));

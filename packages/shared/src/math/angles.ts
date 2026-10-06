@@ -1,4 +1,4 @@
-import { cosU16, sinU16 } from "./dtrig";
+import { sinCosU16 } from "./dtrig";
 import { toSigned16 } from "./quant";
 import type { Vec3 } from "./vec3";
 
@@ -18,9 +18,13 @@ export function clampPitchU16(pitch: number): number {
   return s & 0xffff;
 }
 
+/** sin/cos of yaw then pitch: filled through an out-parameter, so no double result is boxed. */
+const sinCos = new Float64Array(4);
+
 /**
  * Unit view basis from u16 angles: forward = (cp·cy, cp·sy, −sp), right = (sy, −cy, 0),
- * up = (sp·cy, sp·sy, cp). Negations are written `0 − v` so no component is ever −0.
+ * up = (sp·cy, sp·sy, cp), from sinU16/cosU16. Negations are written `0 − v` so no component is
+ * ever −0.
  */
 export function angleVectors(
   yaw: number,
@@ -29,10 +33,13 @@ export function angleVectors(
   right: Vec3,
   up: Vec3,
 ): void {
-  const sy = sinU16(yaw);
-  const cy = cosU16(yaw);
-  const sp = sinU16(pitch);
-  const cp = cosU16(pitch);
+  const t = sinCos;
+  sinCosU16(yaw, t, 0);
+  sinCosU16(pitch, t, 2);
+  const sy = t[0] as number;
+  const cy = t[1] as number;
+  const sp = t[2] as number;
+  const cp = t[3] as number;
   forward[0] = cp * cy + 0;
   forward[1] = cp * sy + 0;
   forward[2] = 0 - sp;

@@ -3,9 +3,10 @@ import { describe, expect, it } from "vitest";
 import { fromRoot } from "../../src/paths";
 
 // The per-tick paths (quantizePlayerState, snapOrigin, the state ring, copy/equals,
-// sanitizeUserCmd, the pmove params refresh and basics, and the BVH queries) must not allocate under native ES modules either, where
-// V8 boxes a double returned by a call it doesn't inline or joined with a module constant in a
-// ternary. Vitest's module runner hides that, so this runs a child process.
+// sanitizeUserCmd, the pmove params refresh and basics, whole pmove ticks, and the BVH queries)
+// must not allocate under native ES modules either, where V8 boxes a double returned by a call it
+// doesn't inline or joined with a module constant in a ternary. Vitest's module runner hides
+// that, so this runs a child process.
 
 interface ChildResult {
   clean: boolean;
@@ -43,6 +44,12 @@ describe("per-tick paths under native ES modules", () => {
 
   it("refreshPmoveParams and the pmove basics allocate nothing", () => {
     const r = runChild("pmoveBasics");
+    for (const n of r.outcomes) expect(n).toBeGreaterThan(0);
+    expect(r.clean, r.attempts.join("; ")).toBe(true);
+  }, 30_000);
+
+  it("whole pmove ticks allocate nothing, with events and the trace log attached", () => {
+    const r = runChild("pmove");
     for (const n of r.outcomes) expect(n).toBeGreaterThan(0);
     expect(r.clean, r.attempts.join("; ")).toBe(true);
   }, 30_000);

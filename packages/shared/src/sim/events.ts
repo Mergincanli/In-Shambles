@@ -39,6 +39,19 @@ export class PmoveEvents {
   }
 
   push(type: number, value: number): void {
+    this.values[this.claim(type)] = value;
+  }
+
+  /**
+   * push(type, src[index]). Per-tick callers (pmove) use this so the value never crosses a call
+   * as a double, which V8 boxes when the call isn't inlined (native ESM).
+   */
+  pushFrom(type: number, src: Float64Array, index: number): void {
+    this.values[this.claim(type)] = src[index] as number;
+  }
+
+  /** Takes the next slot (dropping the oldest event when full), stores `type`, returns the slot. */
+  private claim(type: number): number {
     let slot = this.head + this.size;
     if (this.size === PMOVE_EVENTS_CAPACITY) {
       slot = this.head;
@@ -49,7 +62,7 @@ export class PmoveEvents {
     }
     slot %= PMOVE_EVENTS_CAPACITY;
     this.types[slot] = type;
-    this.values[slot] = value;
+    return slot;
   }
 
   /**

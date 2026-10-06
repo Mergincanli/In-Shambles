@@ -4,8 +4,10 @@ import type { PmoveParams } from "./params";
 
 /**
  * The docs/03 §4 building blocks every move mode shares. Pure leaf functions: they write
- * through out-parameters and return no doubles (native-ESM boxing, .claude/rules), and use only
- * exact operations plus `Math.sqrt` (D-016).
+ * through out-parameters, return no doubles and take none either, apart from the tick length
+ * passed through from pmove (native-ESM boxing, .claude/rules: pmove's move functions are too big
+ * for V8 to inline every call, and a double crossing a call that isn't inlined is boxed). They use
+ * only exact operations plus `Math.sqrt` (D-016).
  */
 
 /**
@@ -45,25 +47,39 @@ export function cmdScale(
   return out;
 }
 
+/** `accelerate` coefficients: pm_accelerate, pm_airAccelerate, pm_waterAccelerate. */
+export const ACCEL_GROUND = 0;
+export const ACCEL_AIR = 1;
+export const ACCEL_WATER = 2;
+
 /**
- * Accelerate (docs/03 §4.3), the same for ground, air and water; only `accel` differs. Caps only
- * the velocity component along `wishDir` (unit length) at `wishSpeed`, which is why strafing
- * with wishDir nearly perpendicular to the velocity keeps adding speed.
+ * Accelerate (docs/03 §4.3), the same for ground, air and water; only the coefficient, picked by
+ * `kind`, differs. `wishVel` is wishDir · wishSpeed (zero for no input). Caps only the velocity
+ * component along wishDir at wishSpeed, which is why strafing with wishDir nearly perpendicular
+ * to the velocity keeps adding speed.
  */
 export function accelerate(
   v: Vec3,
-  wishDir: Vec3,
-  wishSpeed: number,
-  accel: number,
+  wishVel: Vec3,
+  kind: number,
+  p: Readonly<PmoveParams>,
   dt: number,
 ): void {
-  const current = v[0] * wishDir[0] + v[1] * wishDir[1] + v[2] * wishDir[2];
+  const wx = wishVel[0];
+  const wy = wishVel[1];
+  const wz = wishVel[2];
+  const wishSpeed = Math.sqrt(wx * wx + wy * wy + wz * wz);
+  if (wishSpeed === 0) return;
+  const current = (v[0] * wx + v[1] * wy + v[2] * wz) / wishSpeed;
   const add = wishSpeed - current;
   if (add <= 0) return;
-  const speed = Math.min(accel * dt * wishSpeed, add);
-  v[0] += wishDir[0] * speed;
-  v[1] += wishDir[1] * speed;
-  v[2] += wishDir[2] * speed;
+  const accel =
+    kind === ACCEL_GROUND ? p.accelerate : kind === ACCEL_AIR ? p.airAccelerate : p.waterAccelerate;
+  // The speed to add, as a fraction of wishVel.
+  const k = Math.min(accel * dt * wishSpeed, add) / wishSpeed;
+  v[0] += wx * k;
+  v[1] += wy * k;
+  v[2] += wz * k;
 }
 
 /**
@@ -95,11 +111,17 @@ export function applyFriction(
 
 /**
  * Clip velocity (docs/03 §4.7): removes the component along the unit normal `n`, scaled by
- * `overclip` (≥ 1) so the result points slightly away from the plane on both signs: a velocity
+ * pm_overclip (≥ 1) so the result points slightly away from the plane on both signs: a velocity
  * into the plane is pushed out a little more, one already leaving it keeps a little of that.
  * `out` may alias `v`.
  */
-export function clipVelocity(out: Vec3, v: Vec3, n: Vec3, overclip: number): Vec3 {
+export function clipVelocity(
+  out: Vec3,
+  v: Vec3,
+  n: Vec3,
+  p: Readonly<Pick<PmoveParams, "overclip">>,
+): Vec3 {
+  const overclip = p.overclip;
   let backoff = v[0] * n[0] + v[1] * n[1] + v[2] * n[2];
   if (backoff < 0) backoff *= overclip;
   else backoff /= overclip;

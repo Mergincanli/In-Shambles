@@ -16,8 +16,8 @@ export const viewUp: Vec3 = vec3();
 
 /** `cmdScale` output: the cmd's move axes times the docs/03 §4.1 scale. */
 export const moveAxes: Vec3 = vec3();
+/** wishDir · wishSpeed, the form `accelerate` takes. */
 export const wishVel: Vec3 = vec3();
-export const wishDir: Vec3 = vec3();
 
 /** Contact planes the slide move clips against (docs/03 §4.8 tracks up to 5). */
 export const MAX_CLIP_PLANES = 5;

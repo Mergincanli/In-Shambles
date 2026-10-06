@@ -86,6 +86,13 @@ New ESTIMATEs for the base ladder and water moves (M2 plan, "New tunables"; M2 d
 
 Inputs: the previous `PlayerState` and the `UserCmd` for this tick (`docs/05` §3: `forwardmove`/`rightmove` in −127..127, buttons, view angles). Output: the next `PlayerState` plus events.
 
+**Contract** (D-023): `pmove(ps, cmd, world, params, dt, events, debugLog)` updates `ps` in place.
+- `cmd` is already sanitized (`sanitizeUserCmd`, `docs/05` §3.4).
+- `dt` is a parameter: `TICK_DT` in play, other tick lengths only in tests (MV-04 checks 1/120 s).
+- `params` holds the replicated movement cvars as plain fields, refreshed outside the tick when the cvar registry's version changes.
+- `events` (step, jump, land; may be null) and `debugLog` (the traces run; may be null) are output only. They never feed the next tick and are not part of `PlayerState`; remote players get events through the entity state in M3.
+- The hull changes only in the pre-checks, at the tick's start origin.
+
 1. **Copy view angles** from the cmd and compute forward/right/up vectors.
 2. **Pre-checks:**
    - water level (0 = dry, 1 = feet, 2 = waist, 3 = submerged) from content samples at feet, waist and eyes
@@ -104,7 +111,7 @@ Inputs: the previous `PlayerState` and the `UserCmd` for this tick (`docs/05` §
    - reset the wall-jump counter if on walkable ground
    - update stamina (§5.2), timers, breath/drowning
    - emit events: footstep, jump, land, wallkick, grab, slide start/end, fall damage
-6. **Quantize** origin and velocity (§6).
+6. **Snap and quantize** (§6): the origin goes to the nearest clear 1/32 u grid point for the tick's hull (`snapOrigin`, D-017; last tick's origin is the fallback), then the whole state is quantized.
 
 The **order matters**: on a grounded tick the jump check happens **before** friction. A jump pressed on the landing tick therefore skips ground friction entirely. This is what makes chained hops keep their speed.
 
@@ -171,17 +178,20 @@ Up to 4 iterations, tracking up to 5 contact planes (always include the ground p
 
 Each iteration:
 1. Sweep the hull from origin by `v × timeLeft`.
-   - If the sweep starts in solid: zero vertical velocity and stop (stuck).
+   - If the sweep is **allSolid** (the box is inside one brush for the whole move): zero vertical velocity and stop (stuck). The end-of-tick snap keeps every tick's start clear, so this is a bug and asserts in dev builds. A sweep that only *starts* in solid can move out of the brush and is accepted (D-023).
    - Otherwise advance to the hit point.
    - Done if the sweep completed without hitting anything.
 2. Subtract the used fraction from `timeLeft`.
-3. If the new plane is (nearly) the same as a stored one, nudge the velocity by the normal and continue.
+3. If the new plane is (nearly) the same as a stored one (normals' dot > 0.99), nudge the velocity by the normal and continue.
 4. Clip the velocity against the new plane (§4.7). If the result still moves into another stored plane, clip against that too.
    - If moving into **two** planes, slide along their crease (cross product of the normals, keeping the velocity component along it).
    - If moving into **three**, stop.
+   - Here a stored plane counts as cleared only when the velocity leaves it at more than 0.1 u/s; slower is "moving into" it, so it is clipped and the overclip makes the velocity leave it.
 5. If the velocity now opposes the *original* velocity (dot < 0), stop. This prevents jitter in corners.
 
-Return whether any plane was hit (used by step-slide).
+With half-step gravity (§4.6) the end-of-tick velocity is clipped against the same planes as the move velocity, and is what the move leaves behind. Return whether any plane was hit (used by step-slide).
+
+The 0.99 and 0.1 u/s thresholds are design constants (`SLIDE_SAME_PLANE`, `SLIDE_LEAVE_SPEED`), not feel knobs or ESTIMATEs of the original game.
 
 ### 4.9 Step-slide move (auto stairs)
 1. Save the start origin/velocity and run slide move.
@@ -190,19 +200,25 @@ Return whether any plane was hit (used by step-slide).
 4. **Try the stepped path:**
    - Trace the hull up by `stepSize` from the start origin; if blocked at the start, give up.
    - From the raised position, with the start velocity, run slide move.
-   - Trace back down by the amount actually raised.
+   - Trace back down by the amount actually raised plus `groundTraceDist` (D-023). A player rests ε above the floor (D-017), so a trace of exactly the raise ends at the start height without reaching the floor, and a stepped path that has not yet cleared a riser would never count as landed.
    - If that lands on walkable ground, accept the stepped result; otherwise keep the unstepped one.
 5. **Compare** horizontal distance and keep whichever path got farther. Clip the velocity against the final ground plane.
-6. Emit a `step` event with the height delta. The client uses it to smooth the view height (no visual pops).
+   - The stepped path must get at least 1/16 u farther (`STEP_MIN_GAIN`). Along a wall, slope or rotated plane both paths cover the same ground to within the same-plane nudge, and without the margin rounding would pick the stepped path and report spurious steps.
+   - Within 1/16 u either way the paths **tie**: keep the unstepped origin, with the velocity of whichever path kept more horizontal speed (D-023). A plain slide that touches a riser at the end of the tick is clipped to a stop, while the stepped one, still short of the riser, kept its speed; taking the plain velocity there made stairs snag to 0 u/s.
+6. Emit a `step` event with the height delta (at least 1/32 u, one origin grid step). The client uses it to smooth the view height (no visual pops).
 
 ### 4.10 Ground trace and slopes
 - Sweep the hull `groundTraceDist` (0.25 u) straight down. No hit → airborne.
 - If moving upward (vz > 0) and `dot(v, groundNormal) > 10` → treat as airborne. This covers jumping and being launched; without it you would immediately "re-ground".
 - If `normal.z < minWalkNormal` → **steep**: not walkable. Apply air physics and clip against the plane, so you slide down slopes.
-- Otherwise grounded. Record ground entity and surface flags (slick, ladder, nodamage, etc. from content).
+- Otherwise grounded. Record the ground entity and surface flags. The ground is **slick** or **nodamage** when the hit plane has the `SURF_SLICK`/`SURF_NODAMAGE` face flag **or** the hit brush has `CONTENTS_SLICK`/`CONTENTS_NODAMAGE` (D-023). Bevel planes carry no face flags, but the trace keeps the brush's contents whichever plane it hits, so a ramp crest standing on the top bevel is still slick.
+- If the player was airborne and is now grounded, **clip the velocity against the ground plane** (§4.7) and emit a `land` event; its value is the downward speed at the start of the tick (D-023). A fall can end within `groundTraceDist` of the floor without the slide sweep touching it; without the clip the next walk move (§4.4 step 5) would lay the whole fall speed onto the ground as horizontal speed.
+- After the move, a player the ground trace finds grounded is **settled** onto the ground (moved to the trace's end point) before the end-of-tick snap (D-023). A walk along a slope moves by the same step every tick, so the snap rounds it by the same error every tick; without the settle that drift adds up past `groundTraceDist`, and the player would drop into an air tick (and a spurious `land`) every few ticks.
+- Known limit: a crevice between steep (non-walkable) planes, such as two steep slopes or a steep slope against a wall, can hold the player with zero velocity and no walkable ground, so they can neither slide out nor jump. This is accepted base-movement behaviour; maps must not build such crevices where players can reach them (a map-validation check is planned with the map pipeline, `docs/07`).
 
 ### 4.11 Jump rules
 - Requires the jump button **newly pressed** since the last jump (unless `pm_autoHop = 1`), grounded, not crouch-blocked, and not in a climb.
+  - **Crouch-blocked** means crouched with the standing hull blocked at the current origin, i.e. under a ceiling: no jump there. Crouch-jumping in the open is allowed (D-023).
 - Set `vz = jumpVelocity` (set, not add), clear grounded, set the `jumpHeld` flag, charge stamina (§5.2), emit `jump`.
 - `jumpHeld` clears when the button is released.
 

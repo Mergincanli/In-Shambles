@@ -113,3 +113,26 @@ export function sinU16(a: number): number {
 export function cosU16(a: number): number {
   return sinU16(a + 16384);
 }
+
+/**
+ * Writes sinU16(a) to out[offset] and cosU16(a) to out[offset + 1], bit for bit for integer
+ * angles, which is all pmove passes (sanitized u16 cmd angles); a fractional or non-finite `a` may
+ * give a different cosine, since cosU16 adds before it truncates. The lookups are repeated here
+ * rather than called: a call that isn't inlined boxes its double result, and per-tick callers
+ * (the view basis in pmove) can't rely on the JIT inlining it.
+ */
+export function sinCosU16(a: number, out: Float64Array, offset: number): void {
+  const u = a & 0xffff;
+  const i = u & 16383;
+  const quadrant = u >> 14;
+  // cos(a) = sin(a + 16384): the next quadrant, same index.
+  const c = (quadrant + 1) & 3;
+  if (quadrant === 0) out[offset] = QUARTER[i] as number;
+  else if (quadrant === 1) out[offset] = QUARTER[16384 - i] as number;
+  else if (quadrant === 2) out[offset] = 0 - (QUARTER[i] as number);
+  else out[offset] = 0 - (QUARTER[16384 - i] as number);
+  if (c === 0) out[offset + 1] = QUARTER[i] as number;
+  else if (c === 1) out[offset + 1] = QUARTER[16384 - i] as number;
+  else if (c === 2) out[offset + 1] = 0 - (QUARTER[i] as number);
+  else out[offset + 1] = 0 - (QUARTER[16384 - i] as number);
+}
