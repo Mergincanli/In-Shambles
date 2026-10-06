@@ -9,6 +9,8 @@
 | Unit | Vitest | math, quantization, traces, pmove steps, damage rules, codecs | `packages/*/test` |
 | Scenario (sim) | Vitest + greybox courses | movement feel targets (MV-xx), balance rules (BAL-xx) | `packages/shared/test/scenarios` |
 | Parity / determinism | Vitest | client vs. server sim, recorded input streams | `packages/shared/test/parity` |
+| Determinism vectors (D-016, D-017) | Vitest; real browsers from M2 | frozen input → output bits for dtrig (plus a digest of all 65536 `sinU16`/`cosU16` angles), quantizers, PRNG and hash, and for brush traces, `snapOrigin` and `pointContents` on a fixed world | `packages/shared/test/vectors`, JavaScript-only syntax with no imports (regenerate with `pnpm --filter @game/tools vectors`) |
+| Property / fuzz (M1) | Vitest | trace properties P1–P7 against a SAT oracle over the courses and seeded synthetic worlds (no tunneling, startSolid/allSolid, no phantom hits, BVH = brute force, determinism, snap chains); a failure prints a case to paste into `regressions.test.ts`; `FUZZ_SEED` and `FUZZ_CASES` override the default 20k cases for long local runs | `packages/tools/test/fuzz` |
 | Netcode integration | Vitest + in-process server + NetSim | NET-xx under profiles | `packages/server/test/net` |
 | Load / soak | bots CLI | 16–32 bots, minutes to hours, metrics | `packages/tools/bots` |
 | Perf benchmarks | `pnpm bench` | µs per op for hot paths | `packages/*/bench` |
@@ -25,6 +27,7 @@
 | `pnpm test:balance` | BAL-01…BAL-11 (`docs/04` §13): every test whose name starts with `BAL-`, so each BAL test's top-level `describe` starts with its ID (`BAL-07: …`) |
 | `pnpm test:net` | NET-01…NET-12 (`docs/05` §14), with profiles |
 | `pnpm bench` | trace, pmove, snapshot build, codec, render-frame microbenchmarks |
+| `pnpm greybox` | recompiles the greybox courses into `content/maps/`; `courses.test.ts` fails with "run pnpm greybox and commit" while a committed map is stale (`docs/07` §3) |
 | `pnpm bots --count N --profile P --minutes M --map X` | load/soak with a metrics summary (JSON + markdown) |
 | `pnpm feel-report` | table of movement metrics vs. targets (also writes `reports/feel.md`) |
 | `pnpm balance-report` | HTK/TTK/DPS tables (`reports/balance.md`) |
@@ -82,6 +85,13 @@
 | Codec encode/decode of a typical snapshot | ≤ 30 µs |
 
 Budgets are checked by `perf-auditor` before closing a milestone. A regression > 20% needs a decision-log entry.
+
+**How `pnpm bench` measures the trace** (`packages/tools/bench/trace.bench.ts`, since M1):
+- **Workload:** `content/maps/movement_lab.cmap`, decoded and built as the game loads it. A seeded Mulberry32 draws 4096 cases per category before the clock runs, into typed arrays. Every case is built from a clear 1/32 u grid spot (`snapOrigin`) on the ground beside a random brush, for 60% of moves swept against a wall, step or slope first, with the standing or crouched hull. Categories, weighted by our ESTIMATE of one pmove player-tick (`docs/03` §3): hull moves ≤ 12 u (3), 0.25 u ground probes (2), 18 u step-up and step-down traces (2) and snap position tests (1; a position test is the zero-length box trace). Long rays (1024–8192 u) are timed but kept out of the average.
+- **Timing:** 1e5 warm-up calls per category, in 100 short rounds so the loops are optimized as whole functions (a loop only ever optimized on-stack can box its doubles and allocate), then 1e6 timed calls per category with `process.hrtime.bigint()`. Results feed a printed sink. A `PerformanceObserver` counts GC events inside the timed loops: anything above 0 means a query allocates.
+- **Report:** ns/op, BVH nodes and brushes tested per call, blocked share and GCs per category, then the weighted box-trace average against the 1 µs budget with PASS/FAIL. The exit code is 0 unless `--strict` is given and the budget or the GC count is missed. `--calls` and `--warmup` change the counts.
+- **M1 result** (Node 22.22, Intel Xeon @ 2.10 GHz cloud VM, 3 runs): weighted average 238–338 ns, about a third of the budget (moves 310–359, ground probes 195–369, step traces 211–335, position tests 161–225, rays 507–605 ns; about 20 of 133 BVH nodes and 1.7 brushes tested per move), 0 GCs. Re-run on the reference machines in §5.
+- **Allocation guards** (tests, since M1): the bench's GC count covers the trace categories only. `packages/tools/test/perf/` checks the other per-tick paths: 0 GCs and under 64 KB heap growth over 2e5 calls for the BVH queries, `snapOrigin` (all three outcomes), `quantizePlayerState`, the `PlayerState` ring, copy/equals and `sanitizeUserCmd`, run as native ESM in a child process (`node --import tsx`), since Vitest's module runner hides double boxing.
 
 ## 5. Reference machines (fill in)
 

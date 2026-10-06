@@ -14,7 +14,7 @@
 ## 2. Space, units, hull, constants
 
 - **Units:** 1 u = 1 inch. **Z-up.** Yaw = rotation around +Z (0 = +X), pitch positive = looking down (Quake convention); clamp pitch to ±89°.
-- **Player hull (AABB, relative to origin):**
+- **Player hull (AABB, relative to origin; FACT for Q3, UrT may differ):**
 
 | State | mins | maxs | Height | Eye height above origin |
 |---|---|---|---|---|
@@ -97,6 +97,8 @@ Inputs: the previous `PlayerState` and the `UserCmd` for this tick (`docs/05` §
 The **order matters**: on a grounded tick the jump check happens **before** friction. A jump pressed on the landing tick therefore skips ground friction entirely. This is what makes chained hops keep their speed.
 
 ## 4. Base algorithms (Q3-style, our wording)
+
+**Trace contract** (D-017, `packages/shared/src/world/trace.ts`). Every hull trace below sweeps the box against brushes and stops ε = 1/32 u short of the surface it hits, so on a flat floor the player rests at floor + 1/32 u, which the step, crouch and gap metrics in `docs/07` §6 account for. A box that exactly touches a brush is outside it. A move that does not approach a plane never collides with it, so sliding along a face, or inside the 1/32 u skin, is free; a move that approaches a plane from inside the skin stops at once without `startSolid`. On slopes and angled walls a move meant to run exactly along the plane can round to approaching it by a few ulps and stop that way, so the slide move gets off a plane through the overclip (§4.7) and the same-plane nudge (§4.8), never through exact tangency.
 
 ### 4.1 Command scale (no faster diagonals)
 Let `f`, `r`, `u` = forwardmove, rightmove, upmove (−127..127).
@@ -375,11 +377,19 @@ Return whether any plane was hit (used by step-slide).
 | `movementEvents` | small ring | footstep, jump, land(impact), wallkick, grab, slideStart/End, fallDamage, goomba |
 
 **Quantize at the end of every tick:**
-- origin to the nearest 1/32 u
+- origin to the nearest clear 1/32 u grid point (D-017): the rounded point if the hull fits there, else the nearest clear corner of the grid cell, else last tick's origin
 - velocity to the nearest 1/16 u/s
 - stamina to 0.01
 
 This makes the client's predicted state **bit-identical** to the server's state for the same inputs (`docs/05` §4).
+
+**Pinned down in M1** (D-018, `packages/shared/src/sim/playerState.ts`):
+- M1 implements `origin` through `waterLevel`, plus `stamina`. `wallJumps` and the fields below `stamina` are added by the milestone that first simulates them.
+- `stamina` is stored as an integer count of hundredths (0–65535), so 100 is one stamina point.
+- `flags` bits 0–9 are the ten flags above, in the order listed; new flags take the next bit.
+- Every scalar field holds an integer. Quantize clamps `origin` to ±16384 u and `velocity` to ±(2^19 − 1)/16 u/s (the i20 range) per axis, wraps the view angles to u16, clamps `groundEntity` to −1…32767 (32767 is the world) and `waterLevel` to 0–3, truncating toward zero.
+- A non-finite value is a bug (a dev assert). With asserts off it falls back to 0, except `groundEntity`, which falls back to −1 (none) because 0 is a real entity.
+- Rounding biases: stamina rounds to 0.01 every tick, so a per-second rate moves in steps of 0.6/s at 60 Hz (an 11/s drain runs at 10.8/s, 5/s regen at 4.8/s); M2 tunes the `st_*` cvars with this in mind. Origin rounding to 1/32 u each tick can add about 0.2% distance at 320 u/s, so feel tests measure velocity, not distance travelled.
 
 ## 7. Measurements log (fill from reference captures, `docs/02` §13)
 

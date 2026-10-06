@@ -142,13 +142,18 @@ function filteredRuns(command: string) {
 }
 
 describe("root scripts", () => {
-  it("include every command in the CLAUDE.md commands table", () => {
+  it("match the CLAUDE.md commands table, row for script", () => {
     const table = claudeMd.split("## Commands")[1]?.split("\n## ")[0] ?? "";
     const commands = [...table.matchAll(/^\| `pnpm ([a-z:-]+)/gm)].map((m) => m[1] ?? "");
     expect(commands.length).toBeGreaterThan(10);
-    for (const name of commands.filter((c) => c !== "install")) {
-      expect(Object.keys(rootScripts), `pnpm ${name}`).toContain(name);
-    }
+    // `install` is the pnpm built-in. Scripts left out of the table on purpose go here.
+    const tableOnly = ["install"];
+    const undocumented: string[] = [];
+    expect(commands.filter((c) => !tableOnly.includes(c)).sort()).toEqual(
+      Object.keys(rootScripts)
+        .filter((s) => !undocumented.includes(s))
+        .sort(),
+    );
   });
 
   it("never use a pnpm built-in command name (D-015)", () => {
@@ -242,7 +247,8 @@ describe("test:balance", () => {
 });
 
 describe("stub scripts", () => {
-  // CLAUDE.md: "Until their milestone, these are stubs that print "added in M#": `bench` (M1); ..."
+  // CLAUDE.md: "Until their milestone, these are stubs that print "added in M#": `test:movement`,
+  // `test:net`, `feel-report` (M2); ..."
   const sentence = /Until their milestone, these are stubs[^\n]*/.exec(claudeMd)?.[0] ?? "";
   const documented = new Map(
     sentence.split(";").flatMap((part) => {
@@ -257,6 +263,13 @@ describe("stub scripts", () => {
     expect(
       Object.fromEntries(stubs.map(([name, command]) => [name, command.split(" ").at(-1)])),
     ).toEqual(Object.fromEntries(documented));
+  });
+
+  it("match the later-milestone list in README.md", () => {
+    const readme = readFileSync(fromRoot("README.md"), "utf8");
+    const line = /Commands for later milestones \(([^)]*)\)/.exec(readme)?.[1] ?? "";
+    const listed = [...line.matchAll(/`([a-z:-]+)`/g)].map((m) => m[1]);
+    expect(listed.sort()).toEqual(stubs.map(([name]) => name).sort());
   });
 
   it.each(stubs)("%s prints the milestone that adds it and exits 0", (name, command) => {

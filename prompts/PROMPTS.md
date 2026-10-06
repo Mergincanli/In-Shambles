@@ -127,9 +127,9 @@ docs/10 (§4.4), docs/09 (M1).
 Goal: the deterministic foundation, with no rendering and no movement rules yet.
 
 Build in packages/shared:
-1. time.ts (TICK_RATE=60, TICK_DT), math (pooled vec3 with out-params, plane, aabb, angles),
-   quant.ts (origin 1/32 u, velocity 1/16 u/s, angle u16, stamina 0.01), rng (mulberry32 +
-   hash32 seeding).
+1. time.ts (TICK_RATE=60, TICK_DT), math (Float64Array vec3 with out-params and per-module
+   scratch vectors, D-016; plane, aabb, angles), quant.ts (origin 1/32 u, velocity 1/16 u/s,
+   angle u16, stamina 0.01), rng (mulberry32 + hash32 seeding).
 2. world/: cmap types; convex brush (planes + bounds + contents flags); static BVH over brush
    bounds; traceBox(start, end, mins, maxs, mask) and traceRay(...). Brush traces use the
    classic approach: expand each brush plane by the box extents along the plane normal, compute

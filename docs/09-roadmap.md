@@ -8,7 +8,7 @@
 | ID | Milestone | Status | Last handoff |
 |---|---|---|---|
 | M0 | Bootstrap & guardrails | ☑ done | [2026-10-05](handoffs/2026-10-05-M0-bootstrap.md) |
-| M1 | Simulation core: tick, math, brush collision, greybox builder | ☐ | |
+| M1 | Simulation core: tick, math, brush collision, greybox builder | ☑ done | [2026-10-06](handoffs/2026-10-06-M1-simulation-core.md) |
 | M2 | Base Q3 movement + client shell + Worker server + prediction | ☐ | |
 | — | *Optional:* Style spike: toon material, hull outline, crease lines on greybox (`docs/08` §18) | ☐ | |
 | M3 | Real networking: dedicated server, protocol, snapshots, interpolation, bots | ☐ | |
@@ -49,6 +49,8 @@
 
 **Out of scope:** rendering, networking, movement rules.
 
+**Records:** the approved plan and the design it builds on are `docs/design/M1-plan.md` and `docs/design/M1-design.md`.
+
 **Acceptance**
 - Trace unit tests: start-solid, all-solid, grazing edges, corners, epsilon behavior.
 - Fuzz test: random box sweeps never tunnel through brushes.
@@ -79,6 +81,7 @@
 - NET-03 (prediction parity: 0 corrections on lossless loopback) passes.
 - With `net_profile wan-150-loss2`, movement stays smooth (no visible rubber-banding; corrections rare and small, logged).
 - `pnpm feel-report` prints base metrics.
+- The determinism vectors (`packages/shared/test/vectors`) replay bit for bit in Chrome, Firefox and Safari (D-016).
 
 ## Style spike (optional, after M2)
 

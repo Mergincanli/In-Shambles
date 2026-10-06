@@ -99,6 +99,12 @@ Each UserCmd (~12 bytes):
 - `fireSubtick` (u8, optional)
 - `viewInterpTick` (u32 + u8 fraction), only when attack is held; used by lag compensation (§7)
 
+**Pinned down in M1** (D-018, `packages/shared/src/sim/usercmd.ts`; `sanitizeUserCmd` forces every received cmd into these ranges):
+- `buttons` bits 0–11 are attack … drop in the order listed above; bits 12–15 are spare. "kick-eligible" is not a button for now: it reads as state derived from the player and weapon, and is decided with the kick in M4.
+- `forward`, `right` and `up` are clamped to ±127 (never −128); `pitch` to ±89° (±16201 units).
+- `weaponSlot` is 0–7: the knife plus the seven loadout slots of `docs/04` §9. Which index is which is decided with weapon switching.
+- `tick` stays within 0…2^30 − 1.
+
 The `INPUT` packet carries:
 - `packetSeq` (u16)
 - `lastSnapshotTick` (u32): **ack** for delta baselines
@@ -114,13 +120,15 @@ The `INPUT` packet carries:
 ### 4.1 End-of-tick quantization (both sides, every tick)
 | Quantity | Quantum | Storage |
 |---|---|---|
-| Origin | 1/32 u | i32 per axis |
-| Velocity | 1/16 u/s | i32 (or i20 packed) |
+| Origin | 1/32 u (nearest clear grid point, D-017) | i32 per axis; clamped to ±16384 u |
+| Velocity | 1/16 u/s | i20 per axis; clamped to ±(2^19 − 1)/16 = ±32767.9375 u/s |
 | Angles | 360/65536° | u16 |
 | Stamina | 0.01 | u16 |
 | Timers | 1 ms or ticks | u16 |
 
 Because both client and server quantize identically, a correctly predicted state equals the authoritative one **bit for bit**. Mismatch detection is exact.
+
+The origin is not simply rounded: pmove snaps it to the nearest clear 1/32 u grid point (`snapOrigin`, D-017), because plain rounding drifts a player sliding along a slope or angled wall into solid. The snap is deterministic and tests world brushes only, so it predicts like everything else. The codec still sends the plain 1/32 u value.
 
 ### 4.2 Snapshot layout
 - **Header:**
@@ -143,7 +151,7 @@ Because both client and server quantize identically, a correctly predicted state
 ## 5. Client prediction and reconciliation
 
 1. **Each client tick:**
-   - sample input → UserCmd
+   - sample input → UserCmd → `sanitizeUserCmd` (§3.4)
    - store `cmds[tick]`
    - run shared `pmove` + `weaponPredict` from the current predicted state
    - store `predicted[tick]`
@@ -162,6 +170,8 @@ Because both client and server quantize identically, a correctly predicted state
    - Apply a decaying **render offset** (old render pos − new render pos), decaying to 0 over ~100 ms.
    - Teleports (> 64 u) snap instantly.
 5. **Target:** zero corrections during steady play on a lossless link (`docs/03` MV-20). Corrections on lossy links must be rare and small.
+
+The client predicts with, stores and sends the sanitized cmd. The server sanitizes every cmd it receives anyway, and sanitizing is idempotent, so both sides simulate the same cmd even when the sampler produces an out-of-range value (a −128 axis, pitch past ±89°, a spare button bit). M2's parity tests include such input.
 
 ## 6. Remote entity interpolation
 

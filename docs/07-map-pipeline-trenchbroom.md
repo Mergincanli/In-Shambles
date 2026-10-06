@@ -14,46 +14,107 @@ Both A and B produce the **same compiled format**, so the engine never cares whe
 
 ## 2. Compiled map format (`cmap`, version 1)
 
-- **Container:** one binary file + JSON header (or a `.cmap.json` + `.cmap.bin` pair in dev).
-- **Header:** `version`, `name`, `contentHash`, `bounds`, `units: "inch"`, `up: "z"`.
+- **Container:** one little-endian binary file, `<name>.cmap` (layout below).
+- **Header:** a 32-byte binary preamble (`formatVersion`, `contentHash`, lengths) plus canonical ASCII JSON metadata: `bounds`, `compiler: {name, version}`, `entities`, `materials`, `name`, `units: "inch"`, `up: "z"`. All geometry is in binary sections.
 - **Brushes:** for each brush:
   - planes (normal xyz f32 + dist f32), bounds
   - `contents` bitflags: SOLID, PLAYERCLIP, WATER, LADDER, SLICK, NODAMAGE, TRIGGER, NODRAW
   - optional `surfaceFlags` per side (ladder face, footstep material)
-- **BVH:** prebuilt node array over brush bounds (or built at load time, deterministically).
+- **BVH:** built at load time over the brush bounds, deterministically (not stored in v1).
 - **Render surfaces:**
-  - per material: vertex buffer (position, normal, uv0, optional uv1 for lightmaps), index buffer
+  - per material: vertex buffer (position, normal, uv0; a later uv1 for lightmaps comes as a new section or format version), index buffer
   - static, merged
-- **Entities:** `{ classname, origin?, angles?, props: Record<string,string>, brushes?: number[] }` (spawns, flags, triggers, items, lights, timers).
+- **Entities:** `{ classname, origin?, angles?, props: Record<string,string>, brushes?: number[] }` (spawns, flags, triggers, items, lights, timers). `angles` is [pitch, yaw, roll] in degrees; yaw 0 faces +x and 90 faces +y (D-021).
 - **Optional (later):** cluster visibility (PVS-like) for relevance (`docs/05` §9.1); lightmap atlas.
 - **Determinism:** compiling the same source twice produces byte-identical output (tested).
 
+**Pinned down in M1** (D-019, `packages/shared/src/world/`):
+- `contents` bits 0–7 are SOLID, PLAYERCLIP, WATER, LADDER, SLICK, NODAMAGE, TRIGGER, NODRAW in that order; loaders reject other bits and brushes with no contents.
+- `surfaceFlags` (u32 per side): bit 0 ladder face, bit 1 slick, bit 2 nodamage, bits 8–11 the footstep material (0 default, then concrete, metal, wood, grass, water; §6). Bevel sides carry 0.
+- Brush build: round the planes to f32 first and derive everything from the rounded planes; polygonize (§4.3 step 3) and drop redundant planes; then add the axial bevels (the bounding-box planes not already a face), their distances rounded outward to f32. Planes are stored faces first, then bevels; the bevel extents are the bounds.
+- Loaders reject a brush whose bounds are not exactly the distances of six axial planes among its faces and bevels: the BVH culls by the bounds, so a brush reaching past them would hide hits from `traceBox` that `traceBoxBrute` reports.
+- `buildBrush` adds only axial bevels, which make boxes, boxes rotated about Z and axis-aligned wedges exact; the greybox builder rejects shapes that would need edge bevels until `mapc` adds them in M5.
+- A brush is rejected (compile error naming the brush) unless it has ≥ 4 faces, is closed (every edge on exactly 2 faces, V − E + F = 2), every vertex lies on ≥ 3 faces and inside all planes within 1e-4 u, every edge is ≥ 1/8 u (8× the weld distance, so welding never joins the two ends of an edge), no two vertices of a face are within the 1/64 u weld distance, its volume is > 1 u³ and it stays within ±16384 u.
+
+**cmap v1 layout** (M1, D-020; decoder `packages/shared/src/world/cmap.ts`, encoder `packages/tools/src/greybox/cmapEncode.ts`, canonical JSON `packages/shared/src/world/canonicalJson.ts`). Integers are u32 unless marked i32, floats are f32, all little-endian:
+
+| Offset | Field |
+|---|---|
+| 0 | magic `"CMAP"` (4 ASCII bytes) |
+| 4 | `formatVersion` = 1 |
+| 8 | `jsonByteLength`: the JSON's length, padded with spaces to a multiple of 8 |
+| 12 | `sectionCount` |
+| 16, 20 | `hashLo`, `hashHi`: the `contentHash` |
+| 24 | `totalByteLength`: the file length |
+| 28 | reserved, 0 |
+| 32 | section table: `sectionCount` × {fourcc `tag`, `offset`, `byteLength`, `count`} (16 B each) |
+| … | the JSON (no leading or trailing whitespace, then fewer than 8 padding spaces), then the sections in table order, each at the first 8-aligned offset after the previous one and zero-padded to 8 bytes; the last one's padding ends the file |
+
+| Tag | Record | Contents |
+|---|---|---|
+| `PLNS` | 16 B | plane nx, ny, nz, d (n·x ≤ d is inside); each brush's faces, then its bevels, brush by brush |
+| `PLSF` | 8 B | per plane: `surfaceFlags`, i32 material index (−1 exactly for bevels) |
+| `BRSH` | 40 B | `firstPlane`, `planeCount`, `faceCount`, `contents`, f32 bounds min xyz, max xyz |
+| `SURF` | 24 B | render surface: material, `firstVertex`, `vertexCount`, `firstIndex`, `indexCount`, reserved 0 |
+| `VTXS` | 32 B | vertex: position xyz, normal xyz, uv0 |
+| `IDXS` | 4 B | triangle index, relative to its surface's `firstVertex` |
+
+- **JSON** is canonical so compiles are byte-identical: keys sorted by UTF-16 code unit, numbers written with `String(n)` (finite only, −0 as 0), every character above 0x7E escaped as `\uXXXX`, no whitespace. Entities are `{classname, origin?, angles?, props, brushes?}` with `brushes` indexing `BRSH`; `materials` is the list `PLSF` and `SURF` index. Nothing in a file depends on time, paths or the machine.
+- **contentHash:** 64 bits, two Murmur3 x86_32 lanes (seeds `0x636d6170` low, `0x9e3779b9` high) over the whole file with the 8 hash bytes read as zero, so it covers every other byte, the preamble included, and never itself. It is written as 16 lowercase hex digits, high lane first. It is for identity and caching (did client and server load the same map?), not security.
+- **Versions:** `formatVersion` changes only when the layout breaks; `compiler.version` changes whenever compiler output changes on purpose, which explains a changed committed `.cmap`. Readers skip section tags they don't know, so new sections can be added without a new format version; the JSON keys are fixed for a format version (entities extend through `props`).
+- **Validation:** the decoder checks everything before returning (magic, version, lengths, alignment, the exact layout above with no gaps, overlaps, trailing bytes or non-zero padding, record sizes, ASCII JSON and its structure, JSON that is exactly the canonical text for its value (so spacing, key order, duplicate keys, escapes or number spellings can't give one map two hashes), index ranges, finite floats, entity origins within ±16384 u, header `bounds` exactly the union of the brush bounds (all 0 with no brushes), known contents and surface bits, each brush's bounds against its axial planes, brushes covering the plane list in order, materials per plane, render surfaces tiling `VTXS` and `IDXS` in order with one non-empty surface per material in increasing material order, so the index check stays linear in the file size, the hash) and throws `CmapError`; it never returns partial data. `*.cmap` files are `binary` in `.gitattributes`.
+
 ## 3. Phase A: greybox builder and test courses
 
-`packages/tools/src/greybox/` exposes a tiny API:
+`packages/tools/src/greybox/` exposes a tiny API (`MapBuilder.ts`; the brush compiler is `brushCompiler.ts`):
 
 ```ts
-const m = new MapBuilder("movement_lab");
-m.box({ min: [-1024,-1024,-16], max: [1024,1024,0] });                        // floor
-m.stairs({ origin: [256,0,0], steps: 6, stepHeight: 16, stepDepth: 24, width: 128 });
-m.ramp({ from: [512,-128,0], to: [768,-128,96], width: 128 });                // slope tests
-m.wall({ min: [0,300,0], max: [512,316,256] });                               // wall-jump wall
-m.volume("WATER", { min: [-600,-600,-128], max: [-300,-300,0] });
-m.volume("LADDER", { min: [900,0,0], max: [916,64,256] });
-m.spawn("info_player_start", [0,0,24], 0);
-m.timer("start", {...}); m.timer("stop", {...});
-export default m.compile();
+export function movementLab(): Cmap {                                        // a course is a function returning its Cmap
+  const m = new MapBuilder("movement_lab");
+  m.box({ min: [-1024,-1024,-16], max: [1024,1024,0] });                        // floor
+  m.stairs({ origin: [256,0,0], steps: 6, stepHeight: 16, stepDepth: 24, width: 128 }); // → top z
+  m.ramp({ from: [512,-128,0], to: [768,-128,96], width: 128 });                // axis-aligned only
+  const top = m.slope({ from: [0,-512,0], run: 256, normalZ: 0.71, width: 128 }); // → crest z
+  m.box({ min: [256,-576,0], max: [512,-448,top] });                            // platform at the crest
+  m.wall({ min: [0,300,0], max: [512,316,256] });                               // wall-jump wall
+  m.rotatedBox({ center: [0,600,112], halfExtents: [256,8,128], cos: Math.sqrt(3)/2, sin: 0.5 }); // 30° kick lane
+  m.volume("WATER", { min: [-600,-600,-128], max: [-300,-300,0] });
+  m.ladder({ wallMin: [916,0,0], wallMax: [932,64,256], face: "-x" });         // wall + LADDER volume
+  m.spawn("info_player_start", [0,0,24], 0);                                    // yaw in degrees
+  m.timer("start", {...}); m.timer("stop", {...});
+  m.anchor("gap_96_takeoff", [128,0,24]);                                       // named place for tests: ground + 24
+  return m.compile();
+}
 ```
 
-**Required courses** (each doubles as an automated test fixture, `docs/03` §8):
+- **Primitives:**
+  - `box({min, max, material?, contents?, surfaceFlags?})`, `wall({min, max})` (wall grey).
+  - `stairs({origin, steps, stepHeight, stepDepth, width, direction?})`: one solid column per step from the origin (the bottom of the first riser, centred across the width), climbing `direction` (`"+x"` default, or `"-x"`, `"+y"`, `"-y"`). Returns the top step's z.
+  - `ramp({from, to, width})`: a solid wedge whose floor is the lower end's z. `from` and `to` may differ along x or y, not both: **ramps must be axis-aligned until edge bevels arrive in M5** (D-019), and the builder throws on any other ramp.
+  - `slope({from, run, normalZ, width, direction?})`: a wedge with rise = run·√(1 − nz²)/nz (computed with `Math.sqrt`, D-016), so the stored normal z is exactly `Math.fround(normalZ)`. Returns the compiled wedge's top (its +z bound, the f32 crest rounded up, not the f64 `from.z + rise`, which can sit several f32 steps lower far from the origin): a platform whose top is that value shares the plane distance with the crest, so the crest has no lip.
+  - `rotatedBox({center, halfExtents, cos, sin, contents?})`: a box rotated about +Z, for kick lanes. Callers pass closed forms (sin 15° = (√6 − √2)/4) or dtrig values, never `Math.cos`.
+  - `volume(kind, {min, max, material?})`: a non-solid box; `kind` is `WATER`, `LADDER`, `PLAYERCLIP`, `TRIGGER` or `NODRAW`.
+  - `ladder({wallMin, wallMax, face, material?})`: the solid wall with the ladder surface flag on the `face` side and a 16 u LADDER volume in front of that whole face. M2 decides which of the two the movement code reads (`docs/03` §4.14).
+  - Every other solid primitive also takes `material?` and `surfaceFlags?`, applied to all of its faces (`ladder` takes `material?` only: its flags are fixed). `box`, `wall`, `rotatedBox` and `volume` return the brush index (for entity `brushes` lists); directions and faces are checked at run time too.
+- **Entities** (§4.2 classnames), in call order: `spawn(classname, origin, yaw, props?)` for `info_player_start`, `info_spawn_red`, `info_spawn_blue`; `timer("start" | "stop", {min, max})` makes an invisible TRIGGER brush and an `info_timer_start` / `info_timer_stop` entity whose `brushes` lists it; `anchor(name, origin, yaw?)` makes an `info_target` with `targetname` = name (snake_case, unique per map), so tests name places instead of hard-coding coordinates. Yaw goes in the entity's `angles` as [0, yaw, 0] degrees (§2); yaw 0 faces +x. Origins stay within ±16384 u like brushes, and prop keys are snake_case starting with a letter.
+- **Checks:** each call builds and checks its brushes at once, so a bad shape throws at that call, naming the map and brush (`movement_lab brush 12 (ramp): …`), and a call that throws adds none of its brushes. Besides the brush rules of §2, a brush is refused when it would need edge bevels: for every edge e (between faces with normals n1, n2) and axis k, take u = e × axis_k with the sign that makes u·(n1 + n2) ≥ 0, the side the expanded brush's face would face; u must be parallel (within 1e-6) to an axis or point the same way as one of the brush's face normals. Boxes, boxes rotated about Z and axis-aligned wedges pass.
+- **Materials** default from the contents: `grey/floor` (box, stairs, ramp, slope), `grey/wall` (wall, rotated box, ladder wall), `grey/water`, `tool/clip`, `tool/trigger`, `tool/nodraw`, `tool/ladder`. The cmap `materials` table lists them in order of first use, brush by brush and face by face.
+- **Render surfaces:** one merged surface per material, in material order. Solid brushes and water volumes render; PLAYERCLIP, TRIGGER and NODRAW brushes and other non-solid volumes (LADDER) don't. Each face polygon is a triangle fan from its canonical start vertex (the lexicographically smallest (x, y, z)), counter-clockwise seen from outside, with f32 positions and the face normal as every vertex's normal.
+- **uv0 convention** (M2's grid texture relies on it): a planar projection in world space on the face normal's dominant axis, **1 uv per 64 u**: z-dominant faces get (u, v) = (x, y)/64, x-dominant (y, z)/64, y-dominant (x, z)/64; ties go to z, then x, so a 45° ramp maps like the floor. A 64 u grid tile therefore lines up across brushes.
+- **Determinism:** `compile()` returns the map as a loader reads it (it goes through `encodeCmap` and `decodeCmap`, so it is validated and carries its `contentHash`), and the same calls always give byte-identical files. `compiler` is `{name: "greybox", version}`; the version starts at 1 and is bumped whenever the output changes on purpose. The greybox modules are under the D-016 math ban and read no clock, randomness, locale or environment (guard: `packages/tools/test/guards/greybox-determinism.test.ts`).
+
+**Required courses** (each doubles as an automated test fixture, `docs/03` §8). Sizes not set by `docs/03` or §6 are our design values, not ESTIMATEs of the original game:
 
 | Course | Contents |
 |---|---|
-| `movement_lab` | flat runway (1024 u+), step ladder (16/18/19 u), slope set (normal.z 0.69/0.71/0.8), stairs, ladder, water pool (deep + wade), ceiling-height crouch tunnel |
-| `jump_lab` | gap series (64…320 u step 32), ledge heights (24…120 u step 8), wall-jump chimney (walls 64 u apart, 512 u tall), single-wall kick lanes at 15/30/45/60°, curb (24 u) to verify no kick |
-| `slide_lab` | long flat lane with distance markers, door frames (48 u wide), slide-under gaps (40 u high), ramp into slide |
-| `fall_tower` | platforms at 128/256/384/512/640/768/1024 u above a floor, water landing pool, ledge-grab catch rails |
-| `arena_greybox` | small combat map for netcode/combat tests: cover, verticality, 16 spawns |
+| `movement_lab` | open flat area 6144 × 6144 u (room for strafe and circle jumps) of 128 u floor tiles in alternating greys, as strips across x in one half and across y in the other, so coplanar seams run both ways; runway on it, timed by 16 u deep start and stop triggers whose matching faces are 2048 u apart (entering both or leaving both measures 2048 u), with `runway_start`/`runway_end` standing just outside them; single steps of 16/18/19 u; stairs (8 × 16 u); slope set (normal.z 0.69/0.71/0.8, 256 u runs) with a platform at each crest; ladder on a 384 u wall; water pool with wading (12 u), waist-deep (36 u) and deep (128 u) sections, i.e. water levels 1/2/3 standing on the bottom; crouch tunnel with 48 u clearance (crouched passes, standing does not) |
+| `jump_lab` | gap series (64…320 u step 32) from a 64 u take-off deck; ledge heights (24…120 u step 8); wall-jump chimney (walls 64 u apart, 512 u tall); single-wall kick lanes at 15/30/45/60° (512 × 16 × 256 u, sunk 16 u into the floor, standing alone); curb (24 u) to verify no kick |
+| `slide_lab` | 4096 u flat lane with alternating 128 u distance-marker tiles, fed by a 64 u ramp; door frames (48 × 96 u); slide-under gaps 41, 42 and 44 u high, plus a 40 u gap that must block (D-017) |
+| `fall_tower` | platforms at 128/256/384/512/640/768/1024 u above a floor (pillar tops with a ladder up the back); 128 u deep water landing pool beside the 1024 u platform; ledge-grab catch rails at 256/512/768 u on a 1024 u wall, each 32 u deep (a crouched hull fits on top) and 64 u tall (so the once-per-tick chest probe cannot skip the face at the speed of a 768 u fall), in its own column below a drop spot on the wall top, so `rail_256` catches a 768 u fall (MV-13) |
+| `arena_greybox` | small combat map for netcode/combat tests: walled yard with a base room per team (96 × 128 u doors), a 128 u centre platform with ramps (176 u clear between the north ramp's foot and the corridor), a 96 u ledge, a covered 128 u corridor, cover; 16 `info_player_start` in the yard plus 8 `info_spawn_red` and 8 `info_spawn_blue` inside their bases |
+
+- **Anchors:** every feature has named anchors (`step_18_base`, `slope_069_top`, `gap_96_takeoff`, `slide_gap_40_blocked_entry`, …). An anchor, like a spawn, is a standing spot: its origin is the ground + 24 u (feet on the ground, which counts as outside, D-017), and the standing hull fits there. Ground off the 1/32 u grid (a slope crest's f32 top) is rounded up to it.
+- **Where they live:** `packages/tools/src/greybox/courses/` builds them; `pnpm greybox` compiles them into `content/maps/<name>.cmap`, which is committed (binary in `.gitattributes`). `packages/tools/test/greybox/courses.test.ts` compiles each course twice, requires identical bytes equal to the committed file (otherwise it fails with "run pnpm greybox and commit"), and checks the fixtures through `decodeCmap` + `buildCollisionWorld` and traces: valid brushes, bounds, clear spawns and anchors with ground below, spawn spacing, step, slope, water, ladder, tunnel, gap, door, timer, rail and cover metrics. It also requires one module per course and no orphan `.cmap` in `content/maps/`, runs the CLI into a temporary directory (`--out <dir>`) and compares what it writes with the committed files, and pins the `*.cmap binary` line.
 
 ## 4. Phase B: TrenchBroom integration (M5)
 
@@ -140,7 +201,7 @@ Whatever is chosen: static lighting is baked or stylized. **Collision always sta
 | Step height | 18 u (anything taller needs a jump) |
 | Jump apex | ≈ 45 u (plain jump) |
 | Ledge-grab reach | per `pm_ledge*` (ESTIMATE: ledge top up to ~76 u above feet at grab time) |
-| Doors | ≥ 48 u wide × 96 u tall (comfortable); slide gaps 40–44 u high |
+| Doors | ≥ 48 u wide × 96 u tall (comfortable); slide gaps 41–44 u high (a crouched player rests 1/32 u above the floor, so 40 u blocks; D-017) |
 | Corridors | ≥ 64 u wide (two players can't pass in < 64) |
 | Walls meant for wall jumps | ≥ 64 u tall, flat, vertical |
 | Floor textures | footstep material via texture name prefix (`concrete_`, `metal_`, `wood_`, `grass_`, `water_`) |

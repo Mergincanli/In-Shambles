@@ -44,8 +44,9 @@ interface CvarEntry {
 const NAME = /^[a-z][A-Za-z0-9_]*$/;
 const INT_TEXT = /^[+-]?\d+$/;
 const FLOAT_TEXT = /^[+-]?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?$/i;
-const INT_MIN = -(2 ** 31);
-const INT_MAX = 2 ** 31 - 1;
+// i32 range as literals: shared bans `**` (D-016).
+const INT_MIN = -2147483648;
+const INT_MAX = 2147483647;
 
 /**
  * Q3-style cvar registry (docs/06 §6). Names are matched case-insensitively. Registration is

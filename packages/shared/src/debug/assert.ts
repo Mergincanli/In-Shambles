@@ -25,6 +25,8 @@ export function devAssertsEnabled(): boolean {
  * Hot paths run this every tick, so keep the success path allocation-free:
  * - `message` must be a plain string literal: no template, no `+` concatenation at the call site.
  * - Pass a value worth seeing as `detail` (a variable, not a call); it's formatted only on failure.
+ *   A fractional double is boxed whenever the call isn't inlined, so per-tick code passing one
+ *   calls DEV_ASSERT only on the failure path: `if (!ok) DEV_ASSERT(false, "…", x)`.
  * - Put expensive conditions behind `if (devAssertsEnabled())`, because prod still evaluates them.
  */
 export function DEV_ASSERT(

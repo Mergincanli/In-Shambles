@@ -31,19 +31,31 @@
 ```
 packages/shared/src/
   time.ts              TICK_RATE, TICK_DT, tick math
-  math/                vec3 (pooled, out-params), plane, aabb, quant (quantizers), angles
+  math/                vec3 (Float64Array, out-params, per-module scratch), plane, aabb,
+                       quant (quantizers), dtrig (deterministic sin/cos, u16 table), angles (D-016)
   rng/                 mulberry32, hash32 (seeding: match/shooter/tick/shot)
   cvars/               registry, flags, replicated block (hash), defaults from docs
   debug/               DEV_ASSERT / setDevAsserts (dev-only checks behind a runtime flag)
   world/
-    cmap.ts            compiled map format types (docs/07)
-    brush.ts           convex brush = planes + bounds + contents flags
-    bvh.ts             static BVH over brush bounds
-    trace.ts           traceBox(start, end, mins, maxs, mask) → {fraction, endpos, plane, contents, entity, startSolid, allSolid}
-    contents.ts        SOLID, PLAYERCLIP, WATER, LADDER, SLICK, NODAMAGE, TRIGGER…
+    cmap.ts            compiled map format v1 (docs/07 §2): types, validating decodeCmap → CmapError,
+                       buildCollisionWorld (f32 planes widened to f64, BVH built at load)
+    cmapHash.ts        64-bit contentHash (two Murmur3 lanes; identity and caching, not security)
+    canonicalJson.ts   the cmap JSON's canonical form: the encoder writes it, the decoder requires it
+    collisionWorld.ts  typed-array brushes (planes, faces then bevels, contents, bounds)
+    shapes.ts          plane sets: box, box rotated about Z, axis-aligned wedge
+    polygonize.ts      planes → welded, validated face polygons (build time)
+    brushValidate.ts   brush build errors, thresholds and the topology/geometry checks
+    brushBuild.ts      polygonize + axial bevels + bounds (build time)
+    bvh.ts             static BVH over brush bounds: binned SAH, built at load, depth-first typed arrays
+    trace.ts           traceBox / traceRay → TraceResult {fraction, endpos, plane, contents, entity, startSolid, allSolid};
+                       positionTest, pointContents, boxContents, snapOrigin (ε = 1/32, D-017); queries walk the
+                       BVH and match their brute-force references (traceBoxBrute, …) bit for bit
+    contents.ts        SOLID, PLAYERCLIP, WATER, LADDER, SLICK, NODAMAGE, TRIGGER, NODRAW; SURF_* flags
   sim/
-    playerState.ts     PlayerState struct + quantize()
-    usercmd.ts         UserCmd struct
+    entity.ts          ENTITY_NONE (−1), ENTITY_WORLD (32767)
+    hull.ts            player hulls (docs/03 §2)
+    playerState.ts     PlayerState struct + quantize(), PlayerStateRing (128 ticks)
+    usercmd.ts         UserCmd struct + sanitize(), BUTTON_* bits
     pmove/             cmdScale, friction, accelerate, walk, air, water, ladder, slideMove,
                        stepSlideMove, groundTrace, crouch, jump  (docs/03 §4)
     urt/               sprint, stamina, wallJump, powerSlide, ledgeGrab, fall, goomba, kick (docs/03 §5)
@@ -90,13 +102,19 @@ packages/client/src/
 
 packages/tools/src/
   mapc/                TrenchBroom .map → cmap compiler (M5)
-  greybox/             code-built test courses (movement lab etc.)
+  greybox/             MapBuilder, brush compiler and cmap encoder; code-built test courses (movement lab etc.);
+                       cli.ts is pnpm greybox
+  vectors/             determinism test vectors for packages/shared/test/vectors (pnpm --filter @game/tools vectors)
+  code/                source scanner (code vs. strings/comments) and the D-016 banned-math list, for the guards
   bots/                headless clients
   reports/             feel-report, balance-report
   replay/              demo inspection
   docs/                Markdown section/table parsing for doc-golden tests (BAL-01)
   content/             content-vs-docs helpers (weapon IDs, damage table)
+  jsonc.ts             JSON-with-comments parser (tsconfig and config guards)
   paths.ts             repo-root resolution
+
+packages/tools/bench/  pnpm bench: run.ts (entry), trace.bench.ts (traceBox on movement_lab, docs/10 §4.4)
 ```
 
 ## 4. Runtime topology
@@ -120,12 +138,13 @@ DEV / OFFLINE                                  ONLINE
 
 - **Entity store:** id-indexed arrays per component (position, velocity, stance, team, health…), not class hierarchies. Players have a `PlayerState` struct (`docs/03` §6) that is cloned only into preallocated history slots.
 - **Collision:**
-  - World = convex **brushes** (plane sets). Traces are swept AABB vs. brush, plane-by-plane: compute enter/exit fractions with an epsilon, Q3-style "box vs. planes" by expanding planes by the box extents.
+  - World = convex **brushes** (plane sets). Traces are swept AABB vs. brush, plane-by-plane: entering fractions stop ε = 1/32 u short and leaving fractions are exact (D-017), Q3-style "box vs. planes" by expanding planes by the box extents.
   - Broadphase = static BVH over brush bounds. Players are dynamic AABBs (current state only for movement; rewound poses only for hit rays).
   - Never collide movement against triangle soups; render meshes are not collision.
 - **Rays (bullets):** ray vs. brushes (world) → nearest; then ray vs. player zone volumes (lag-compensated) → nearest player hit before the world hit.
 - **Events:** sim steps append to small fixed-size rings; the client (presentation) and server (network) consume them.
 - **No hidden time sources:** sim functions receive `tick` and `dt` explicitly.
+- **Deterministic math (D-016):** only operations ECMAScript rounds exactly (`+ − * /`, `sqrt`, `fround`, `round`, `floor`, `abs`, `imul`, bitwise…). Trig comes from `math/dtrig`, never `Math.sin`/`cos`; `pow`, `exp`, `log`, `atan2`, `hypot` and `**` are banned too. Vectors are `Float64Array`s with out-params and named per-module scratch, not a shared pool, and sim values never pass through a `Float32Array`.
 
 ## 6. Cvars and console (Q3-style)
 
@@ -189,5 +208,5 @@ DEV / OFFLINE                                  ONLINE
 
 ## 11. Scripts and CI (created in M0, extended later)
 
-- `pnpm dev`, `pnpm dev:server`, `pnpm build`, `pnpm test`, `pnpm test:movement`, `pnpm test:net`, `pnpm test:balance`, `pnpm typecheck`, `pnpm lint`, `pnpm format`, `pnpm bench`, `pnpm bots`, `pnpm feel-report`, `pnpm balance-report`, `pnpm mapc` (M5).
+- `pnpm dev`, `pnpm dev:server`, `pnpm build`, `pnpm test`, `pnpm test:movement`, `pnpm test:net`, `pnpm test:balance`, `pnpm typecheck`, `pnpm lint`, `pnpm format`, `pnpm greybox` (M1), `pnpm bench`, `pnpm bots`, `pnpm feel-report`, `pnpm balance-report`, `pnpm mapc` (M5).
 - **CI** (GitHub Actions, `.github/workflows/ci.yml`): typecheck, lint, unit tests and build since M0. Added in M9 (bots exist from M3): a short bot soak (2 min, 8 bots, `wan-100-loss1`) and bundle-size/perf budget checks.
