@@ -37,6 +37,7 @@
 - **Prediction tick rate:** the client runs it at nominally 60 Hz, adjusted by time dilation (§8.2).
 - **Rendering** uses an accumulator ("fix your timestep") and draws the local player **interpolated between the last two predicted ticks** (alpha = accumulator / dt). This adds ≤ 1 tick of visual latency but is perfectly smooth at 144/240 Hz.
 - **Mouse look applies every render frame** to the camera immediately, not per tick. Each tick's UserCmd samples the current view angles. Aim never waits for the tick.
+- In M2 the prediction tick is re-anchored in steps instead of dilated (§8.2–§8.3, D-028); the accumulator's fraction is the interpolation weight, held in 0–1 while a hold step runs.
 
 ## 2. Topology and sessions
 
@@ -75,7 +76,7 @@ interface Transport {
 - **`poll()`** delivers at fixed points of the caller's loop (the server's tick, the client's frame), never from inside a send. `d` is valid only during the callback: transports reuse it.
 - **Reliable** messages arrive in order and are never lost. **Unreliable** ones may be lost, duplicated or reordered, so the protocol never relies on their order (§0).
 - **Close:** after `close(reason)` sends are dropped and nothing more is delivered on that side. The other side still receives what was sent before, then its `onClose(reason)` fires from its `poll()`.
-- **No steady-state allocation:** the in-memory transports copy into pooled slots. Only the `postMessage` boundary allocates, one transferred `ArrayBuffer` per packet.
+- **No steady-state allocation:** the in-memory transports copy into pooled slots. Only the `postMessage` boundary allocates: one transferred `ArrayBuffer` per packet, and the receiver's view of it. `PortTransport` queues arrivals in a ring of reused slots, so an empty poll allocates nothing (the native-ESM `transport` workload).
 
 | Implementation | Milestone | Notes |
 |---|---|---|
@@ -143,7 +144,8 @@ The `INPUT` packet carries:
 - **The hash** is `murmur3Bytes` (`shared/src/rng/hash32.ts`) over the block encoded on its own from bit 0 and zero-padded to a whole byte, with seed `0x63766172` (the ASCII bytes "cvar", big-endian). `CVARS` carries all 32 bits and the decoder checks them against the block it read; `SNAPSHOT` carries the low 16 bits of the hash the server simulated that tick with. The hash does not depend on registration order or on any non-replicated cvar.
 - **The registry keeps every block encodable:** a `REPLICATED` cvar's name is at most 63 chars (registration throws otherwise), and a `REPLICATED` string's value is printable 7-bit ASCII of at most 255 chars (registration throws; `set` and `setFromString` refuse it with a `type` error). So a console or admin value can never make WELCOME or CVARS unencodable or turn the snapshot hash into a sentinel.
 - **Applying a block** to the client's mirror registry is all or nothing: it must name exactly the registry's `REPLICATED` cvars, spelled as registered, with their types and with values inside their min/max (a clamped value would mispredict). Unknown names, non-replicated cvars, a missing cvar, wrong kinds and out-of-range values reject the whole block and change nothing. The server already applied its CHEAT and LATCH rules to what it sends, so the mirror stores CHEAT and LATCH values as sent (`CvarRegistry.setReplicated`), whatever its own cheat setting, and drops any pending latched value. After a successful apply the mirror's hash equals the block's.
-- **`CVARS`** carries `effectiveTick`, the first tick simulated with the new values, so the client switches its prediction parameters at that tick (D-027; the client side lands with the predictor, M2 increment 10).
+- **`CVARS`** carries `effectiveTick`, the first tick simulated with the new values, so the client switches its prediction parameters at that tick (D-027).
+- **On the client** (`client/src/net/predictor.ts`, D-027): WELCOME's block goes into the mirror registry and becomes the parameters in force. A `CVARS` block is applied to the mirror (all or nothing, as above) and loaded as *pending* parameters for ticks from `effectiveTick` on; the prediction is re-simulated at once from the newest snapshot with each tick's parameters, and the pending set is promoted when a snapshot reaches `effectiveTick` with its hash. A snapshot whose cvar hash differs from the one the client expects for its tick (the block is still on its way) is adopted and re-simulated, counted as a parameter resync rather than a correction; when that lasts 1 s, the client sends `CMD cvars`. A lossless link therefore sees 0 corrections from a live change (NET-03).
 - **On the server** the match checks the registry's `version` at the start of every tick, after polling. When it moved, the pmove parameters are refreshed; when the replicated block's hash also changed, every client past WELCOME gets `CVARS` with `effectiveTick` = that tick, whose snapshot already carries the new hash. A change to a non-replicated cvar, or a set to the current value, sends nothing.
 - **Changing a replicated cvar from a client:** a console `set`, `reset` or `toggle` on a `REPLICATED` cvar is not applied locally; the client sends it as `CMD`, the server applies it to its own registry (with its CHEAT and LATCH rules) and replies with `PRINT`, and the `CVARS` broadcast updates every mirror. Changing cvars needs the session's admin flag: the Worker's one client has it; who may on the Node server is decided in M3. A non-admin gets a `PRINT` error and nothing changes. `CMD cvars` is open to everyone and resends the current block with the tick it took effect (the client's recovery when its snapshot hash stays different).
 
@@ -240,6 +242,14 @@ The origin is not simply rounded: pmove snaps it to the nearest clear 1/32 u gri
 
 The client predicts with, stores and sends the sanitized cmd. The server sanitizes every cmd it receives anyway, and sanitizing is idempotent, so both sides simulate the same cmd even when the sampler produces an out-of-range value (a −128 axis, pitch past ±89°, a spare button bit). M2's parity tests include such input.
 
+**M2 implementation** (`packages/client/src/net/`, DOM-free and type-checked alone by `tsconfig.net.json`; D-027, D-028):
+- **Rings:** the last 128 cmds and 128 predicted states (about 2.1 s), each slot remembering its tick. Movement events and the debug trace log are recorded on a tick's first prediction only, never on re-simulation.
+- **Compare** with `playerStateEquals` (exact, on quantized states). A snapshot older than the newest one held is stale and ignored.
+- **Correction:** adopt `S_A`, re-simulate `A+1 … latest` from the stored cmds with the parameters in force at each tick, count it, add the distance the newest predicted origin moved, and keep the predicted and server states in a log ring of 32 (the field diff is built only when the log is read, so a correction allocates nothing).
+- **Hard resync:** when `A` is no longer in the rings (more than 127 ticks behind the newest prediction) or is ahead of it, the state is adopted as the newest tick and the clock re-anchors (§8.3), filling the gap with the last cmd, attack cleared. A backlog after a stall is one event: the client re-anchors once per poll, after it, from the newest snapshot, and a clock step asked for earlier in that poll is dropped.
+- **Render offset:** around each poll the drawn position (§1.3) is taken before and after; any change of the predicted path (a correction, a parameter resync, a re-anchor, a clock step) adds old − new to the offset, which decays linearly to 0 over `cl_correctionSmoothMs` (100); a new offset adds to what remains and restarts the decay. A teleport flag on the snapshot, or a jump longer than `cl_teleportDist` (64 u), drops the offset instead. The client cvars are listed in `docs/06` §7.
+- **Starvation without dilation:** each INPUT carries the last 4 cmds; the server's repeat of a missing cmd keeps jump as it was, so a lost cmd costs at most a small correction. NET-04 (M2 basic) measures it on every profile.
+
 ## 6. Remote entity interpolation
 
 - **Render time:** `renderTick = estimatedServerTick − interpDelay`.
@@ -294,10 +304,15 @@ The loop is driven by a monotonic clock with an accumulator. **Never `setInterva
 - The server reports `inputBufferHealth` = (newest cmd tick received − tick being simulated) to each client. Target: 1–2 ticks, adaptive to jitter.
   - "Received" includes cmds dropped as late, and a tick past the input queue's horizon counts as the horizon (next tick + 64). Before the client's first cmd after a spawn, the spawn tick stands in for it: the spawn snapshot reports 0, then −1, −2 … until a cmd arrives (D-027).
 - The client gently speeds up or slows down its prediction tick (±3% max) to converge on the target. This avoids both starvation (lost inputs) and excess latency.
+- **M2 steps instead** (D-028): an EWMA of the health over about 30 snapshots. Below target − 1.5 for 0.5 s, the client fast-forwards k = round(target − EWMA) ticks (at most 5), predicting and sending them in that frame; above target + 3 for 1 s, it holds k tick periods (at most 30). Snapshots simulated before a step can take effect are then ignored, and the EWMA moves by k at once. The render offset hides a fast-forward's skip; a hold shows as a short slowdown of the drawn player (prediction pauses for up to k ticks). The target is `cl_inputBuffer` (2 ticks). Smooth dilation (±3%) is NET-07 in M3.
 
 ### 8.3 Clock sync
 - Initial: 5 ping samples during the handshake, median RTT → estimate the server tick.
 - Ongoing: an EWMA of RTT from `PING`/`PONG` every second. Snapshot `serverTick` re-anchors the estimate.
+- **M2 implementation** (`client/src/net/clock.ts`, D-028): the client predicts in **server-tick space**: its tick T is the server's tick T, run early enough that the cmd for T arrives just before the server simulates T.
+  - After WELCOME the client pings every 50 ms until 5 pongs are back (a lost ping is simply replaced), takes their median as the RTT and only then sends `READY`.
+  - At the first snapshot A (the spawn, adopted whole) it jumps to tick A + ceil(RTT / tick) + `cl_inputBuffer`, at most 64 ticks ahead. The ticks between are filled with neutral cmds (no move, the spawn's angles), predicted and sent at once: the server repeats that same neutral cmd until the client's arrive (§2), so the start costs no correction.
+  - From then on the client's own accumulator advances its tick, at most 5 ticks per frame. What a longer frame owes is carried into the next frames, not dropped: the client's tick follows the server's clock, so dropped time would be lead lost until a clock step. Only a debt past 64 ticks is dropped (the snapshots then hard-resync), and the prediction stops 64 ticks past the newest snapshot (the server's input horizon) while snapshots are missing. A ping a second feeds EWMAs of the RTT and its jitter for the netgraph, and the input buffer health re-anchors the tick in steps (§8.2).
 
 ## 9. Relevance, visibility culling and bandwidth
 

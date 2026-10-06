@@ -29,6 +29,9 @@ importers:
 
   packages/client:
     dependencies:
+      '@game/server':
+        specifier: workspace:*
+        version: link:../server
       '@game/shared':
         specifier: workspace:*
         version: link:../shared
@@ -54,6 +57,9 @@ importers:
 
   packages/tools:
     dependencies:
+      '@game/client':
+        specifier: workspace:*
+        version: link:../client
       '@game/server':
         specifier: workspace:*
         version: link:../server

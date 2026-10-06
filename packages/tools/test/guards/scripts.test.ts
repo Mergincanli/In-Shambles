@@ -232,13 +232,13 @@ const testFiles = readdirSync(fromRoot("packages"), { recursive: true, encoding:
   .map((file) => join(fromRoot("packages"), file));
 
 /**
- * prefix, root script, IDs that must have a file. NET has none yet: its files land with NET-03
- * (M2 increment 10). acceptance-ids.test.ts checks the full docs/09 lists.
+ * prefix, root script, IDs that must have a file (NET-01 is a shared unit test, D-026, so it has no
+ * net-01 file). acceptance-ids.test.ts checks the full docs/09 lists.
  */
 const ID_SUITES = [
   ["BAL", "test:balance", ["01"]],
   ["MV", "test:movement", ["01", "03", "04", "05", "06", "07", "08", "17", "18", "19"]],
-  ["NET", "test:net", []],
+  ["NET", "test:net", ["03", "04"]],
 ] as const;
 
 describe.each(ID_SUITES)("naming of the %s-NN test files", (prefix, script, required) => {

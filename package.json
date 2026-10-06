@@ -13,7 +13,7 @@
     "build": "pnpm -r build",
     "test": "vitest run",
     "test:movement": "vitest run -t \"^MV-\" --silent=false",
-    "test:net": "node scripts/not-yet.mjs test:net M2",
+    "test:net": "vitest run -t \"^NET-\" --silent=false",
     "test:balance": "vitest run -t \"^BAL-\"",
     "test:browser": "vitest run --config vitest.browser.config.ts",
     "typecheck": "pnpm -r typecheck && tsc --noEmit -p tsconfig.json",

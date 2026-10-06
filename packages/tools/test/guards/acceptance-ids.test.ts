@@ -32,7 +32,7 @@ const MILESTONES: Readonly<Record<string, Milestone>> = {
       "MV-19",
       "NET-03",
     ],
-    pending: { "NET-03": "M2 increment 10" },
+    pending: {},
   },
 };
 

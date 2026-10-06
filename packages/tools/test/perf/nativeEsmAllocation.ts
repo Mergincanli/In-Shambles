@@ -1,4 +1,13 @@
 import { PerformanceObserver } from "node:perf_hooks";
+import {
+  ClientSim,
+  type PortLike,
+  PortTransport,
+  STAT_CLOCK_ADJUSTMENTS,
+  STAT_CORRECTIONS,
+  STAT_HARD_RESYNCS,
+  StrafeCircuit,
+} from "@game/client/net";
 import { Match } from "@game/server";
 import {
   ACCEL_AIR,
@@ -14,6 +23,7 @@ import {
   boxContents,
   boxPlanes,
   buildBrush,
+  type CloseHandler,
   CONTENTS_SOLID,
   CONTENTS_WATER,
   type CollisionBrushSource,
@@ -43,6 +53,7 @@ import {
   MASK_PLAYERSOLID,
   MAX_RELIABLE_BYTES,
   MAX_UNRELIABLE_BYTES,
+  type MessageHandler,
   MSG_INPUT,
   MSG_PING,
   MSG_PONG,
@@ -81,6 +92,8 @@ import {
   snapOrigin,
   TICK_DT,
   TraceResult,
+  type Transport,
+  type TransportStats,
   traceBox,
   traceRay,
   UserCmd,
@@ -605,10 +618,10 @@ function runCodec(n: number): void {
   }
 }
 
-// Transports (D-026, D-028): a raw loopback pair, and one whose client end is wrapped by NetSim on
-// the worst profile, on a fractional fake clock (a 144 Hz frame per call), so loss, duplication,
-// reordering, jitter and reliable ordering all run, with a wake callback and a host that pumps
-// between polls. The callbacks are made once, here.
+// Transports (D-026, D-028): an idle PortTransport, a raw loopback pair, and one whose client end
+// is wrapped by NetSim on the worst profile, on a fractional fake clock (a 144 Hz frame per call),
+// so loss, duplication, reordering, jitter and reliable ordering all run, with a wake callback and
+// a host that pumps between polls. The callbacks are made once, here.
 const [rawClient, rawServer] = createLoopbackPair();
 const [simInner, simServer] = createLoopbackPair();
 const fakeNow = new Float64Array(1);
@@ -641,8 +654,14 @@ sim.onMessage((_d, _len, reliable) => {
   else outcomes[1] = (outcomes[1] as number) + 1;
 });
 
+// The Worker's PortTransport polls once per frame and per tick whether or not anything arrived;
+// a packet allocates by design (the transferred buffer and its view), an empty poll must not.
+const idlePort: PortLike = { postMessage: () => {}, onmessage: null };
+const portTransport = new PortTransport(idlePort, { postMessage: () => {}, onmessage: null });
+
 function runTransport(n: number): void {
   for (let i = 0; i < n; i++) {
+    portTransport.poll();
     fakeNow[0] = (fakeNow[0] as number) + 1000 / 144;
     rawClient.sendUnreliable(upPacket, 55);
     rawServer.sendUnreliable(downPacket, 41 + (i & 1));
@@ -756,12 +775,158 @@ function runMatch(n: number): void {
   }
 }
 
+// Prediction and reconciliation (M2 design §5, D-027/D-028): the real ClientSim on a fractional
+// fake clock, 144 Hz frames, against a real Match over a loopback pair, with the strafe-jump
+// circuit bot. The link is impaired so every client path runs:
+// - every 256 server ticks the client's next six INPUT packets are dropped, so the server starves
+//   past the 4× redundancy and the client corrects (snapshots compared, states adopted, ticks
+//   re-simulated, corrections logged and moved into the render offset);
+// - every 1200 ticks the INPUTs' delay switches between 0 and 10 ticks (a pooled ring), so the
+//   buffer health leaves its band and the clock fast-forwards and holds;
+// - every 2048 ticks the client skips its frames for 8 ticks, a hitch longer than the lead, so a
+//   backlog of snapshots overtakes the prediction and it hard-resyncs and re-anchors.
+// A run is n / 10 server ticks (and 2.4 frames per tick), after a warm-up 12 times as long: V8
+// keeps optimizing this path for some 250000 ticks before its heap use settles to 0.
+
+const DELAY_SLOTS = 64;
+
+/** The client's end: drops `dropLeft` INPUTs when told to, and delays INPUTs by `delay` ticks. */
+class ImpairedTransport implements Transport {
+  dropLeft = 0;
+  /** INPUT delay in server ticks, and the server's newest tick (set by the rig). */
+  delay = 0;
+  tick = 0;
+  private readonly slots: Uint8Array[] = [];
+  private readonly lens = new Int32Array(DELAY_SLOTS);
+  private readonly due = new Int32Array(DELAY_SLOTS);
+  private head = 0;
+  private count = 0;
+  constructor(private readonly inner: LoopbackEndpoint) {
+    for (let i = 0; i < DELAY_SLOTS; i++) this.slots.push(new Uint8Array(MAX_UNRELIABLE_BYTES));
+  }
+  sendUnreliable(d: Uint8Array, len: number): void {
+    if (d[0] !== MSG_INPUT) {
+      this.inner.sendUnreliable(d, len);
+    } else if (this.dropLeft > 0) {
+      this.dropLeft--;
+    } else if ((this.delay === 0 && this.count === 0) || this.count === DELAY_SLOTS) {
+      this.inner.sendUnreliable(d, len);
+    } else {
+      const i = (this.head + this.count) & (DELAY_SLOTS - 1);
+      const slot = this.slots[i] as Uint8Array;
+      for (let b = 0; b < len; b++) slot[b] = d[b] as number;
+      this.lens[i] = len;
+      this.due[i] = this.tick + this.delay;
+      this.count++;
+    }
+  }
+  /** Sends the delayed INPUTs due by the server's tick `tick`. */
+  release(tick: number): void {
+    while (this.count > 0 && (this.due[this.head] as number) <= tick) {
+      this.inner.sendUnreliable(
+        this.slots[this.head] as Uint8Array,
+        this.lens[this.head] as number,
+      );
+      this.head = (this.head + 1) & (DELAY_SLOTS - 1);
+      this.count--;
+    }
+  }
+  sendReliable(d: Uint8Array, len: number): void {
+    this.inner.sendReliable(d, len);
+  }
+  onMessage(cb: MessageHandler): void {
+    this.inner.onMessage(cb);
+  }
+  onClose(cb: CloseHandler): void {
+    this.inner.onClose(cb);
+  }
+  poll(): void {
+    this.inner.poll();
+  }
+  close(reason?: string): void {
+    this.inner.close(reason);
+  }
+  isOpen(): boolean {
+    return this.inner.isOpen();
+  }
+  stats(): TransportStats {
+    return this.inner.stats();
+  }
+}
+
+class PredictRig {
+  readonly match: Match;
+  readonly client: ClientSim;
+  readonly transport: ImpairedTransport;
+  /** [0] fake now (ms), [1] server tick accumulator (ms). */
+  readonly time = new Float64Array(2);
+  readonly out = vec3();
+  warmup = 1;
+  /** Client frames are skipped until this server tick (a hitch). */
+  pausedUntil = 0;
+
+  constructor() {
+    const course = loadCourse("movement_lab");
+    this.match = new Match({ cmap: course.cmap, world: course.world, buildHash: "alloc" });
+    const [clientEnd, serverEnd] = createLoopbackPair();
+    this.match.connect(serverEnd, true);
+    this.transport = new ImpairedTransport(clientEnd);
+    const time = this.time;
+    this.client = new ClientSim({
+      transport: this.transport,
+      cmap: course.cmap,
+      world: course.world,
+      buildHash: "alloc",
+      clock: () => time[0] as number,
+      input: new StrafeCircuit(),
+    });
+    this.client.connect();
+  }
+}
+
+let predictRig: PredictRig | null = null;
+const FRAME_MS = 1000 / 144;
+const SERVER_TICK_MS = 1000 / 60;
+
+function runPredict(n: number): void {
+  if (predictRig === null) predictRig = new PredictRig();
+  const rig = predictRig;
+  const time = rig.time;
+  const client = rig.client;
+  const match = rig.match;
+  const link = rig.transport;
+  const totals = client.stats.totals;
+  const ticks = rig.warmup-- > 0 ? (n / 10) * 12 : n / 10;
+  const end = match.serverTick + ticks;
+  while (match.serverTick < end) {
+    time[0] = (time[0] as number) + FRAME_MS;
+    time[1] = (time[1] as number) + FRAME_MS;
+    while ((time[1] as number) >= SERVER_TICK_MS) {
+      time[1] = (time[1] as number) - SERVER_TICK_MS;
+      link.release(match.serverTick + 1);
+      match.tick();
+      const t = match.serverTick;
+      link.tick = t;
+      if ((t & 255) === 0) link.dropLeft = 6;
+      if (t % 1200 === 0) link.delay = link.delay === 0 ? 10 : 0;
+      if ((t & 2047) === 1024) rig.pausedUntil = t + 8;
+    }
+    if (match.serverTick < rig.pausedUntil) continue;
+    client.frame();
+    client.renderOrigin(rig.out);
+  }
+  outcomes[0] = totals[STAT_CORRECTIONS] as number;
+  outcomes[1] = totals[STAT_CLOCK_ADJUSTMENTS] as number;
+  outcomes[2] = totals[STAT_HARD_RESYNCS] as number;
+}
+
 const WORKLOADS: Record<string, (n: number) => void> = {
   codec: runCodec,
   match: runMatch,
   pmove: runPmove,
   pmoveModes: runPmoveModes,
   pmoveBasics: runPmoveBasics,
+  predict: runPredict,
   quantize: runQuantize,
   scenario: runScenario,
   snap: runSnap,

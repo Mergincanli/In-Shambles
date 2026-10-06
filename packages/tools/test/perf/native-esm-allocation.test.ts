@@ -5,7 +5,7 @@ import { fromRoot } from "../../src/paths";
 // The per-tick paths (quantizePlayerState, snapOrigin, the state ring, copy/equals,
 // sanitizeUserCmd, the pmove params refresh and basics, whole pmove ticks in every M2 move mode,
 // the scenario runner and bots, the per-tick message codecs, the transports, the server's match
-// tick and the BVH queries)
+// tick, the client's prediction and reconciliation, and the BVH queries)
 // must not allocate under native ES modules either, where V8 boxes a double returned by a call it
 // doesn't inline or joined with a module constant in a ternary. Vitest's module runner hides
 // that, so this runs a child process.
@@ -98,6 +98,13 @@ describe("per-tick paths under native ES modules", () => {
   it("a match tick allocates nothing in steady state: inputs, starved repeats, pmove, snapshots, pongs (D-027)", () => {
     const r = runChild("match");
     // Snapshots decoded, starved snapshots among them, pongs.
+    for (const n of r.outcomes) expect(n).toBeGreaterThan(0);
+    expect(r.clean, r.attempts.join("; ")).toBe(true);
+  }, 30_000);
+
+  it("client prediction allocates nothing: frames, predict, reconcile with re-simulation, clock steps, hard resyncs, render offset (D-027, D-028)", () => {
+    const r = runChild("predict");
+    // Corrections (dropped inputs), clock steps (input delay steps), hard resyncs (frame hitches).
     for (const n of r.outcomes) expect(n).toBeGreaterThan(0);
     expect(r.clean, r.attempts.join("; ")).toBe(true);
   }, 30_000);

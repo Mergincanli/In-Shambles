@@ -100,7 +100,21 @@ packages/server/src/
 
 packages/client/src/
   app/                 boot, routing (menu ↔ match), settings persistence
-  net/                 connection, prediction, reconciliation, interpolation, clock/time dilation, netgraph data
+  net/                 DOM-free (tsconfig.net.json), exported as @game/client/net for tests and bots:
+    clientSim.ts       ClientSim: one frame = poll (reconcile) → clock step → tick accumulator
+                       (sample, predict, INPUT) → pings; renderOrigin; the CmdSampler interface
+    connection.ts      handshake state machine (HELLO → WELCOME → pings → READY → spawn), decoding,
+                       channel checks and strikes, INPUT/CMD encoding
+    predictor.ts       cmd and state rings (128), exact compare, re-simulation with params by tick,
+                       pending CVARS params, correction log (32), hard resync (docs/05 §5)
+    clock.ts           handshake median RTT, lead, RTT/jitter EWMAs, buffer-health step re-anchoring
+                       (docs/05 §8.2–§8.3; smooth dilation is NET-07, M3)
+    smoothing.ts       RenderOffset (linear decay over cl_correctionSmoothMs)
+    stats.ts           totals and rolling 1 s windows for the netgraph
+    cvars.ts           the client's net settings (cl_inputBuffer, cl_correctionSmoothMs, cl_teleportDist)
+    portTransport.ts   PortTransport over two MessagePort-like ports (the Worker link)
+    scriptedInput.ts   StrafeCircuit, MixedInput (?bot= input, NET tests, M3 bots)
+                       (later: remote interpolation)
   input/               pointer lock, raw mouse, keybinds (KeyboardEvent.code), UserCmd sampling
   render/
     space.ts           Z-up inches → Y-up meters (ONLY place for conversion)
@@ -174,6 +188,20 @@ DEV / OFFLINE                                  ONLINE
 - Default binds mirror UrT-style defaults where sensible; all are rebindable.
 
 ## 7. Client specifics
+
+**Client cvars** (M2 design §4): `ARCHIVE` settings, saved per player and never replicated, so they never reach the simulation (prediction uses the replicated `pm_*` values only, §6). `cl_inputBuffer`, `cl_correctionSmoothMs` and `cl_teleportDist` are registered by the net code (`client/src/net/cvars.ts`); the rest arrive with the console, camera and HUD (M2 increments 11–12).
+
+| Cvar | Default | Label / note |
+|---|---|---|
+| `sensitivity` | 5 | Q3 default |
+| `m_yaw`, `m_pitch` | 0.022 | Q3 convention: degrees per mouse count |
+| `cl_fov` | 90 | ESTIMATE (horizontal, Hor+) |
+| `cl_inputBuffer` | 2 ticks | ESTIMATE (`docs/05` §8.2: target 1–2 ticks); the clock's buffer-health target |
+| `cl_correctionSmoothMs` | 100 | ESTIMATE (`docs/05` §5: "~100 ms"); render-offset decay |
+| `cl_teleportDist` | 64 u | design value (`docs/05` §5); a longer correction snaps |
+| `cl_stepSmoothMs` | 150 | ESTIMATE; step-up view smoothing |
+| `cl_viewHeightSmoothMs` | 100 | ESTIMATE; crouch view-height smoothing |
+| `cl_netgraph`, `cl_speedometer`, `cl_thirdPerson`, `r_debug*` | off | toggles |
 
 - **Input:**
   - Pointer Lock. Request unadjusted (raw) movement where supported, with fallback.

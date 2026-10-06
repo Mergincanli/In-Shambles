@@ -28,6 +28,7 @@ pnpm typecheck && pnpm lint && pnpm test
 | `pnpm build` | Production client build and server bundle (`packages/server/dist/main.js`) |
 | `pnpm test` | All tests |
 | `pnpm test:movement` | Movement tests (MV-xx) on the greybox courses, each printing measured vs. target |
+| `pnpm test:net` | Netcode tests (NET-xx): codec checks, and the real match and client net code under the network profiles; NET-04 prints a summary line per profile |
 | `pnpm test:balance` | Balance tests (BAL-xx) |
 | `pnpm test:browser` | Determinism, trace and pmove vectors in headless browsers (`BROWSERS=chromium,firefox,webkit`, default `chromium`) |
 | `pnpm typecheck` | Type-check all packages |
@@ -41,7 +42,7 @@ pnpm typecheck && pnpm lint && pnpm test
 
 `pnpm test:browser` uses the Playwright browsers already on the machine. `pnpm exec playwright install chromium firefox webkit` downloads them (CI does this), and `CHROMIUM_PATH` points the Chromium run at another build.
 
-Commands for later milestones (`test:net`, `bots`, `balance-report`, `mapc`) already exist and print the milestone that adds them. `CLAUDE.md` has the full list.
+Commands for later milestones (`bots`, `balance-report`, `mapc`) already exist and print the milestone that adds them. `CLAUDE.md` has the full list.
 
 ## Layout
 

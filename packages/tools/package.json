@@ -14,6 +14,7 @@
     "feel-report": "node --import tsx src/reports/cli.ts"
   },
   "dependencies": {
+    "@game/client": "workspace:*",
     "@game/server": "workspace:*",
     "@game/shared": "workspace:*"
   },
