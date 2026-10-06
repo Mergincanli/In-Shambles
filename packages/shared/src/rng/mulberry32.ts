@@ -35,6 +35,21 @@ export class Mulberry32 {
   }
 
   /**
+   * Writes the next `n` values of `nextFloat()` to `out[at]…out[at + n − 1]`. Per-packet code draws
+   * through this: a fractional double returned from a call V8 doesn't inline is boxed under native
+   * ES modules, a typed-array store is not.
+   */
+  fillFloats(out: Float64Array, at: number, n: number): void {
+    for (let i = 0; i < n; i++) {
+      const state = ((this.s[0] as number) + 0x6d2b79f5) >>> 0;
+      this.s[0] = state;
+      let z = Math.imul(state ^ (state >>> 15), state | 1);
+      z ^= z + Math.imul(z ^ (z >>> 7), z | 61);
+      out[at + i] = ((z ^ (z >>> 14)) >>> 0) / 4294967296;
+    }
+  }
+
+  /**
    * Uniform integer in [0, n) for an integer n in 1..2^21. Within that range u32 · n fits in 53
    * bits, so the product is exact and the result can never reach n.
    */

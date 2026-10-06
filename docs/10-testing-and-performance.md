@@ -43,6 +43,8 @@
 | `wan-150-loss2` | 75 ms | ±15 | 2% | 0 | 0.5% |
 | `bad-250-loss5` | 125 ms | ±40 | 5% | 1% | 1% |
 
+This is the canonical table (D-028): `NET_PROFILES` (`packages/shared/src/net/profiles.ts`) implements it and `docs/05` §13 repeats it with the simulator's rules; a doc-golden test (`packages/tools/test/docs/net-profiles-docs.test.ts`) keeps the three equal. Delay applies in each direction, jitter is uniform within ±, and Loss, Dup and Reorder are per unreliable packet.
+
 **Gameplay changes must pass their tests under `wan-100-loss1`.** Netcode changes must pass under all profiles.
 
 ## 4. Performance budgets (requirements)

@@ -41,7 +41,7 @@
 ## 2. Topology and sessions
 
 - **Dedicated server:** Node process (`packages/server`) running 1..N matches; one match = one tick loop.
-- **Local/offline:** the *same* server code runs in a **Web Worker** in the browser. The transport is `LoopbackTransport` (postMessage with transferable ArrayBuffers), and the net simulator can inject latency and loss even locally.
+- **Local/offline:** the *same* server code runs in a **Web Worker** in the browser. The transport is `PortTransport` (postMessage with transferable ArrayBuffers, §3.1), and the net simulator can inject latency and loss even locally.
 - **Connection lifecycle:**
   1. `HELLO`: protocol version, build hash, client nonce.
   2. `WELCOME`: client id, tick rate, current server tick, map id + content hash, replicated cvar block, match rules (match rules join WELCOME in a later protocol version; v1 has none, §3.6).
@@ -55,21 +55,30 @@
 ### 3.1 Transport abstraction (`shared/src/net/transport.ts`)
 ```ts
 interface Transport {
-  sendUnreliable(buf: ArrayBuffer): void;   // inputs, snapshots
-  sendReliable(buf: ArrayBuffer): void;     // events, chat, loadout, cvars
-  onMessage(cb: (buf: ArrayBuffer, reliable: boolean) => void): void;
+  sendUnreliable(d: Uint8Array, len: number): void; // inputs, snapshots, pings (≤ 1200 B)
+  sendReliable(d: Uint8Array, len: number): void;   // handshake, cvars, console text (≤ 16384 B)
+  onMessage(cb: (d: Uint8Array, len: number, reliable: boolean) => void): void;
+  onClose(cb: (reason: string) => void): void;      // the other side closed
+  poll(): void;                                     // delivers queued messages to the callbacks
   close(reason?: string): void;
-  stats(): TransportStats;                  // bytes, packets, rtt if known
+  isOpen(): boolean;
+  stats(): TransportStats;                          // packets and bytes sent and delivered
 }
 ```
+- **Bytes plus a length** (D-026): senders encode into one reused buffer and pass its used length; the transport copies what it keeps, so the buffer is free again when the send returns.
+- **`poll()`** delivers at fixed points of the caller's loop (the server's tick, the client's frame), never from inside a send. `d` is valid only during the callback: transports reuse it.
+- **Reliable** messages arrive in order and are never lost. **Unreliable** ones may be lost, duplicated or reordered, so the protocol never relies on their order (§0).
+- **Close:** after `close(reason)` sends are dropped and nothing more is delivered on that side. The other side still receives what was sent before, then its `onClose(reason)` fires from its `poll()`.
+- **No steady-state allocation:** the in-memory transports copy into pooled slots. Only the `postMessage` boundary allocates, one transferred `ArrayBuffer` per packet.
 
 | Implementation | Milestone | Notes |
 |---|---|---|
-| `LoopbackTransport` | M2 | |
+| `createLoopbackPair()` | M2 | In-memory, both channels interleaved in send order. In-process tests, NET-03/04 and bots. |
+| `PortTransport` (`client/src/net/portTransport.ts`) | M2 | The Worker server: one `MessageChannel` per channel, a transferred copy per packet. |
 | `WebSocketTransport` | M3 | Both channels over one socket. Still uses acks/baselines as if unreliable. |
 | `WebTransportTransport` | M9 | Datagrams for unreliable traffic, one reliable stream. WebTransport is supported in all major browsers since Safari 26.4 (March 2026); server-side HTTP/3 tooling is less mature. |
 
-Every transport can be wrapped by `NetSimTransport` (latency, jitter, loss, duplication, reorder, bandwidth cap).
+Every transport can be wrapped by `NetSimTransport` (`shared/src/net/netsim.ts`: latency, jitter, loss, duplication, reorder; §13, D-028). A bandwidth cap is not simulated yet.
 
 ### 3.2 Framing and versioning
 - **Binary only** (`ArrayBuffer`/`DataView`), no JSON in hot paths.
@@ -332,15 +341,23 @@ The loop is driven by a monotonic clock (`process.hrtime.bigint()`) with an accu
 
 ## 13. Tooling (build early, use daily)
 
-**Network simulator profiles** (`net_profile`, both client and server side):
+**Network simulator profiles** (`net_profile`; one simulator on the client's end impairs both directions):
 
-| Profile | Delay (one-way) | Jitter | Loss | Other |
-|---|---|---|---|---|
-| `lan` | 0 ms | 0 | 0 | |
-| `wan-50` | 25 ms | ±3 ms | 0 | |
-| `wan-100-loss1` | 50 ms | ±8 ms | 1% | |
-| `wan-150-loss2` | 75 ms | ±15 ms | 2% | |
-| `bad-250-loss5` | 125 ms | ±40 ms | 5% | 1% duplication, 1% reorder |
+| Profile | Delay (one-way) | Jitter | Loss | Dup | Reorder |
+|---|---|---|---|---|---|
+| `lan` | 0 ms | 0 | 0 | 0 | 0 |
+| `wan-50` | 25 ms | ±3 ms | 0 | 0 | 0 |
+| `wan-100-loss1` | 50 ms | ±8 ms | 1% | 0 | 0 |
+| `wan-150-loss2` | 75 ms | ±15 ms | 2% | 0 | 0.5% |
+| `bad-250-loss5` | 125 ms | ±40 ms | 5% | 1% | 1% |
+
+`docs/10` §3 is the canonical copy of this table and `shared/src/net/profiles.ts` (`NET_PROFILES`) implements it; a doc-golden test keeps all three equal (D-028). `NetSimTransport` (`shared/src/net/netsim.ts`) wraps the client's end and applies the delay in each direction, so the round trip is twice it:
+- **Jitter** is uniform within ±jitter per packet. Unreliable packets stay in order through it: a packet is due at max(previous due, now + delay ± jitter).
+- **Loss, Dup and Reorder** are independent per-unreliable-packet draws. A duplicate follows its original through the same FIFO rule. A reordered packet is held a further 2 × jitter + one tick and does not hold back later packets, which overtake it.
+- **Reliable packets** get the same delay and jitter, in order, and are never lost or duplicated.
+- **Close** travels like a reliable packet, behind everything sent before it (a reordered unreliable packet still held is lost), so the §3.1 close contract holds under every profile, only delayed: after the client's `close()` the simulator still forwards what it holds, through `pump()`, `poll()` or a wake, then closes the inner transport.
+- The draws come from a seeded Mulberry32 and the time from an injected monotonic clock, so a seed and a send/poll schedule give one delivery schedule. `net_profile <name>` calls `setProfile`: packets in flight keep their due times.
+- **`wake(at)`** reports each new earliest outbound due time once; `pump()` is the host's answer and re-reports a front still pending, so a timer that fires early (browsers truncate fractional delays) re-arms instead of stranding the packet.
 
 **Netgraph overlay** (toggle `cl_netgraph 1`): RTT, jitter, loss %, snapshots/s, interp delay, input buffer health, corrections/s and average size, bytes in/out per second, server tick time (from server stats), starved cmds.
 

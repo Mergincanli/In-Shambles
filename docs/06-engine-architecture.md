@@ -79,7 +79,10 @@ packages/shared/src/
     playerStateCodec.ts  the PlayerState bit layout and its decode-time range checks
     cvarBlock.ts       replicated cvar block: canonical encoding, hash, all-or-nothing apply (D-027)
     delta.ts           field masks, baseline diff/apply (M3)
-    transport.ts       Transport interface, LoopbackTransport, NetSimTransport
+    transport.ts       Transport interface, TransportStats, createLoopbackPair (pooled; D-026)
+    packetQueue.ts     pooled packet copies ordered by due time (loopback and NetSim)
+    netsim.ts          NetSimTransport: delay, jitter, loss, duplication, reorder (D-028)
+    profiles.ts        NET_PROFILES, the docs/10 §3 table
 
 packages/server/src/
   main.ts              process entry, config, match manager
@@ -129,7 +132,7 @@ DEV / OFFLINE                                  ONLINE
 │ main thread: client            │   │ client          │  WS /  │ dedicated     │
 │  ├ predict (shared sim)        │   │  ├ predict      │◄──────►│ server        │
 │  ├ render/audio/HUD            │   │  └ render…      │   WT   │ (shared sim)  │
-│  └ LoopbackTransport ◄─┐       │   └─────────────────┘        └───────────────┘
+│  └ PortTransport ◄─────┐       │   └─────────────────┘        └───────────────┘
 │ Web Worker: server ────┘       │
 │  (same match code as Node)     │
 └────────────────────────────────┘

@@ -20,6 +20,7 @@ import {
   cmdScale,
   copyPlayerState,
   createCollisionWorld,
+  createLoopbackPair,
   decodeInput,
   decodePing,
   decodePong,
@@ -28,6 +29,7 @@ import {
   encodePing,
   encodePong,
   encodeSnapshot,
+  findNetProfile,
   HULL_CROUCHED_MAXS,
   HULL_MINS,
   HULL_STANDING_MAXS,
@@ -39,6 +41,8 @@ import {
   MSG_PONG,
   MSG_SNAPSHOT,
   Mulberry32,
+  type NetProfile,
+  NetSimTransport,
   PingMsg,
   PlayerState,
   PlayerStateRing,
@@ -593,6 +597,62 @@ function runCodec(n: number): void {
   }
 }
 
+// Transports (D-026, D-028): a raw loopback pair, and one whose client end is wrapped by NetSim on
+// the worst profile, on a fractional fake clock (a 144 Hz frame per call), so loss, duplication,
+// reordering, jitter and reliable ordering all run, with a wake callback and a host that pumps
+// between polls. The callbacks are made once, here.
+const [rawClient, rawServer] = createLoopbackPair();
+const [simInner, simServer] = createLoopbackPair();
+const fakeNow = new Float64Array(1);
+const badProfile = findNetProfile("bad-250-loss5") as NetProfile;
+const wakeAt = new Float64Array(1);
+const sim = new NetSimTransport(
+  simInner,
+  badProfile,
+  () => fakeNow[0] as number,
+  0x5eed,
+  (at) => {
+    wakeAt[0] = at;
+  },
+);
+const upPacket = new Uint8Array(55);
+const downPacket = new Uint8Array(42);
+const reliablePacket = new Uint8Array(300);
+rawServer.onMessage((_d, len) => {
+  outcomes[0] = (outcomes[0] as number) + (len & 1);
+});
+rawClient.onMessage((_d, len) => {
+  outcomes[0] = (outcomes[0] as number) + (len & 1);
+});
+simServer.onMessage((_d, _len, reliable) => {
+  if (reliable) outcomes[2] = (outcomes[2] as number) + 1;
+  else outcomes[1] = (outcomes[1] as number) + 1;
+});
+sim.onMessage((_d, _len, reliable) => {
+  if (reliable) outcomes[2] = (outcomes[2] as number) + 1;
+  else outcomes[1] = (outcomes[1] as number) + 1;
+});
+
+function runTransport(n: number): void {
+  for (let i = 0; i < n; i++) {
+    fakeNow[0] = (fakeNow[0] as number) + 1000 / 144;
+    rawClient.sendUnreliable(upPacket, 55);
+    rawServer.sendUnreliable(downPacket, 41 + (i & 1));
+    if ((i & 63) === 0) rawServer.sendReliable(reliablePacket, 300);
+    rawServer.poll();
+    rawClient.poll();
+    if ((i & 1) === 0) sim.sendUnreliable(upPacket, 55);
+    if ((i & 3) === 0) simServer.sendUnreliable(downPacket, 42);
+    if ((i & 63) === 0) {
+      sim.sendReliable(reliablePacket, 300);
+      simServer.sendReliable(reliablePacket, 300);
+    }
+    if ((i & 7) === 3) sim.pump();
+    sim.poll();
+    simServer.poll();
+  }
+}
+
 const WORKLOADS: Record<string, (n: number) => void> = {
   codec: runCodec,
   pmove: runPmove,
@@ -604,6 +664,7 @@ const WORKLOADS: Record<string, (n: number) => void> = {
   strafeBot: runStrafeBot,
   state: runState,
   trace: runTrace,
+  transport: runTransport,
 };
 const workload = process.argv[2];
 const run = workload === undefined ? undefined : WORKLOADS[workload];

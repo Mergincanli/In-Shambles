@@ -71,7 +71,7 @@
   - tick accumulator + render interpolation
   - console (`set`, `cvarlist`, `bind`), speedometer HUD, debug draw (hull, traces)
 - **Server in Web Worker** (same match code path that Node will use).
-- `LoopbackTransport` + `NetSimTransport`; minimal binary INPUT/SNAPSHOT for the local player only.
+- `createLoopbackPair` (in-process) and `PortTransport` (Worker) + `NetSimTransport`; minimal binary INPUT/SNAPSHOT for the local player only.
 - Prediction + reconciliation (`docs/05` §5), corrections counter in a mini netgraph.
 
 **Out of scope:** UrT mechanics, combat, remote players, dedicated server.

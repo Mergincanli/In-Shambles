@@ -4,7 +4,7 @@ import { fromRoot } from "../../src/paths";
 
 // The per-tick paths (quantizePlayerState, snapOrigin, the state ring, copy/equals,
 // sanitizeUserCmd, the pmove params refresh and basics, whole pmove ticks in every M2 move mode,
-// the scenario runner and bots, the per-tick message codecs, and the BVH queries)
+// the scenario runner and bots, the per-tick message codecs, the transports, and the BVH queries)
 // must not allocate under native ES modules either, where V8 boxes a double returned by a call it
 // doesn't inline or joined with a module constant in a ternary. Vitest's module runner hides
 // that, so this runs a child process.
@@ -84,6 +84,13 @@ describe("per-tick paths under native ES modules", () => {
     // And every hostile packet, one per message, was refused, in each run of 200000 calls.
     expect(r.rejected).toBeGreaterThan(0);
     expect(r.rejected % 200_000).toBe(0);
+    expect(r.clean, r.attempts.join("; ")).toBe(true);
+  }, 30_000);
+
+  it("the loopback pair and NetSim allocate nothing per packet after warm-up (D-026, D-028)", () => {
+    const r = runChild("transport");
+    // Raw loopback deliveries, NetSim unreliable deliveries, NetSim reliable deliveries.
+    for (const n of r.outcomes) expect(n).toBeGreaterThan(0);
     expect(r.clean, r.attempts.join("; ")).toBe(true);
   }, 30_000);
 
