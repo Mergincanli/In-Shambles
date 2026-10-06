@@ -66,6 +66,7 @@ docs/       specs, roadmap, decisions, handoffs.
 | `pnpm test:movement` | Movement tests |
 | `pnpm test:net` | Netcode tests |
 | `pnpm test:balance` | Balance tests |
+| `pnpm test:browser` | Determinism vectors in real browsers (BROWSERS=chromium,firefox,webkit) |
 | `pnpm typecheck` | Type-check all packages |
 | `pnpm lint` | Biome lint + format check |
 | `pnpm format` | Apply Biome formatting and safe fixes |

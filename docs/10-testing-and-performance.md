@@ -9,7 +9,7 @@
 | Unit | Vitest | math, quantization, traces, pmove steps, damage rules, codecs | `packages/*/test` |
 | Scenario (sim) | Vitest + greybox courses | movement feel targets (MV-xx), balance rules (BAL-xx) | `packages/shared/test/scenarios` |
 | Parity / determinism | Vitest | client vs. server sim, recorded input streams | `packages/shared/test/parity` |
-| Determinism vectors (D-016, D-017) | Vitest; real browsers from M2 | frozen input → output bits for dtrig (plus a digest of all 65536 `sinU16`/`cosU16` angles), quantizers, PRNG and hash, and for brush traces, `snapOrigin` and `pointContents` on a fixed world | `packages/shared/test/vectors`, JavaScript-only syntax with no imports (regenerate with `pnpm --filter @game/tools vectors`) |
+| Determinism vectors (D-016, D-017, D-022) | Vitest in Node; Vitest browser mode via `pnpm test:browser` (Chromium locally; Chromium, Firefox and WebKit in the CI `browsers` job) replays every `packages/shared/test/*-vectors.test.ts` unchanged | frozen input → output bits for dtrig (plus a digest of all 65536 `sinU16`/`cosU16` angles), quantizers, PRNG and hash, and for brush traces, `snapOrigin` and `pointContents` on a fixed world | `packages/shared/test/vectors`, JavaScript-only syntax with no imports (regenerate with `pnpm --filter @game/tools vectors`) |
 | Property / fuzz (M1) | Vitest | trace properties P1–P7 against a SAT oracle over the courses and seeded synthetic worlds (no tunneling, startSolid/allSolid, no phantom hits, BVH = brute force, determinism, snap chains); a failure prints a case to paste into `regressions.test.ts`; `FUZZ_SEED` and `FUZZ_CASES` override the default 20k cases for long local runs | `packages/tools/test/fuzz` |
 | Netcode integration | Vitest + in-process server + NetSim | NET-xx under profiles | `packages/server/test/net` |
 | Load / soak | bots CLI | 16–32 bots, minutes to hours, metrics | `packages/tools/bots` |
@@ -26,6 +26,7 @@
 | `pnpm test:movement` | MV-01…MV-20 (`docs/03` §8) |
 | `pnpm test:balance` | BAL-01…BAL-11 (`docs/04` §13): every test whose name starts with `BAL-`, so each BAL test's top-level `describe` starts with its ID (`BAL-07: …`) |
 | `pnpm test:net` | NET-01…NET-12 (`docs/05` §14), with profiles |
+| `pnpm test:browser` | the determinism and trace vectors in headless browsers (D-022): `BROWSERS` is a comma list of `chromium`, `firefox`, `webkit` (default `chromium`); `CHROMIUM_PATH` overrides the Chromium executable. Not part of `pnpm test` |
 | `pnpm bench` | trace, pmove, snapshot build, codec, render-frame microbenchmarks |
 | `pnpm greybox` | recompiles the greybox courses into `content/maps/`; `courses.test.ts` fails with "run pnpm greybox and commit" while a committed map is stale (`docs/07` §3) |
 | `pnpm bots --count N --profile P --minutes M --map X` | load/soak with a metrics summary (JSON + markdown) |

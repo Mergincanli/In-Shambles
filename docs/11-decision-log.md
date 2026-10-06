@@ -185,6 +185,19 @@
 - Tests: `packages/tools/test/greybox/{brushCompiler,mapBuilder}.test.ts`.
 - Courses (increment 8): each course in `packages/tools/src/greybox/courses/` is a function that builds and returns its Cmap, listed in a fixed order in `courses/index.ts`. `pnpm greybox` writes them to `content/maps/<name>.cmap`, which is committed (M1 plan); a test fails with "run pnpm greybox and commit" when a file is stale. Anchors and spawns are standing spots (origin = ground + 24 u). `docs/07` §3 lists the sizes the courses pin down (lab area, water depths 12/36/128 u, slide gaps 41/42/44 u plus a blocking 40 u gap, 48 u tunnel, runway timers 2048 u apart, catch rails 64 u tall in separate columns so one catches a 768 u fall); they are design values, not ESTIMATEs of the original game.
 
+### D-022 — Browser determinism replay (2026-10-06, accepted)
+**Context:** D-016 and D-017 freeze the bits of the deterministic math and the traces as vectors, and the M1 plan promised a replay in real browsers in M2 (risk 2), because clients predict with the same code in Chrome, Firefox and Safari. M2 plan, increment 1 and risks 4–5.
+**Decision:**
+- Vitest browser mode with `@vitest/browser-playwright` (MIT) replays every `packages/shared/test/*-vectors.test.ts` unchanged, headless, from `vitest.browser.config.ts`; `pnpm test:browser` runs it and `pnpm test` (the Node run) never loads it. The vectors tests stay free of Node APIs and other packages: `packages/shared`'s `types: []` makes a `node:` import fail the type check, and `packages/tools/test/guards/browser-vectors.test.ts` checks that everything they load is a relative module or `vitest`, that the config stays in headless browser mode on that glob, and that the CI job's test step runs all three engines.
+- `BROWSERS` (comma list of `chromium`, `firefox`, `webkit`; default `chromium`) picks the engines; an unknown, repeated or missing name stops the run. The dev container uses its preinstalled Chromium build and never runs `playwright install`; a CI job `browsers` installs all three with `playwright install --with-deps` and runs them, and other machines can run `pnpm exec playwright install` (README).
+- WebKit runs JavaScriptCore, Safari's engine, so it stands in for Safari. It is not Safari itself; a phone test page for real Safari or Chrome on a phone comes in M2 increment 12.
+- `playwright` (Apache-2.0) is pinned to exactly 1.56.1, the release whose Chromium revision (1194) matches the build installed in the dev container, so it finds it through `PLAYWRIGHT_BROWSERS_PATH` without a download. `CHROMIUM_PATH` overrides the Chromium executable if the versions drift.
+
+**Consequences:**
+- `docs/10` §1–2 and `docs/06` §11 list the command and the CI job; the `docs/09` M2 acceptance line cites this entry. The pmove vectors (M2 increment 6) and any later `*-vectors.test.ts` replay in the browsers with no config change.
+- Firefox and WebKit are proven only in CI; the M2 acceptance box for them is ticked once the PR's `browsers` job is green.
+- Upgrading `playwright` means picking a release whose browser builds are available locally, or setting `CHROMIUM_PATH`.
+
 ---
 
 <!-- Template

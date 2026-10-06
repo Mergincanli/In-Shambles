@@ -81,7 +81,7 @@
 - NET-03 (prediction parity: 0 corrections on lossless loopback) passes.
 - With `net_profile wan-150-loss2`, movement stays smooth (no visible rubber-banding; corrections rare and small, logged).
 - `pnpm feel-report` prints base metrics.
-- The determinism vectors (`packages/shared/test/vectors`) replay bit for bit in Chrome, Firefox and Safari (D-016).
+- The determinism vectors (`packages/shared/test/vectors`) replay bit for bit in Chrome, Firefox and Safari (D-016; D-022: Chromium, Firefox and WebKit via `pnpm test:browser` and the CI `browsers` job, real Safari via the phone page).
 
 ## Style spike (optional, after M2)
 
