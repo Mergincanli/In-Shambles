@@ -99,17 +99,24 @@ packages/server/src/
   admin/               rcon commands, logs, metrics endpoint
 
 packages/client/src/
-  app/                 boot, routing (menu ↔ match), settings persistence
+  app/                 boot.ts (fetch the map as a ?url asset, start the server Worker, connect over
+                       PortTransport, build the scene, start the frame loop), game.ts (the frame loop,
+                       the view pose, the autotest status), params.ts (the ?autotest=1, ?bot=, ?cam=
+                       URL hooks); later routing (menu ↔ match), settings persistence
   net/                 DOM-free (tsconfig.net.json), exported as @game/client/net for tests and bots:
     clientSim.ts       ClientSim: one frame = poll (reconcile) → clock step → tick accumulator
-                       (sample, predict, INPUT) → pings; renderOrigin; the CmdSampler interface
+                       (sample, predict, INPUT) → pings; renderOrigin, renderTick, pathShift (the
+                       render-tick jump of a clock step or re-anchor); tick-tagged movement events of
+                       first predictions (TickEvents, flagged when predicted under such a jump); the
+                       CmdSampler interface
     connection.ts      handshake state machine (HELLO → WELCOME → pings → READY → spawn), decoding,
                        channel checks and strikes, INPUT/CMD encoding
     predictor.ts       cmd and state rings (128), exact compare, re-simulation with params by tick,
                        pending CVARS params, correction log (32), hard resync (docs/05 §5)
     clock.ts           handshake median RTT, lead, RTT/jitter EWMAs, buffer-health step re-anchoring
                        (docs/05 §8.2–§8.3; smooth dilation is NET-07, M3)
-    smoothing.ts       RenderOffset (linear decay over cl_correctionSmoothMs)
+    smoothing.ts       RenderOffset (linear decay over cl_correctionSmoothMs), StepSmoother (render-tick
+                       time, cl_stepSmoothMs, capped at 32 u), ViewHeight (cl_viewHeightSmoothMs)
     stats.ts           totals and rolling 1 s windows for the netgraph
     cvars.ts           the client's net settings (cl_inputBuffer, cl_correctionSmoothMs, cl_teleportDist)
     portTransport.ts   PortTransport over two MessagePort-like ports (the Worker link)
@@ -117,16 +124,29 @@ packages/client/src/
                        (later: remote interpolation)
   input/               pointer lock, raw mouse, keybinds (KeyboardEvent.code), UserCmd sampling
   render/
-    space.ts           Z-up inches → Y-up meters (ONLY place for conversion)
-    world.ts           static map meshes, materials, (later) lightmaps
+    space.ts           Z-up inches → Y-up meters (ONLY place for conversion; guard:
+                       packages/tools/test/guards/client-space.test.ts)
+    world.ts           static map meshes: one per cmap render surface, (later) lightmaps
+    materials.ts       greybox Lambert materials with procedural grid textures
+    camera.ts          first-person camera: Hor+ field of view from cl_fov, pose from the sim
+    renderer.ts        WebGLRenderer, scene, hemisphere + directional light, map load/unload
+    viewCvars.ts       cl_fov, cl_stepSmoothMs, cl_viewHeightSmoothMs
     players.ts         character models, animation from interpolated state
     viewmodel.ts       first-person weapon (separate scene/camera, own FOV)
     fx/                tracers, muzzle, impacts, blood, speed trail, smoke (pooled)
     debug/             hulls, traces, hitboxes (current + rewound), brushes
   audio/               Web Audio graph, positional sources, footsteps, priorities
+
+packages/client/scripts/  Node, driving the built client in headless Chromium (Playwright):
+  browser.ts           build, vite preview / dev server, SwiftShader launch, status and error readers
+  screenshot.ts        PNG screenshots of fixed viewpoints in movement_lab
+  png.ts               a minimal PNG decoder for pixel checks
+packages/client/e2e/   smoke.e2e.ts, the e2e smoke test (pnpm test:browser, docs/10 §2)
   hud/                 DOM overlay: crosshair, health/stamina, ammo, wound figure, killfeed, chat, minimap
   console/             Q3-style console UI, cvar commands, binds
-  worker/              local server entry (runs packages/server match code in a Web Worker)
+  worker/              local server entry (runs packages/server match code in a Web Worker;
+                       tsconfig.worker.json, WebWorker lib): serverWorker.ts, workerHost.ts
+                       (performance.now + setTimeout LoopHost), messages.ts (start, log, error)
 
 packages/tools/src/
   mapc/                TrenchBroom .map → cmap compiler (M5)
@@ -189,7 +209,7 @@ DEV / OFFLINE                                  ONLINE
 
 ## 7. Client specifics
 
-**Client cvars** (M2 design §4): `ARCHIVE` settings, saved per player and never replicated, so they never reach the simulation (prediction uses the replicated `pm_*` values only, §6). `cl_inputBuffer`, `cl_correctionSmoothMs` and `cl_teleportDist` are registered by the net code (`client/src/net/cvars.ts`); the rest arrive with the console, camera and HUD (M2 increments 11–12).
+**Client cvars** (M2 design §4): `ARCHIVE` settings, saved per player and never replicated, so they never reach the simulation (prediction uses the replicated `pm_*` values only, §6). `cl_inputBuffer`, `cl_correctionSmoothMs` and `cl_teleportDist` are registered by the net code (`client/src/net/cvars.ts`); `cl_fov`, `cl_stepSmoothMs` and `cl_viewHeightSmoothMs` by the view (`client/src/render/viewCvars.ts`, M2 increment 11); the rest arrive with the console and HUD (M2 increment 12).
 
 | Cvar | Default | Label / note |
 |---|---|---|
@@ -209,13 +229,15 @@ DEV / OFFLINE                                  ONLINE
   - No mouse smoothing; optional acceleration off by default.
 - **Camera:**
   - The view applies the latest mouse delta every frame.
-  - View height smoothing on step and land events.
-  - FOV setting (horizontal, Hor+ for widescreen).
+  - The eye is the predicted origin interpolated between the last two ticks, plus the correction's render offset, plus the step smoother's offset, plus the stance's eye height (26 u standing, 12 u crouched) smoothed over `cl_viewHeightSmoothMs` (M2 design §2).
+  - View height smoothing on step and land events. Steps (M2): while the step's tick is being interpolated the offset cancels the rise, then it decays linearly over `cl_stepSmoothMs`; offsets add up, capped at 32 u. A step predicted inside a clock fast-forward or a re-anchor is left to the render offset, which already holds the drawn position across it, and pending step offsets move with the render-tick clock when it jumps, so neither path drops the eye.
+  - FOV setting: `cl_fov` is the horizontal angle at 4:3 and the vertical angle stays the 4:3 one on wider screens (Hor+); narrower screens keep the horizontal angle.
   - The viewmodel is rendered in its own pass with its own FOV and depth range (never clips into walls).
 - **Render loop:**
   - `requestAnimationFrame` → step the client tick accumulator (prediction ticks) → interpolate local and remote states → update the Three.js scene from interpolated state → render.
   - Avoid per-frame allocations (reuse vectors/matrices; pool FX objects).
-- **Space conversion** (`render/space.ts`): `three.x = q.x × 0.0254`, `three.y = q.z × 0.0254`, `three.z = −q.y × 0.0254`; yaw/pitch mapped accordingly. Unit-test the conversions.
+- **Space conversion** (`render/space.ts`): `three.x = q.x × 0.0254`, `three.y = q.z × 0.0254`, `three.z = −q.y × 0.0254`; yaw/pitch mapped accordingly: `setViewAngles` sets Euler order YXZ with `rotation.y = yaw − 90°` and `rotation.x = −pitch` (sim yaw 0 faces +X, positive pitch looks down). The mapping is a proper rotation, so map vertices are converted once at load time (`convertVertices`) and keep their winding. Unit-test the conversions.
+- **World (M2):** one mesh per cmap render surface (one per material), `MeshLambertMaterial` with a procedural 256² grid `CanvasTexture` per material (16 u minor and 64 u major lines, repeat-wrapped; uv0 is 1 per 64 u, `docs/07` §3): floor light grey, wall mid grey, `grey/ladder` with rungs, water blue at 0.5 opacity, double-sided, no depth write, anything else magenta. Hemisphere plus directional light, no shadows; geometry, materials and textures are disposed on unload.
 - **HUD:** DOM overlay updated imperatively (refs). Crosshair and ammo update immediately; scoreboard and minimap at ≤ 15 Hz. No framework re-render per frame. Menus may use a UI framework later.
 - **Audio:**
   - Footsteps and gunshots are positional (HRTF) with priority and voice limits. Footsteps are the gameplay-critical sound.
@@ -254,4 +276,4 @@ DEV / OFFLINE                                  ONLINE
 ## 11. Scripts and CI (created in M0, extended later)
 
 - `pnpm dev`, `pnpm dev:server`, `pnpm build`, `pnpm test`, `pnpm test:movement`, `pnpm test:net`, `pnpm test:balance`, `pnpm test:browser` (M2), `pnpm typecheck`, `pnpm lint`, `pnpm format`, `pnpm greybox` (M1), `pnpm bench`, `pnpm bots`, `pnpm feel-report`, `pnpm balance-report`, `pnpm mapc` (M5).
-- **CI** (GitHub Actions, `.github/workflows/ci.yml`): typecheck, lint, unit tests and build since M0. Since M2, a `browsers` job replays the determinism vectors in Chromium, Firefox and WebKit (D-022). Added in M9 (bots exist from M3): a short bot soak (2 min, 8 bots, `wan-100-loss1`) and bundle-size/perf budget checks.
+- **CI** (GitHub Actions, `.github/workflows/ci.yml`): typecheck, lint, unit tests and build since M0. Since M2, a `browsers` job replays the determinism vectors in Chromium, Firefox and WebKit (D-022) and runs the client e2e smoke test in Chromium (M2 increment 11). Added in M9 (bots exist from M3): a short bot soak (2 min, 8 bots, `wan-100-loss1`) and bundle-size/perf budget checks.

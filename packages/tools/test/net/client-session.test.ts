@@ -21,6 +21,9 @@ import {
   encodeSnapshot,
   MAX_RELIABLE_BYTES,
   PlayerState,
+  PMEV_JUMP,
+  PMEV_LAND,
+  PMF_GROUNDED,
   PongMsg,
   SnapshotMsg,
   UserCmd,
@@ -150,6 +153,36 @@ describe("client session", () => {
     expect(Math.max(...h.frames.offset)).toBeGreaterThan(0);
     // It decays: the last frame's offset is gone.
     expect(h.frames.offset.at(-1)).toBe(0);
+  });
+
+  it("files each first prediction's movement events under its tick, once", () => {
+    const h = new NetHarness({ input: new StrafeCircuit() });
+    h.runTicks(600);
+    const jumps = h.events.filter((e) => e.type === PMEV_JUMP);
+    const lands = h.events.filter((e) => e.type === PMEV_LAND);
+    expect(jumps.length).toBeGreaterThan(3);
+    expect(lands.length).toBeGreaterThan(3);
+    const grounded = (tick: number) => {
+      const s = h.firstPredicted.get(tick);
+      expect(s, `tick ${tick}`).toBeDefined();
+      return ((s?.flags ?? 0) & PMF_GROUNDED) !== 0;
+    };
+    for (const e of jumps) {
+      expect(grounded(e.tick), `jump at ${e.tick}`).toBe(false);
+      expect(h.firstPredicted.get(e.tick)?.velocity[2]).toBeGreaterThan(200);
+    }
+    for (const e of lands) {
+      expect([grounded(e.tick - 1), grounded(e.tick)], `land at ${e.tick}`).toEqual([false, true]);
+      expect(e.value).toBeGreaterThan(0);
+    }
+    const keys = h.events.map((e) => `${e.type}@${e.tick}`);
+    expect(new Set(keys).size).toBe(keys.length);
+    // Only the startup fill (the spawn's re-anchor) predicts under a path jump.
+    const jumped = h.events.filter((e) => e.jumped);
+    expect(jumped.every((e) => e.tick <= h.client.startTick)).toBe(true);
+    expect(h.events.filter((e) => !e.jumped).length).toBeGreaterThan(6);
+    const ticks = h.events.map((e) => e.tick);
+    expect(ticks).toEqual([...ticks].sort((a, b) => a - b));
   });
 });
 

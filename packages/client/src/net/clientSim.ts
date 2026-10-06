@@ -9,6 +9,7 @@ import {
   copyUserCmd,
   cvarBlockHash,
   type PlayerState,
+  PmoveEvent,
   registerPmoveCvars,
   SNAP_FLAG_STARVED,
   SNAP_FLAG_TELEPORT,
@@ -64,6 +65,47 @@ export const MAX_LEAD_TICKS = 64;
 /** A snapshot cvar hash that stays different this long asks the server for the block (design). */
 export const CVAR_RESEND_AFTER_MS = 1000;
 
+/** Tick-tagged movement events one frame can hold; more are counted in `dropped`. */
+export const TICK_EVENTS_CAPACITY = 32;
+
+/**
+ * The movement events (PMEV_*) of the ticks first predicted during the last frame, each with
+ * its tick, oldest first: what presentation needs to place an event in time (step smoothing now,
+ * sounds later). Re-simulations after a correction emit none, so an event fires once per
+ * prediction; a resync that re-predicts a tick files its events again, flagged `jumped`.
+ */
+export class TickEvents {
+  readonly types = new Uint8Array(TICK_EVENTS_CAPACITY);
+  readonly values = new Float64Array(TICK_EVENTS_CAPACITY);
+  readonly ticks = new Float64Array(TICK_EVENTS_CAPACITY);
+  /**
+   * 1 for an event of a tick predicted under a path jump (a clock fast-forward or a re-anchor):
+   * the render offset already carries its motion, so view smoothing must not cancel it again.
+   */
+  readonly jumped = new Uint8Array(TICK_EVENTS_CAPACITY);
+  count = 0;
+  dropped = 0;
+
+  clear(): void {
+    this.count = 0;
+    this.dropped = 0;
+  }
+
+  /** Appends one event; when full, keeps the older ones and counts this one in `dropped`. */
+  push(type: number, value: number, tick: number, jumped: boolean): void {
+    const n = this.count;
+    if (n === TICK_EVENTS_CAPACITY) {
+      this.dropped++;
+      return;
+    }
+    this.types[n] = type;
+    this.values[n] = value;
+    this.ticks[n] = tick;
+    this.jumped[n] = jumped ? 1 : 0;
+    this.count = n + 1;
+  }
+}
+
 /**
  * Where a tick's cmd comes from: the input sampler in the browser, a script in tests and bots.
  * `sample` fills every field but `tick` from the state the tick starts from (the newest predicted
@@ -116,6 +158,9 @@ const LAST_FRAME = 0;
 const ACC = 1;
 const DT = 2;
 const MISMATCH_SINCE = 3;
+/** latestTick and the accumulator before this frame's clock step or re-anchor. */
+const PATH_TICK = 4;
+const PATH_ACC = 5;
 
 /**
  * The headless client (M2 design §1, §2): the connection, the clock, prediction and
@@ -153,15 +198,27 @@ export class ClientSim {
   frames = 0;
   /** Messages from PRINT, oldest first; the caller drains it (the console, a test). */
   readonly prints: string[] = [];
+  /** Movement events of this frame's first predictions (cleared at the start of each frame). */
+  readonly events = new TickEvents();
+  /**
+   * [0] how far the predicted path's time (latestTick − 1 + the accumulator in ticks) jumped this
+   * frame beyond the elapsed time: +k for a k-tick fast-forward, −k for a hold, the re-anchor's
+   * difference for a resync. View smoothers keyed to render ticks shift by it to stay continuous.
+   */
+  readonly pathShift = new Float64Array(1);
 
   private readonly cmap: Cmap;
   private readonly clockFn: () => number;
   private readonly log: ClientLog;
-  /** [last frame time, tick accumulator, this frame's dt, cvar hash mismatch since]. */
-  private readonly t = new Float64Array(4);
+  /**
+   * [last frame time, tick accumulator, this frame's dt, cvar hash mismatch since, latestTick and
+   * accumulator before the clock step].
+   */
+  private readonly t = new Float64Array(6);
   private readonly cmd = new UserCmd();
   private readonly lastCmd = new UserCmd();
   private readonly fill = new UserCmd();
+  private readonly event = new PmoveEvent();
   private readonly before = vec3();
   private readonly after = vec3();
   private readonly delta = vec3();
@@ -175,6 +232,8 @@ export class ClientSim {
   private step = 0;
   /** The newest snapshot tick of this poll that needs a hard resync, −1 for none. */
   private resyncTick = -1;
+  /** Ticks predicted now are under a path jump (TickEvents.jumped). */
+  private jumping = false;
   private started = false;
 
   constructor(options: ClientSimOptions) {
@@ -243,6 +302,8 @@ export class ClientSim {
     t[LAST_FRAME] = now[0] as number;
     this.started = true;
     this.frames++;
+    this.events.clear();
+    this.pathShift[0] = 0;
     refreshClientNetSettings(this.cvars, this.settings);
     this.stats.advance();
     const conn = this.connection;
@@ -252,6 +313,8 @@ export class ClientSim {
     if (wasActive) {
       t[ACC] = (t[ACC] as number) + (t[DT] as number);
       this.renderBase(this.before);
+      t[PATH_TICK] = this.predictor.latestTick;
+      t[PATH_ACC] = t[ACC] as number;
     }
     this.changed = false;
     this.teleport = false;
@@ -263,6 +326,14 @@ export class ClientSim {
       if (wasActive && this.changed) this.smoothChange();
       else if (!wasActive) this.offset.clear();
       if (this.step !== 0) this.takeStep(this.step);
+      // The path's time (latestTick + the accumulator in ticks, unclamped) is what the tick loop
+      // keeps; a step or re-anchor moved it by this. Exact 0 when neither happened.
+      if (wasActive) {
+        this.pathShift[0] =
+          this.predictor.latestTick -
+          (t[PATH_TICK] as number) +
+          ((t[ACC] as number) - (t[PATH_ACC] as number)) / TICK_MS;
+      }
       const p = this.predictor;
       let n = 0;
       while ((t[ACC] as number) >= TICK_MS && n < MAX_TICKS_PER_FRAME) {
@@ -289,6 +360,15 @@ export class ClientSim {
     out[0] = (out[0] as number) + (d[0] as number);
     out[1] = (out[1] as number) + (d[1] as number);
     out[2] = (out[2] as number) + (d[2] as number);
+  }
+
+  /**
+   * Where `renderOrigin` lies on the predicted path, in ticks (latestTick − 1 + the accumulator's
+   * fraction), into `out[index]`: the time base of the step smoother.
+   */
+  renderTick(out: Float64Array, index: number): void {
+    const a = Math.min(1, Math.max(0, (this.t[ACC] as number) / TICK_MS));
+    out[index] = this.predictor.latestTick - 1 + a;
   }
 
   /** A console command for the server (CMD); false when there is no session or it doesn't fit. */
@@ -345,7 +425,9 @@ export class ClientSim {
     this.stats.add(STAT_CLOCK_ADJUSTMENTS, 1);
     this.renderBase(this.before);
     if (k > 0) {
+      this.jumping = true;
       for (let i = 0; i < k; i++) this.tick();
+      this.jumping = false;
     } else {
       this.t[ACC] = (this.t[ACC] as number) + k * TICK_MS;
     }
@@ -361,9 +443,23 @@ export class ClientSim {
     cmd.tick = tick;
     this.input.sample(cmd, p.state);
     cmd.tick = tick;
-    p.predict(cmd);
+    this.predictFirst(cmd);
     copyUserCmd(this.lastCmd, cmd);
     this.connection.sendInput(p.cmds, tick, p.snapshotTick);
+  }
+
+  /** Predicts `cmd` for the first time and files its movement events under its tick. */
+  private predictFirst(cmd: UserCmd): void {
+    const p = this.predictor;
+    const pe = p.events;
+    pe.clear();
+    p.predict(cmd);
+    const out = this.events;
+    const ev = this.event;
+    for (let i = 0; i < pe.count; i++) {
+      pe.read(i, ev);
+      out.push(ev.type, ev.value, cmd.tick, this.jumping);
+    }
   }
 
   /**
@@ -390,11 +486,13 @@ export class ClientSim {
       f.buttons &= ~BUTTON_ATTACK;
     }
     const target = tick + lead;
+    this.jumping = true;
     for (let t = tick + 1; t <= target; t++) {
       f.tick = t;
-      p.predict(f);
+      this.predictFirst(f);
       this.connection.sendInput(p.cmds, t, p.snapshotTick);
     }
+    this.jumping = false;
     copyUserCmd(this.lastCmd, f);
     this.startTick = target;
     this.clock.anchor(target);

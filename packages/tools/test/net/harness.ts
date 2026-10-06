@@ -86,6 +86,8 @@ export class NetHarness {
   /** Each tick that was the client's newest snapshot after some frame (its reconcile point). */
   readonly snapshotTicks: number[] = [];
   readonly frames = new FrameLog();
+  /** Every movement event the client filed (ClientSim.events), across frames, oldest first. */
+  readonly events: { tick: number; type: number; value: number; jumped: boolean }[] = [];
   now = 0;
   /** Runs before every server tick (tests move the player or change the match here). */
   beforeServerTick: (() => void) | null = null;
@@ -291,6 +293,15 @@ export class NetHarness {
     }
     const c = this.client;
     c.frame();
+    const ev = c.events;
+    for (let i = 0; i < ev.count; i++) {
+      this.events.push({
+        tick: ev.ticks[i] as number,
+        type: ev.types[i] as number,
+        value: ev.values[i] as number,
+        jumped: ev.jumped[i] === 1,
+      });
+    }
     if (c.active) {
       const p = c.predictor;
       for (let t = Math.max(this.lastFirst + 1, c.startTick - 200); t <= p.latestTick; t++) {

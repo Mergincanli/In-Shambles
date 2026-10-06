@@ -1,0 +1,10 @@
+{
+  // Node scripts that drive the client in Chromium (scripts/, e2e/): Node types, plus the DOM for
+  // the callbacks they run inside the page.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": ["node"]
+  },
+  "include": ["scripts", "e2e"]
+}

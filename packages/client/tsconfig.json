@@ -4,5 +4,8 @@
     "lib": ["ES2023", "DOM", "DOM.Iterable"],
     "types": ["vite/client"]
   },
-  "include": ["src"]
+  "include": ["src"],
+  // The Worker's own globals are WebWorker, not DOM: tsconfig.worker.json checks it. Its message
+  // types (src/worker/messages.ts) are still checked here through the page's imports.
+  "exclude": ["src/worker"]
 }

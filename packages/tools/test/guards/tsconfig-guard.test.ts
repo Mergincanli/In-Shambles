@@ -72,6 +72,20 @@ describe("tsconfig guard", () => {
     expect(options?.noUncheckedIndexedAccess).toBe(true);
   });
 
+  it("gives the server Worker the WebWorker globals only (M2 design §1)", () => {
+    const worker = read(fromRoot("packages", "client", "tsconfig.worker.json"));
+    expect(worker.compilerOptions?.lib).toEqual(["ES2023", "WebWorker"]);
+    expect(worker.compilerOptions?.types).toEqual([]);
+    expect(worker.compilerOptions?.noUncheckedIndexedAccess).toBe(true);
+    // The page's config (DOM) leaves the Worker to it.
+    const page = read(fromRoot("packages", "client", "tsconfig.json")) as TsConfig & {
+      exclude?: string[];
+    };
+    expect(page.exclude).toEqual(["src/worker"]);
+    const scripts = readFileSync(fromRoot("packages", "client", "package.json"), "utf8");
+    expect(scripts).toContain("tsc --noEmit -p tsconfig.worker.json");
+  });
+
   it("keeps DOM and Node types out of the server's match code (D-027)", () => {
     const options = read(fromRoot("packages", "server", "tsconfig.match.json")).compilerOptions;
     expect(options?.lib).toEqual(["ES2023"]);

@@ -197,6 +197,7 @@
 - `docs/10` §1–2 and `docs/06` §11 list the command and the CI job; the `docs/09` M2 acceptance line cites this entry. The pmove vectors (M2 increment 6) and any later `*-vectors.test.ts` replay in the browsers with no config change.
 - Firefox and WebKit are proven only in CI; the M2 acceptance box for them is ticked once the PR's `browsers` job is green.
 - Upgrading `playwright` means picking a release whose browser builds are available locally, or setting `CHROMIUM_PATH`.
+- M2 increment 11 adds a second project to `vitest.browser.config.ts`: `e2e`, the client smoke test (`packages/client/e2e/*.e2e.ts`, run from Node with Playwright against a `vite preview` of the production build in headless Chromium with SwiftShader WebGL; `docs/10` §2). It runs whenever `chromium` is among `BROWSERS`, so the CI `browsers` job runs it too; its files never match the Node run's `*.test.ts` pattern, which the same guard checks. The vectors project is unchanged.
 
 ### D-023 — pmove contract (2026-10-06, accepted)
 **Context:** M2 increment 3 builds the base pmove pipeline (`docs/03` §3, §4.4–§4.11). The spec left four things open: what "starts in solid" means now that D-017 distinguishes `startSolid` from `allSolid`; where slick and nodamage come from, since bevel planes carry no face flags; what "crouch-blocked" means; and how the tick length and the movement events reach and leave pmove (M2 plan, "Spec decisions"; M2 design §2–§3).

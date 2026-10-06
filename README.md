@@ -23,14 +23,14 @@ pnpm typecheck && pnpm lint && pnpm test
 
 | Command | What it does |
 |---|---|
-| `pnpm dev` | Client dev server on http://localhost:5173 |
+| `pnpm dev` | The game on http://localhost:5173: the client with the server in a Web Worker (offline loopback) |
 | `pnpm dev:server` | Dedicated server from source (stop with Ctrl+C) |
 | `pnpm build` | Production client build and server bundle (`packages/server/dist/main.js`) |
 | `pnpm test` | All tests |
 | `pnpm test:movement` | Movement tests (MV-xx) on the greybox courses, each printing measured vs. target |
 | `pnpm test:net` | Netcode tests (NET-xx): codec checks, and the real match and client net code under the network profiles; NET-04 prints a summary line per profile |
 | `pnpm test:balance` | Balance tests (BAL-xx) |
-| `pnpm test:browser` | Determinism, trace and pmove vectors in headless browsers (`BROWSERS=chromium,firefox,webkit`, default `chromium`) |
+| `pnpm test:browser` | Determinism, trace and pmove vectors in headless browsers (`BROWSERS=chromium,firefox,webkit`, default `chromium`), plus the client e2e smoke test in headless Chromium |
 | `pnpm typecheck` | Type-check all packages |
 | `pnpm lint` | Biome lint and format check |
 | `pnpm format` | Apply Biome formatting and safe fixes |
@@ -41,6 +41,8 @@ pnpm typecheck && pnpm lint && pnpm test
 `pnpm dev:server` runs under pnpm, which doesn't forward signals to the server. To stop it from a script or process manager, signal its process group (Ctrl+C does this), or run the bundle directly with `node packages/server/dist/main.js`.
 
 `pnpm test:browser` uses the Playwright browsers already on the machine. `pnpm exec playwright install chromium firefox webkit` downloads them (CI does this), and `CHROMIUM_PATH` points the Chromium run at another build.
+
+`pnpm dev` opens `movement_lab`. Add `?bot=circle` to the URL to watch the scripted strafe-jump circuit, `?autotest=1` to have the page report its status in `<html data-*>`, and `?cam=x,y,z,yaw,pitch` for a fixed camera (map units and degrees). `pnpm --filter @game/client screenshot <dir>` saves PNG screenshots of a few viewpoints from the production build (`--dev` uses the dev server).
 
 Commands for later milestones (`bots`, `balance-report`, `mapc`) already exist and print the milestone that adds them. `CLAUDE.md` has the full list.
 

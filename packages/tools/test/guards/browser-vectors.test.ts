@@ -2,6 +2,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { describe, expect, it } from "vitest";
 import browserConfig, {
+  E2E_GLOB,
   ENGINES,
   parseBrowsers,
   VECTORS_GLOB,
@@ -65,8 +66,19 @@ describe("browser vectors (D-022)", () => {
     },
   );
 
+  /** The browser config's inline project `name`. */
+  function project(name: string) {
+    const projects = (browserConfig.test?.projects ?? []) as { test?: Record<string, unknown> }[];
+    return projects.find((p) => p.test?.name === name)?.test as
+      | { include?: string[]; browser?: Record<string, unknown>; environment?: string }
+      | undefined;
+  }
+
   it("replays them in headless browser mode, default chromium", () => {
-    const test = browserConfig.test;
+    const test = project("vectors") as {
+      include?: string[];
+      browser?: { enabled?: boolean; headless?: boolean; instances?: { browser: string }[] };
+    };
     expect(test?.include).toEqual([VECTORS_GLOB]);
     expect(VECTORS_GLOB).toBe("packages/shared/test/*-vectors.test.ts");
     expect(test?.browser?.enabled).toBe(true);
@@ -74,6 +86,19 @@ describe("browser vectors (D-022)", () => {
     if (process.env.BROWSERS === undefined) {
       expect(test?.browser?.instances?.map((instance) => instance.browser)).toEqual(["chromium"]);
     }
+  });
+
+  // The e2e smoke test (M2 design §5) runs from Node in the same command, and only there: its
+  // files must not match the Node run's default *.test.ts pattern.
+  it("runs the client e2e smoke test in Node alongside, and never under pnpm test", () => {
+    const e2e = project("e2e");
+    expect(e2e?.include).toEqual([E2E_GLOB]);
+    expect(e2e?.environment).toBe("node");
+    expect(e2e?.browser).toBeUndefined();
+    const dir = fromRoot("packages", "client", "e2e");
+    const files = readdirSync(dir);
+    expect(files).toContain("smoke.e2e.ts");
+    for (const file of files) expect(file, file).not.toMatch(/\.(test|spec)\.[cm]?[jt]sx?$/);
   });
 
   it("parses BROWSERS strictly", () => {

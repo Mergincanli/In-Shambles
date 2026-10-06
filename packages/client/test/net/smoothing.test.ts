@@ -1,6 +1,6 @@
 import { vec3 } from "@game/shared";
 import { describe, expect, it } from "vitest";
-import { RenderOffset } from "../../src/net/smoothing";
+import { RenderOffset, STEP_SMOOTH_MAX, StepSmoother, ViewHeight } from "../../src/net/smoothing";
 import {
   NetStats,
   STAT_BYTES_IN,
@@ -74,5 +74,109 @@ describe("NetStats", () => {
     expect(s.totals[STAT_CORRECTION_MAX]).toBe(3);
     s.reset();
     expect(s.totals[STAT_BYTES_IN]).toBe(0);
+  });
+});
+
+describe("StepSmoother (M2 design §2)", () => {
+  /** The drawn eye z at render tick r for a path that steps up `dz` at `tick`, plus the offset. */
+  function drawn(r: number, tick: number, dz: number, offset: number) {
+    const a = Math.min(1, Math.max(0, r - (tick - 1)));
+    return dz * a + offset;
+  }
+
+  it("holds the eye through the step's tick, then decays over cl_stepSmoothMs", () => {
+    const time = new Float64Array([99]);
+    const s = new StepSmoother(time);
+    const out = new Float64Array(1);
+    s.add(100, 18, 150);
+    const seen: number[] = [];
+    for (let r = 99; r <= 112; r += 0.125) {
+      time[0] = r;
+      s.sample(out, 0);
+      const z = drawn(r, 100, 18, out[0] as number);
+      seen.push(z);
+      if (r <= 100) expect(z).toBeCloseTo(0, 12);
+    }
+    // 150 ms = 9 ticks: half gone at 104.5, gone at 109.
+    const again = new StepSmoother(time);
+    again.add(100, 18, 150);
+    time[0] = 104.5;
+    again.sample(out, 0);
+    expect(out[0]).toBeCloseTo(-9, 9);
+    time[0] = 109;
+    again.sample(out, 0);
+    expect(Math.abs(out[0] as number)).toBe(0);
+    for (let i = 1; i < seen.length; i++) {
+      expect(seen[i] as number).toBeGreaterThanOrEqual((seen[i - 1] as number) - 1e-12);
+      // Continuous: no frame-to-frame jump bigger than the decay's slope allows.
+      expect((seen[i] as number) - (seen[i - 1] as number)).toBeLessThan(0.26);
+    }
+    expect(seen.at(-1)).toBe(18);
+  });
+
+  it("shifts with a jump of the render-tick clock, so the offset carries on unchanged", () => {
+    const time = new Float64Array([104.5]);
+    const s = new StepSmoother(time);
+    const out = new Float64Array(1);
+    s.add(100, 18, 150);
+    s.sample(out, 0);
+    expect(out[0]).toBeCloseTo(-9, 9);
+    // The clock jumps back 3 ticks (a hold) and forward 5 (a fast-forward): same offset.
+    for (const jump of [-3, 5]) {
+      time[0] = (time[0] as number) + jump;
+      s.shift(jump);
+      s.sample(out, 0);
+      expect(out[0]).toBeCloseTo(-9, 9);
+    }
+    s.shift(0);
+    time[0] = (time[0] as number) + 4.5;
+    s.sample(out, 0);
+    expect(Math.abs(out[0] as number)).toBe(0);
+  });
+
+  it("adds up stairs and caps the sum at 32 u", () => {
+    const time = new Float64Array([0]);
+    const s = new StepSmoother(time);
+    const out = new Float64Array(1);
+    for (let t = 1; t <= 6; t++) s.add(t, 16, 1000);
+    time[0] = 3;
+    s.sample(out, 0);
+    expect(out[0]).toBe(-STEP_SMOOTH_MAX);
+    s.clear();
+    s.sample(out, 0);
+    expect(Math.abs(out[0] as number)).toBe(0);
+    // Step-downs smooth the other way; 0 ms snaps once the tick is drawn.
+    s.add(10, -16, 0);
+    time[0] = 9.5;
+    s.sample(out, 0);
+    expect(out[0]).toBe(8);
+    time[0] = 10;
+    s.sample(out, 0);
+    expect(Math.abs(out[0] as number)).toBe(0);
+  });
+});
+
+describe("ViewHeight (docs/06 §7)", () => {
+  it("moves linearly to the stance height over cl_viewHeightSmoothMs", () => {
+    const now = new Float64Array([0]);
+    const v = new ViewHeight(now);
+    v.update(26, 14, 100);
+    expect(v.height[0]).toBe(26);
+    now[0] = 50;
+    v.update(26, 14, 100);
+    expect(v.height[0]).toBe(26);
+    now[0] = 75;
+    v.update(12, 14, 100);
+    expect(v.height[0]).toBe(22.5);
+    now[0] = 500;
+    v.update(12, 14, 100);
+    expect(v.height[0]).toBe(12);
+    now[0] = 525;
+    v.update(26, 14, 100);
+    expect(v.height[0]).toBe(15.5);
+    v.update(26, 14, 0);
+    expect(v.height[0]).toBe(26);
+    v.reset(12);
+    expect(v.height[0]).toBe(12);
   });
 });
