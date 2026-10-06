@@ -14,7 +14,7 @@
 ## 2. Space, units, hull, constants
 
 - **Units:** 1 u = 1 inch. **Z-up.** Yaw = rotation around +Z (0 = +X), pitch positive = looking down (Quake convention); clamp pitch to ±89°.
-- **Player hull (AABB, relative to origin):**
+- **Player hull (AABB, relative to origin; FACT for Q3, UrT may differ):**
 
 | State | mins | maxs | Height | Eye height above origin |
 |---|---|---|---|---|

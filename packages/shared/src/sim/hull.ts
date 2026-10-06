@@ -1,9 +1,8 @@
 import { type Vec3, vec3 } from "../math/vec3";
 
 /**
- * Player hulls relative to the origin, per docs/03 §2 (the table there carries no
- * FACT/INFERRED/ESTIMATE label). Crouching and sliding shrink the box from the top, so both
- * states share HULL_MINS.
+ * Player hulls relative to the origin: docs/03 §2, FACT for Q3 (UrT may differ). Crouching and
+ * sliding shrink the box from the top, so both states share HULL_MINS.
  *
  * Shared constants that are never written: copy into a scratch vector before adjusting one.
  */

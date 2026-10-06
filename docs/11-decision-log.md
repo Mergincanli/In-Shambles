@@ -140,7 +140,7 @@
 **Consequences:**
 - `docs/03` §6 and `docs/05` §3.4 carry "Pinned down in M1" notes; the code is in `packages/shared/src/sim/`.
 - M1 implements the `docs/03` §6 fields `origin`, `velocity`, the view angles, `flags`, `groundEntity`, `waterLevel` and `stamina`. `wallJumps`, `health`, `armor`, `breathMs`/`drownMs`, `climbTarget`, the timers and `movementEvents` are appended to `PlayerState` (with their quantize, codec and parity coverage) by the milestone that first simulates them.
-- Open for later milestones: whether kick-eligible needs any wire bit (M4), which `weaponSlot` index is which and whether out-of-range slots clamp or mean "no change" (weapon switching), and the hull label in `docs/03` §2.
+- Open for later milestones: whether kick-eligible needs any wire bit (M4), and which `weaponSlot` index is which and whether out-of-range slots clamp or mean "no change" (weapon switching). The `docs/03` §2 hull table is labelled FACT for Q3 (Mustafa, 2026-10-06).
 
 ### D-019 — Brush contents, surface flags and build rules for M1 (2026-10-05, accepted)
 **Context:** M1 implements the collision brushes of `docs/07` §2. The doc names the contents flags and optional per-side surface flags but leaves their bits open, and §4.3 says to reject degenerate brushes without saying what degenerate means. Traces also need bevel planes, which the doc does not mention (M1 design B).

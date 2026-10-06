@@ -81,8 +81,8 @@ export const GROUND_PROBE = 0.25;
 /** pm_stepSize, FACT for Q3 (docs/03 §2.1, §4.9). */
 export const STEP = 18;
 /**
- * Eye height above the origin, standing and crouched (docs/03 §2 hull table, which carries no
- * FACT/INFERRED/ESTIMATE label). Rays start here, inside the hull, so they start clear.
+ * Eye height above the origin, standing and crouched (docs/03 §2 hull table, FACT for Q3). Rays
+ * start here, inside the hull, so they start clear.
  */
 const EYE_STANDING = 26;
 const EYE_CROUCHED = 12;

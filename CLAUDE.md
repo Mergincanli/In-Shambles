@@ -112,6 +112,7 @@ Until their milestone, these are stubs that print "added in M#": `test:movement`
 | `docs/09-roadmap.md` | Milestones M0–M10 with acceptance criteria and status |
 | `docs/10-testing-and-performance.md` | Test strategy, net profiles, performance budgets |
 | `docs/11-decision-log.md` | Decisions (D-###) and why |
+| `docs/design/` | Approved milestone plans and design records (`M1-plan.md`, `M1-design.md`), cited as "M1 plan" / "M1 design A.4"; records, not specs |
 | `docs/handoffs/` | Session handoffs; read the newest one when resuming |
 
 ## Workflow
