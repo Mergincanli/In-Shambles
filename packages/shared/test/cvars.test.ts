@@ -366,3 +366,82 @@ describe("list and replicated", () => {
     expect(cvars.replicated().map((c) => c.def.name)).toEqual(["pm_gravity", "pm_maxWallJumps"]);
   });
 });
+
+describe("version", () => {
+  it("counts registrations", () => {
+    const fresh = new CvarRegistry();
+    expect(fresh.version).toBe(0);
+    fresh.register({ name: "pm_a", type: "float", default: 1, description: "x" });
+    fresh.register({ name: "pm_b", type: "float", default: 1, description: "x" });
+    expect(fresh.version).toBe(2);
+  });
+
+  it("bumps on every value change: set, setFromString and reset", () => {
+    let v = cvars.version;
+    cvars.set("sensitivity", 2);
+    expect(cvars.version).toBe(++v);
+    cvars.set("sensitivity", 500); // clamped to 100, still a change
+    expect(cvars.version).toBe(++v);
+    cvars.setFromString("pm_maxWallJumps", "1");
+    expect(cvars.version).toBe(++v);
+    cvars.reset("pm_maxWallJumps");
+    expect(cvars.version).toBe(++v);
+    cvars.set("cl_drawfps", true);
+    cvars.set("sv_hostname", "eu-1");
+    expect(cvars.version).toBe(v + 2);
+  });
+
+  it("stays put when nothing changes", () => {
+    const v = cvars.version;
+    cvars.set("sensitivity", 5);
+    cvars.reset("sensitivity");
+    cvars.set("sensitivity", 1000);
+    cvars.set("sensitivity", 100); // already clamped to 100 by the line above
+    expect(cvars.version).toBe(v + 1);
+    const w = cvars.version;
+    cvars.set("sensitivity", "fast");
+    cvars.setFromString("sensitivity", "fast");
+    cvars.set("nope", 1);
+    cvars.set("cg_thirdperson", true); // cheat-protected
+    cvars.set("sensitivity", 0); // clamped to the 0.1 min: the one change
+    cvars.set("sensitivity", 0.1); // already 0.1
+    expect(cvars.version).toBe(w + 1);
+    const x = cvars.version;
+    cvars.set("pm_maxWallJumps", 0); // 3 → 0: a change
+    cvars.set("pm_maxWallJumps", -0); // stored as 0: not a change
+    expect(cvars.version).toBe(x + 1);
+  });
+
+  it("reads numbers with a fallback for missing and non-numeric cvars", () => {
+    expect(cvars.getNumber("pm_gravity", 1)).toBe(800);
+    expect(cvars.getNumber("PM_GRAVITY", 1)).toBe(800);
+    expect(cvars.getNumber("nope", 7)).toBe(7);
+    expect(cvars.getNumber("sv_hostname", 7)).toBe(7);
+    expect(cvars.getNumber("cl_drawfps", 7)).toBe(7);
+  });
+
+  it("waits for applyLatched() on LATCH cvars, which bumps once per changed value", () => {
+    const v = cvars.version;
+    cvars.set("pm_gravity", 600);
+    cvars.reset("pm_gravity");
+    cvars.set("pm_gravity", 600);
+    expect(cvars.version).toBe(v);
+    cvars.applyLatched();
+    expect(cvars.version).toBe(v + 1);
+    cvars.applyLatched();
+    expect(cvars.version).toBe(v + 1);
+  });
+
+  it("bumps when turning cheats off resets a changed CHEAT cvar", () => {
+    cvars.setAllowCheats(true);
+    cvars.setAllowCheats(false);
+    const v = cvars.version;
+    cvars.setAllowCheats(true);
+    cvars.set("cg_thirdperson", true);
+    expect(cvars.version).toBe(v + 1);
+    cvars.set("sv_fps", 30); // LATCH: pending only
+    cvars.setAllowCheats(false);
+    expect(cvars.version).toBe(v + 2);
+    expect(cvars.get("sv_fps")).toBe(60);
+  });
+});

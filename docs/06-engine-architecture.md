@@ -151,6 +151,7 @@ DEV / OFFLINE                                  ONLINE
 - **Registry** in `shared/cvars`.
   - Each cvar: name, type, default, min/max, description, flags.
   - Flags: `ARCHIVE` (persist client setting), `REPLICATED` (server-owned, sent to clients, used by prediction), `CHEAT` (dev only), `SERVER` (server-only), `LATCH` (applies on map restart).
+  - A `version` counter goes up on every registration and every value change. The sim copies its tunables into plain structs (`PmoveParams`) only when it moves, so no tick looks a cvar up (M2 design §0).
 - **Movement/combat tunables** (`pm_*`, `st_*`, `wp_*` overrides) are `REPLICATED`. The server sends the block on join and on change; the block hash appears in snapshots.
 - **Console UI:** toggle with the backquote key (`Backquote` code). Commands: `set`, `toggle`, `reset`, `cvarlist [prefix]`, `bind`, `unbind`, `exec <file>`, `connect`, `disconnect`, `net_profile <name>`, `record`/`stoprecord`, `demo <file>`, `rcon <cmd>`.
 - **Binds** use `KeyboardEvent.code` (physical keys) so AZERTY/QWERTZ layouts work.

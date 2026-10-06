@@ -70,6 +70,18 @@
 
 Stamina cvars are in §5.2.
 
+### 2.3 M2 base additions
+
+New ESTIMATEs for the base ladder and water moves (M2 plan, "New tunables"; M2 design §4). Like every ESTIMATE they are replicated cvars, tuned by feel or by reference captures.
+
+| Cvar | Default | Label | Meaning |
+|---|---|---|---|
+| `pm_ladderScale` | 0.5 | ESTIMATE | Ladder speed = `pm_runSpeed` × this (§4.14). |
+| `pm_ladderFacing` | 0.5 | ESTIMATE | Stay attached only while dot(forward, −ladder normal) exceeds this (§4.14). |
+| `pm_ladderReach` | 2 | ESTIMATE | u; length of the forward probe that finds the ladder face. |
+| `pm_ladderJumpPush` | 150 | ESTIMATE | u/s; jumping off adds this along the ladder normal. |
+| `pm_waterSinkSpeed` | 60 | ESTIMATE | u/s; the swim wish speed downward with no move or vertical input (§4.13). |
+
 ## 3. Tick pipeline (per player, per tick)
 
 Inputs: the previous `PlayerState` and the `UserCmd` for this tick (`docs/05` §3: `forwardmove`/`rightmove` in −127..127, buttons, view angles). Output: the next `PlayerState` plus events.
@@ -205,16 +217,16 @@ Return whether any plane was hit (used by step-slide).
 - **Water level ≥ 2 → swim:**
   - Wish velocity uses the full 3D view vectors. **Jump = up, crouch = down** (UrT), so the player can strafe and aim like on ground.
   - Speed scaled by `swimScale`.
-  - With no input, sink slowly (wish z ≈ −60 u/s).
+  - With no input, sink slowly (wish z = −`pm_waterSinkSpeed`, 60 u/s, ESTIMATE).
 - Friction per §4.2; acceleration `waterAccelerate`. **No sprint. No stamina regen.**
 - **Breath** (FACT): 16 s of air while submerged (level 3), refilled instantly on surfacing. After it runs out, drowning kills in 8 s (≈12.5 HP/s).
 
 ### 4.14 Ladders
-- **Ladder contact:** the hull touches a ladder-flagged surface **and** the player faces it (dot(forward, −normal) > 0.5, ESTIMATE). Turning away too far detaches.
+- **Ladder contact:** the hull touches a ladder-flagged surface **and** the player faces it (dot(forward, −normal) > `pm_ladderFacing`, 0.5, ESTIMATE). Turning away too far detaches.
 - On the ladder:
   - **forward = up, back = down**, regardless of pitch (FACT); strafe moves sideways along it.
-  - No gravity while attached; ladder speed ≈ `runSpeed × 0.5` (ESTIMATE).
-  - Jumping off pushes away from the ladder normal.
+  - No gravity while attached; ladder speed = `runSpeed × pm_ladderScale` (0.5, ESTIMATE).
+  - Jumping off pushes away along the ladder normal (`pm_ladderJumpPush`, 150 u/s, ESTIMATE).
   - No slide-down.
 - Climbing is free (no stamina).
 

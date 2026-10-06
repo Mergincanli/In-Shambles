@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { HULL_CROUCHED_MAXS, HULL_MINS, HULL_STANDING_MAXS } from "../../src/sim/hull";
+import {
+  HULL_CROUCHED_MAXS,
+  HULL_MINS,
+  HULL_STANDING_MAXS,
+  VIEW_HEIGHT_CROUCHED,
+  VIEW_HEIGHT_STANDING,
+  WATER_SAMPLE_FEET,
+  WATER_SAMPLE_WAIST,
+} from "../../src/sim/hull";
 
 describe("player hulls (docs/03 §2)", () => {
   it("match the spec table", () => {
@@ -20,5 +28,29 @@ describe("player hulls (docs/03 §2)", () => {
       expect(v).toBeInstanceOf(Float64Array);
       expect(v).toHaveLength(3);
     }
+  });
+});
+
+describe("view heights (docs/03 §2)", () => {
+  it("put the eye 50 u above the feet standing and 36 u crouched", () => {
+    expect(VIEW_HEIGHT_STANDING).toBe(26);
+    expect(VIEW_HEIGHT_CROUCHED).toBe(12);
+    expect(VIEW_HEIGHT_STANDING - HULL_MINS[2]).toBe(50);
+    expect(VIEW_HEIGHT_CROUCHED - HULL_MINS[2]).toBe(36);
+  });
+
+  it("stay inside their hulls", () => {
+    expect(VIEW_HEIGHT_STANDING).toBeLessThan(HULL_STANDING_MAXS[2]);
+    expect(VIEW_HEIGHT_CROUCHED).toBeLessThan(HULL_CROUCHED_MAXS[2]);
+  });
+});
+
+describe("water samples (M2 design D-024)", () => {
+  it("sit at feet + 1 and the middle of the standing hull, below both eyes", () => {
+    expect(WATER_SAMPLE_FEET).toBe(1);
+    expect(WATER_SAMPLE_WAIST).toBe(28);
+    expect(WATER_SAMPLE_WAIST * 2).toBe(HULL_STANDING_MAXS[2] - HULL_MINS[2]);
+    expect(WATER_SAMPLE_FEET).toBeLessThan(WATER_SAMPLE_WAIST);
+    expect(WATER_SAMPLE_WAIST).toBeLessThan(VIEW_HEIGHT_CROUCHED - HULL_MINS[2]);
   });
 });

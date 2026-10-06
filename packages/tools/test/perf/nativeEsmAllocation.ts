@@ -1,10 +1,16 @@
 import { PerformanceObserver } from "node:perf_hooks";
 import {
+  accelerate,
+  applyFriction,
+  BUTTON_WALK,
   boxContents,
   boxPlanes,
   buildBrush,
   CONTENTS_SOLID,
   type CollisionBrushSource,
+  CvarRegistry,
+  clipVelocity,
+  cmdScale,
   copyPlayerState,
   createCollisionWorld,
   HULL_CROUCHED_MAXS,
@@ -14,11 +20,15 @@ import {
   Mulberry32,
   PlayerState,
   PlayerStateRing,
+  PMOVE_CVARS,
+  PmoveParams,
   playerStateEquals,
   pointContents,
   positionContents,
   positionTest,
   quantizePlayerState,
+  refreshPmoveParams,
+  registerPmoveCvars,
   rotatedBoxPlanes,
   sanitizeUserCmd,
   snapOrigin,
@@ -175,7 +185,41 @@ function runTrace(n: number): void {
   }
 }
 
+const cvars = new CvarRegistry();
+registerPmoveCvars(cvars);
+// Non-integer values: a double store that boxes shows up here, a small integer would not.
+for (let i = 0; i < PMOVE_CVARS.length; i++) {
+  const r = PMOVE_CVARS[i] as (typeof PMOVE_CVARS)[number];
+  if (r.type === "float") cvars.set(r.name, r.min + (r.max - r.min) * 0.37);
+}
+const params = new PmoveParams();
+const vel = vec3();
+const wish = vec3();
+const normal = vec3(0.6, 0, 0.8);
+
+/** A forced refresh every 16 calls, the unchanged check on the rest, and the docs/03 §4 steps. */
+function runPmoveBasics(n: number): void {
+  for (let i = 0; i < n; i++) {
+    const e = exact[i & (CASES - 1)] as Vec3;
+    if ((i & 15) === 0) params.version = -1;
+    if (refreshPmoveParams(cvars, params)) outcomes[0] = (outcomes[0] as number) + 1;
+    cmd.forward = (i & 255) - 128;
+    cmd.right = ((i * 7) & 255) - 128;
+    cmd.buttons = i & BUTTON_WALK;
+    cmdScale(wish, cmd, 0, (i & 2) !== 0, params);
+    vel[0] = e[0];
+    vel[1] = e[1];
+    vel[2] = e[2] - 50;
+    accelerate(vel, normal, params.runSpeed * 0.5, params.accelerate, 1 / 60);
+    applyFriction(vel, (i & 1) === 0, params, 1 / 60);
+    clipVelocity(vel, vel, normal, params.overclip);
+    if (vel[2] + wish[0] > 0) outcomes[1] = (outcomes[1] as number) + 1;
+    else outcomes[2] = (outcomes[2] as number) + 1;
+  }
+}
+
 const WORKLOADS: Record<string, (n: number) => void> = {
+  pmoveBasics: runPmoveBasics,
   quantize: runQuantize,
   snap: runSnap,
   state: runState,

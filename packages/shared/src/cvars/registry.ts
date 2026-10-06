@@ -59,6 +59,17 @@ export class CvarRegistry {
   /** Keyed by the registered spelling: code reads cvars without allocating a lowercased key. */
   private readonly exact = new Map<string, CvarEntry>();
   private allowCheats = false;
+  private changes = 0;
+
+  /**
+   * Bumped whenever a stored value changes (set, setFromString, reset, applyLatched, the cheat
+   * reset) or a cvar is registered. Readers such as `refreshPmoveParams` compare it with the
+   * version they last copied, so the hot path never looks a cvar up. A set to the current value,
+   * and a LATCH set that only records a pending value, leave it unchanged.
+   */
+  get version(): number {
+    return this.changes;
+  }
 
   register<T extends CvarType>(def: CvarDef<T>): void {
     if (!NAME.test(def.name)) throw new Error(`invalid cvar name "${def.name}"`);
@@ -89,6 +100,7 @@ export class CvarRegistry {
     const entry: CvarEntry = { def: { ...def }, value: normalize(value), latched: undefined };
     this.entries.set(key, entry);
     this.exact.set(def.name, entry);
+    this.changes++;
   }
 
   /** Exact spelling first (no allocation); other spellings from consoles fall back to lowercase. */
@@ -102,6 +114,18 @@ export class CvarRegistry {
 
   get(name: string): CvarValue | undefined {
     return this.lookup(name)?.value;
+  }
+
+  /**
+   * A numeric cvar's value, or `fallback` when it is missing or not a number. For hot readers:
+   * unlike `get`'s `number | … | undefined`, the result stays a raw double, so native ESM doesn't
+   * box it (no undefined to merge with).
+   */
+  getNumber(name: string, fallback: number): number {
+    const entry = this.lookup(name);
+    if (entry === undefined) return fallback;
+    const value = entry.value;
+    return typeof value === "number" ? value : fallback;
   }
 
   info(name: string): CvarInfo | undefined {
@@ -118,7 +142,9 @@ export class CvarRegistry {
     if (on) return;
     for (const entry of this.entries.values()) {
       if (!isCheat(entry)) continue;
-      entry.value = normalize(entry.def.default);
+      const next = normalize(entry.def.default);
+      if (next !== entry.value) this.changes++;
+      entry.value = next;
       entry.latched = undefined;
     }
   }
@@ -127,7 +153,7 @@ export class CvarRegistry {
     const entry = this.lookup(name);
     if (!entry) return { ok: false, error: "unknown" };
     if (isCheat(entry) && !this.allowCheats) return { ok: false, error: "cheat" };
-    return assign(entry, value);
+    return this.assign(entry, value);
   }
 
   setFromString(name: string, text: string): SetResult {
@@ -142,7 +168,7 @@ export class CvarRegistry {
   reset(name: string): SetResult {
     const entry = this.lookup(name);
     if (!entry) return { ok: false, error: "unknown" };
-    return assign(entry, entry.def.default);
+    return this.assign(entry, entry.def.default);
   }
 
   /** Apply pending LATCH values (on map restart). Returns the names that changed, sorted. */
@@ -150,7 +176,10 @@ export class CvarRegistry {
     const applied: string[] = [];
     for (const entry of this.entries.values()) {
       if (entry.latched === undefined) continue;
-      if (entry.latched !== entry.value) applied.push(entry.def.name);
+      if (entry.latched !== entry.value) {
+        applied.push(entry.def.name);
+        this.changes++;
+      }
       entry.value = entry.latched;
       entry.latched = undefined;
     }
@@ -170,6 +199,20 @@ export class CvarRegistry {
   replicated(): CvarInfo[] {
     return this.list().filter((entry) => (entry.def.flags ?? 0) & CvarFlag.REPLICATED);
   }
+
+  private assign(entry: CvarEntry, value: CvarValue): SetResult {
+    if (!matchesType(entry.def.type, value)) return { ok: false, error: "type" };
+    const next = normalize(clampToRange(entry.def, value));
+    const clamped = next !== value;
+    if ((entry.def.flags ?? 0) & CvarFlag.LATCH) {
+      // Setting a LATCH cvar back to its current value cancels any pending change.
+      entry.latched = next === entry.value ? undefined : next;
+      return { ok: true, value: next, clamped, latched: entry.latched !== undefined };
+    }
+    if (next !== entry.value) this.changes++;
+    entry.value = next;
+    return { ok: true, value: next, clamped, latched: false };
+  }
 }
 
 function isCheat(entry: CvarEntry): boolean {
@@ -180,19 +223,6 @@ function byName(a: string, b: string): number {
   const x = a.toLowerCase();
   const y = b.toLowerCase();
   return x < y ? -1 : x > y ? 1 : 0;
-}
-
-function assign(entry: CvarEntry, value: CvarValue): SetResult {
-  if (!matchesType(entry.def.type, value)) return { ok: false, error: "type" };
-  const next = normalize(clampToRange(entry.def, value));
-  const clamped = next !== value;
-  if ((entry.def.flags ?? 0) & CvarFlag.LATCH) {
-    // Setting a LATCH cvar back to its current value cancels any pending change.
-    entry.latched = next === entry.value ? undefined : next;
-    return { ok: true, value: next, clamped, latched: entry.latched !== undefined };
-  }
-  entry.value = next;
-  return { ok: true, value: next, clamped, latched: false };
 }
 
 function matchesType(type: CvarType, value: CvarValue): boolean {
