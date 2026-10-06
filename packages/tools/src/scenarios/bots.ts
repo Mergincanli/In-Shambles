@@ -88,6 +88,89 @@ export function idle(yaw = 0): HoldInput {
   return new HoldInput(yaw, { forward: 0 });
 }
 
+/** One stretch of a PhasedInput script. Axes default to 0, yaw and pitch to the previous phase. */
+export interface InputPhase {
+  /** How many ticks this phase lasts: an integer ≥ 1. The last phase holds for the rest of the run. */
+  readonly ticks: number;
+  readonly forward?: number;
+  readonly right?: number;
+  readonly up?: number;
+  readonly buttons?: number;
+  /** u16; default the previous phase's, 0 for the first. */
+  readonly yaw?: number;
+  /** u16; default the previous phase's, 0 for the first. */
+  readonly pitch?: number;
+}
+
+const PHASE_FIELDS = 7;
+
+/**
+ * A fixed script of input phases, one after the other by tick count, the last one held: the
+ * ladder and water scenarios (MV-17, MV-18) and the feel report use it for "climb, then turn",
+ * "swim, then dive" and the like. The script is copied into one typed array up front, so a tick
+ * allocates nothing.
+ */
+export class PhasedInput implements CmdSource {
+  private readonly table: Int32Array;
+  private readonly count: number;
+  private phase = 0;
+  private left: number;
+
+  constructor(phases: readonly InputPhase[]) {
+    if (phases.length === 0) throw new Error("PhasedInput needs at least one phase");
+    this.count = phases.length;
+    this.table = new Int32Array(PHASE_FIELDS * phases.length);
+    let yaw = 0;
+    let pitch = 0;
+    for (let i = 0; i < phases.length; i++) {
+      const ph = phases[i] as InputPhase;
+      // The table is Int32: a fraction, Infinity or 2^31 and up would truncate or wrap silently.
+      if (!Number.isInteger(ph.ticks) || ph.ticks < 1 || ph.ticks > 0x7fffffff) {
+        throw new Error(`PhasedInput phase ${i} needs an integer ticks in [1, 2^31 - 1]`);
+      }
+      yaw = ph.yaw ?? yaw;
+      pitch = ph.pitch ?? pitch;
+      this.table.set(
+        [
+          ph.ticks,
+          ph.forward ?? 0,
+          ph.right ?? 0,
+          ph.up ?? 0,
+          ph.buttons ?? 0,
+          yaw & 0xffff,
+          pitch,
+        ],
+        PHASE_FIELDS * i,
+      );
+    }
+    this.left = this.table[0] as number;
+  }
+
+  /** Index of the phase the next cmd comes from. */
+  get currentPhase(): number {
+    return this.phase;
+  }
+
+  next(cmd: UserCmd, _ps: PlayerState): void {
+    if (this.left === 0 && this.phase < this.count - 1) {
+      this.phase++;
+      this.left = this.table[PHASE_FIELDS * this.phase] as number;
+    }
+    if (this.left > 0) this.left--;
+    const o = PHASE_FIELDS * this.phase;
+    const t = this.table;
+    setCmd(
+      cmd,
+      t[o + 1] as number,
+      t[o + 2] as number,
+      t[o + 4] as number,
+      t[o + 5] as number,
+      t[o + 6] as number,
+    );
+    cmd.up = t[o + 3] as number;
+  }
+}
+
 export interface HopOptions {
   /** Ticks of plain running before the first jump; default 60 (1 s, at the run cap). */
   readonly runUpTicks?: number;

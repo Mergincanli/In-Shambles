@@ -4,12 +4,14 @@ import {
   ACCEL_GROUND,
   accelerate,
   applyFriction,
+  BUTTON_CROUCH,
   BUTTON_JUMP,
   BUTTON_WALK,
   boxContents,
   boxPlanes,
   buildBrush,
   CONTENTS_SOLID,
+  CONTENTS_WATER,
   type CollisionBrushSource,
   CvarRegistry,
   clipVelocity,
@@ -27,6 +29,7 @@ import {
   PMEV_STEP,
   PMF_CROUCHED,
   PMF_GROUNDED,
+  PMF_ON_LADDER,
   PMOVE_CVARS,
   PmoveEvent,
   PmoveEvents,
@@ -41,6 +44,7 @@ import {
   refreshPmoveParams,
   registerPmoveCvars,
   rotatedBoxPlanes,
+  SURF_LADDER,
   sanitizeUserCmd,
   snapOrigin,
   TICK_DT,
@@ -226,7 +230,7 @@ function runPmoveBasics(n: number): void {
     vel[1] = e[1];
     vel[2] = e[2] - 50;
     accelerate(vel, wish, (i & 4) === 0 ? ACCEL_GROUND : ACCEL_AIR, params, 1 / 60);
-    applyFriction(vel, (i & 1) === 0, params, 1 / 60);
+    applyFriction(vel, (i & 1) === 0, (i & 8) !== 0, (i >> 4) & 3, params, 1 / 60);
     clipVelocity(vel, vel, normal, params);
     if (vel[2] + wish[0] > 0) outcomes[1] = (outcomes[1] as number) + 1;
     else outcomes[2] = (outcomes[2] as number) + 1;
@@ -281,8 +285,7 @@ function runPmove(n: number): void {
     pcmd.buttons = ((i & 31) === 0 ? BUTTON_JUMP : 0) | ((i & 256) !== 0 ? BUTTON_WALK : 0);
     pcmd.yaw = (i * 97) & 0xffff;
     pcmd.pitch = (i * 31) & 0x3fff;
-    if ((i & 1023) === 512) pps.flags |= PMF_CROUCHED;
-    if ((i & 1023) === 0) pps.flags &= ~PMF_CROUCHED;
+    if ((i & 1023) >= 512) pcmd.buttons |= BUTTON_CROUCH;
     pmove(pps, pcmd, room, pmoveParams, TICK_DT, events, (i & 1) === 0 ? traceLog : null);
     if ((pps.flags & PMF_GROUNDED) !== 0) outcomes[0] = (outcomes[0] as number) + 1;
     else outcomes[1] = (outcomes[1] as number) + 1;
@@ -292,6 +295,73 @@ function runPmove(n: number): void {
         outcomes[2] = (outcomes[2] as number) + 1;
       }
     }
+    events.clear();
+    if ((i & 63) === 0) traceLog.clear();
+  }
+}
+
+// A ladder face (the −y side of a wall), a deep pool and open floor for the M2 movement modes.
+const modes = createCollisionWorld([
+  solid(boxPlanes([-1024, -1024, -64], [1024, 1024, 0])),
+  {
+    ...solid(boxPlanes([-128, 200, 0], [128, 264, 512])),
+    surfaceFlags: [0, 0, SURF_LADDER, 0, 0, 0],
+  },
+  { ...solid(boxPlanes([300, -200, 0], [600, 200, 300])), contents: CONTENTS_WATER },
+]);
+/** u16 yaw facing +y, the ladder face. */
+const YAW_NORTH = 16384;
+
+/**
+ * Whole pmove ticks in the M2 modes (D-024): climbing, descending, strafing, turning off and
+ * jumping off the ladder; swimming, sinking, rising and diving in the pool; crouching and
+ * standing on open floor. Outcomes: ladder ticks, swim ticks (water level ≥ 2), crouched ticks.
+ */
+function runPmoveModes(n: number): void {
+  for (let i = 0; i < n; i++) {
+    const phase = ((i / 600) % 3) | 0;
+    const t = i % 600;
+    if (t === 0) {
+      pps.velocity[0] = 0;
+      pps.velocity[1] = 0;
+      pps.velocity[2] = 0;
+      pps.flags = PMF_GROUNDED;
+      pps.waterLevel = 0;
+      pps.origin[2] = 24;
+      if (phase === 0) {
+        pps.origin[0] = ((i >> 4) & 63) - 32;
+        pps.origin[1] = 200 - 16;
+      } else if (phase === 1) {
+        pps.origin[0] = 450;
+        pps.origin[1] = 0;
+        pps.origin[2] = 150;
+        pps.flags = 0;
+      } else {
+        pps.origin[0] = -400;
+        pps.origin[1] = 0;
+      }
+    }
+    pcmd.right = 0;
+    pcmd.pitch = (i * 31) & 0x3fff;
+    if (phase === 0) {
+      pcmd.forward = t < 240 ? 127 : t < 300 ? -127 : t < 360 ? 0 : 127;
+      pcmd.right = t >= 300 && t < 360 ? 127 : 0;
+      pcmd.buttons = t === 420 ? BUTTON_JUMP : 0;
+      // Turns past the facing limit and back.
+      pcmd.yaw = (YAW_NORTH + (t >= 200 && t < 230 ? 12000 : (t & 7) * 900)) & 0xffff;
+    } else if (phase === 1) {
+      pcmd.forward = (t & 64) === 0 ? 127 : 0;
+      pcmd.buttons = (t & 128) !== 0 ? BUTTON_JUMP : (t & 256) !== 0 ? BUTTON_CROUCH : 0;
+      pcmd.yaw = (i * 97) & 0xffff;
+    } else {
+      pcmd.forward = 127;
+      pcmd.buttons = (t & 32) !== 0 ? BUTTON_CROUCH : 0;
+      pcmd.yaw = (i * 53) & 0xffff;
+    }
+    pmove(pps, pcmd, modes, pmoveParams, TICK_DT, events, (i & 1) === 0 ? traceLog : null);
+    if ((pps.flags & PMF_ON_LADDER) !== 0) outcomes[0] = (outcomes[0] as number) + 1;
+    if (pps.waterLevel >= 2) outcomes[1] = (outcomes[1] as number) + 1;
+    if ((pps.flags & PMF_CROUCHED) !== 0) outcomes[2] = (outcomes[2] as number) + 1;
     events.clear();
     if ((i & 63) === 0) traceLog.clear();
   }
@@ -368,6 +438,7 @@ function runStrafeBot(n: number): void {
 
 const WORKLOADS: Record<string, (n: number) => void> = {
   pmove: runPmove,
+  pmoveModes: runPmoveModes,
   pmoveBasics: runPmoveBasics,
   quantize: runQuantize,
   scenario: runScenario,

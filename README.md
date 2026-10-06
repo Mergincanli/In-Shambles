@@ -35,12 +35,13 @@ pnpm typecheck && pnpm lint && pnpm test
 | `pnpm format` | Apply Biome formatting and safe fixes |
 | `pnpm greybox` | Recompile the greybox courses into `content/maps/` (commit the result) |
 | `pnpm bench` | Sim microbenchmarks against the `docs/10` §4.4 budgets (`--strict` exits 1 on a miss) |
+| `pnpm feel-report` | Base movement metrics vs. their targets on `movement_lab`; also writes `reports/feel.md` (git-ignored) |
 
 `pnpm dev:server` runs under pnpm, which doesn't forward signals to the server. To stop it from a script or process manager, signal its process group (Ctrl+C does this), or run the bundle directly with `node packages/server/dist/main.js`.
 
 `pnpm test:browser` uses the Playwright browsers already on the machine. `pnpm exec playwright install chromium firefox webkit` downloads them (CI does this), and `CHROMIUM_PATH` points the Chromium run at another build.
 
-Commands for later milestones (`test:net`, `bots`, `feel-report`, `balance-report`, `mapc`) already exist and print the milestone that adds them. `CLAUDE.md` has the full list.
+Commands for later milestones (`test:net`, `bots`, `balance-report`, `mapc`) already exist and print the milestone that adds them. `CLAUDE.md` has the full list.
 
 ## Layout
 

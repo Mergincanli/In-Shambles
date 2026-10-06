@@ -7,7 +7,7 @@ import { PmoveTraceLog } from "../../../src/sim/pmove/debug";
 import { PmoveParams } from "../../../src/sim/pmove/params";
 import { lastPmoveSnap, pmove } from "../../../src/sim/pmove/pmove";
 import { ground } from "../../../src/sim/pmove/scratch";
-import { BUTTON_JUMP, BUTTON_WALK, UserCmd } from "../../../src/sim/usercmd";
+import { BUTTON_CROUCH, BUTTON_JUMP, BUTTON_WALK, UserCmd } from "../../../src/sim/usercmd";
 import { TICK_DT } from "../../../src/time";
 import { MASK_PLAYERSOLID } from "../../../src/world/contents";
 import { rotatedBoxPlanes, wedgePlanes } from "../../../src/world/shapes";
@@ -99,6 +99,7 @@ describe("pmove random-input property (M2 design §5)", () => {
     let previousStreak = 0;
     let worstStreak = 0;
     let solidTicks = 0;
+    let crouched = 0;
     let speedups = 0;
     let flatChecks = 0;
     let yawRate = 0;
@@ -117,18 +118,11 @@ describe("pmove random-input property (M2 design §5)", () => {
         c.forward = axis();
         c.right = axis();
         c.buttons =
-          (rng.nextFloat() < 0.35 ? BUTTON_JUMP : 0) | (rng.nextFloat() < 0.15 ? BUTTON_WALK : 0);
+          (rng.nextFloat() < 0.35 ? BUTTON_JUMP : 0) |
+          (rng.nextFloat() < 0.15 ? BUTTON_WALK : 0) |
+          (rng.nextFloat() < 0.2 ? BUTTON_CROUCH : 0);
         yawRate = rng.nextInt(1201) - 600;
         c.pitch = (rng.nextInt(32402) - 16201) & 0xffff;
-        // Crouch only changes the hull; the transition logic is M2 increment 5.
-        if (rng.nextFloat() < 0.2) ps.flags ^= PMF_CROUCHED;
-      }
-      // Toggling crouch above is only legal where standing fits; undo it otherwise.
-      if (
-        (ps.flags & PMF_CROUCHED) === 0 &&
-        !positionTest(world, ps.origin, HULL_MINS, HULL_STANDING_MAXS, MASK_PLAYERSOLID)
-      ) {
-        ps.flags |= PMF_CROUCHED;
       }
       c.yaw = (c.yaw + yawRate) & 0xffff;
       c.tick = t;
@@ -136,6 +130,7 @@ describe("pmove random-input property (M2 design §5)", () => {
       pmove(ps, c, world, p, TICK_DT, ev, (t & 7) === 0 ? log : null);
       const maxs = (ps.flags & PMF_CROUCHED) !== 0 ? HULL_CROUCHED_MAXS : HULL_STANDING_MAXS;
       if (!positionTest(world, ps.origin, HULL_MINS, maxs, MASK_PLAYERSOLID)) solidTicks++;
+      if ((ps.flags & PMF_CROUCHED) !== 0) crouched++;
       const snap = lastPmoveSnap();
       snaps[snap] = (snaps[snap] as number) + 1;
       previousStreak = snap === SNAP_PREVIOUS ? previousStreak + 1 : 0;
@@ -173,6 +168,8 @@ describe("pmove random-input property (M2 design §5)", () => {
     expect(steps).toBeGreaterThan(0);
     expect(flatChecks).toBeGreaterThan(2000);
     expect(grounded).toBeGreaterThan(3000);
+    // Crouch comes from BUTTON_CROUCH through the crouch pre-check, stand-ups included.
+    expect(crouched).toBeGreaterThan(1000);
     expect(grounded).toBeLessThan(9500);
     expect(snaps[SNAP_ROUNDED]).toBeGreaterThan(5000);
     expect(snaps[SNAP_CORNER]).toBeGreaterThan(0);

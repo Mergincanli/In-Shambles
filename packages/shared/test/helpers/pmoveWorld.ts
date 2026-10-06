@@ -41,6 +41,7 @@ export function player(x: number, y: number, floor = 0): PlayerState {
 export interface CmdInit {
   forward?: number;
   right?: number;
+  up?: number;
   buttons?: number;
   yaw?: number;
   pitch?: number;
@@ -50,6 +51,7 @@ export function cmd(init: CmdInit = {}): UserCmd {
   const c = new UserCmd();
   c.forward = init.forward ?? 0;
   c.right = init.right ?? 0;
+  c.up = init.up ?? 0;
   c.buttons = init.buttons ?? 0;
   c.yaw = init.yaw ?? 0;
   c.pitch = init.pitch ?? 0;

@@ -3,7 +3,8 @@ import { describe, expect, it } from "vitest";
 import { fromRoot } from "../../src/paths";
 
 // The per-tick paths (quantizePlayerState, snapOrigin, the state ring, copy/equals,
-// sanitizeUserCmd, the pmove params refresh and basics, whole pmove ticks, the scenario runner
+// sanitizeUserCmd, the pmove params refresh and basics, whole pmove ticks in every M2 move mode,
+// the scenario runner
 // and bots, and the BVH queries)
 // must not allocate under native ES modules either, where V8 boxes a double returned by a call it
 // doesn't inline or joined with a module constant in a ternary. Vitest's module runner hides
@@ -51,6 +52,12 @@ describe("per-tick paths under native ES modules", () => {
 
   it("whole pmove ticks allocate nothing, with events and the trace log attached", () => {
     const r = runChild("pmove");
+    for (const n of r.outcomes) expect(n).toBeGreaterThan(0);
+    expect(r.clean, r.attempts.join("; ")).toBe(true);
+  }, 30_000);
+
+  it("pmove ticks on ladders, in water and crouched allocate nothing (D-024)", () => {
+    const r = runChild("pmoveModes");
     for (const n of r.outcomes) expect(n).toBeGreaterThan(0);
     expect(r.clean, r.attempts.join("; ")).toBe(true);
   }, 30_000);

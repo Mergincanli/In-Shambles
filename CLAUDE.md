@@ -77,7 +77,7 @@ docs/       specs, roadmap, decisions, handoffs.
 | `pnpm balance-report` | Hits-to-kill / TTK tables |
 | `pnpm mapc` | TrenchBroom `.map` compiler |
 
-Until their milestone, these are stubs that print "added in M#": `test:net`, `feel-report` (M2); `bots` (M3); `mapc` (M5); `balance-report` (M6). Until M2, `pnpm dev` serves the client only.
+Until their milestone, these are stubs that print "added in M#": `test:net` (M2); `bots` (M3); `mapc` (M5); `balance-report` (M6). Until M2, `pnpm dev` serves the client only.
 
 ## Conventions
 

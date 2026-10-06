@@ -108,7 +108,7 @@ packages/tools/src/
   vectors/             determinism test vectors for packages/shared/test/vectors (pnpm --filter @game/tools vectors)
   code/                source scanner (code vs. strings/comments) and the D-016 banned-math list, for the guards
   bots/                headless clients
-  reports/             feel-report, balance-report
+  reports/             feel-report (M2, feelReport.ts; cli.ts is pnpm feel-report), balance-report
   replay/              demo inspection
   docs/                Markdown section/table parsing for doc-golden tests (BAL-01)
   content/             content-vs-docs helpers (weapon IDs, damage table)

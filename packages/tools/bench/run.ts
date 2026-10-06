@@ -23,7 +23,7 @@ const { values } = parseArgs({
     warmup: { type: "string", default: "100000" },
     // pmove: match ticks of PMOVE_PLAYERS players each.
     "pmove-ticks": { type: "string", default: "12500" },
-    "pmove-warmup": { type: "string", default: "6250" },
+    "pmove-warmup": { type: "string", default: "12500" },
   },
 });
 

@@ -232,12 +232,12 @@ const testFiles = readdirSync(fromRoot("packages"), { recursive: true, encoding:
   .map((file) => join(fromRoot("packages"), file));
 
 /**
- * prefix, root script, IDs that must have a file. MV lists the IDs landed so far; M2 increments
- * 5 and 6 add 08, 17, 18 and 19. NET has none yet: its files land with NET-03.
+ * prefix, root script, IDs that must have a file. MV lists the IDs landed so far; M2 increment 6
+ * adds 19. NET has none yet: its files land with NET-03.
  */
 const ID_SUITES = [
   ["BAL", "test:balance", ["01"]],
-  ["MV", "test:movement", ["01", "03", "04", "05", "06", "07"]],
+  ["MV", "test:movement", ["01", "03", "04", "05", "06", "07", "08", "17", "18"]],
   ["NET", "test:net", []],
 ] as const;
 
@@ -275,8 +275,8 @@ describe.each(ID_SUITES)("naming of the %s-NN test files", (prefix, script, requ
 });
 
 describe("stub scripts", () => {
-  // CLAUDE.md: "Until their milestone, these are stubs that print "added in M#": `test:net`,
-  // `feel-report` (M2); ..."
+  // CLAUDE.md: "Until their milestone, these are stubs that print "added in M#": `test:net`
+  // (M2); ..."
   const sentence = /Until their milestone, these are stubs[^\n]*/.exec(claudeMd)?.[0] ?? "";
   const documented = new Map(
     sentence.split(";").flatMap((part) => {

@@ -177,19 +177,19 @@ describe("accelerate (docs/03 §4.3)", () => {
 describe("applyFriction (docs/03 §4.2, ground)", () => {
   it("removes max(s, pm_stopSpeed) · pm_friction · dt of horizontal speed", () => {
     const v = vec3(300, 0, 0);
-    applyFriction(v, true, p, TICK_DT);
+    applyFriction(v, true, false, 0, p, TICK_DT);
     expect(v[0]).toBeCloseTo(300 - (300 * 6) / 60, 10);
   });
 
   it("uses the pm_stopSpeed floor at low speed", () => {
     const v = vec3(50, 0, 0);
-    applyFriction(v, true, p, TICK_DT);
+    applyFriction(v, true, false, 0, p, TICK_DT);
     expect(v[0]).toBeCloseTo(50 - (100 * 6) / 60, 10);
   });
 
   it("scales the whole velocity by the horizontal factor", () => {
     const v = vec3(300, 400, 60);
-    applyFriction(v, true, p, TICK_DT);
+    applyFriction(v, true, false, 0, p, TICK_DT);
     const k = (500 - (500 * 6) / 60) / 500;
     expect(v[0]).toBeCloseTo(300 * k, 10);
     expect(v[1]).toBeCloseTo(400 * k, 10);
@@ -198,16 +198,16 @@ describe("applyFriction (docs/03 §4.2, ground)", () => {
 
   it("zeroes the horizontal velocity below 1 u/s and keeps vertical", () => {
     const v = vec3(0.6, -0.7, -12);
-    applyFriction(v, true, p, TICK_DT);
+    applyFriction(v, true, false, 0, p, TICK_DT);
     expect([...v]).toEqual([0, 0, -12]);
   });
 
   it("applies the full term from exactly 1 u/s, which scales vertical too", () => {
     const v = vec3(1, 0, -12);
-    applyFriction(v, true, p, TICK_DT); // drop 10 > s = 1: k = 0
+    applyFriction(v, true, false, 0, p, TICK_DT); // drop 10 > s = 1: k = 0
     for (const x of v) expect(Object.is(x, 0)).toBe(true);
     const w = vec3(0.999, 0, -12);
-    applyFriction(w, true, p, TICK_DT);
+    applyFriction(w, true, false, 0, p, TICK_DT);
     expect([...w]).toEqual([0, 0, -12]);
   });
 
@@ -222,7 +222,7 @@ describe("applyFriction (docs/03 §4.2, ground)", () => {
       [vec3(-320, 120, -7), big],
     ];
     for (const [v, params] of cases) {
-      applyFriction(v, true, params, TICK_DT);
+      applyFriction(v, true, false, 0, params, TICK_DT);
       for (const x of v) expect(Object.is(x, 0), String([...v])).toBe(true);
     }
   });
@@ -232,7 +232,7 @@ describe("applyFriction (docs/03 §4.2, ground)", () => {
     for (let i = 0; i < 2000; i++) {
       const v = vec3(rng.nextFloat() * 800 - 400, rng.nextFloat() * 800 - 400, 0);
       const before = vec3(v[0], v[1], v[2]);
-      applyFriction(v, true, p, TICK_DT);
+      applyFriction(v, true, false, 0, p, TICK_DT);
       expect(vec3Dot(v, before)).toBeGreaterThanOrEqual(0);
       expect(vec3Length(v)).toBeLessThanOrEqual(vec3Length(before));
     }
@@ -242,17 +242,64 @@ describe("applyFriction (docs/03 §4.2, ground)", () => {
     const v = vec3(320, 0, 0);
     let ticks = 0;
     while (v[0] > 0 && ticks < 600) {
-      applyFriction(v, true, p, TICK_DT);
+      applyFriction(v, true, false, 0, p, TICK_DT);
       ticks++;
     }
     expect(ticks).toBeLessThan(60);
     expect(v[0]).toBe(0);
   });
 
-  it("does nothing off the ground", () => {
+  it("does nothing off the ground and out of the water, not even to a slow velocity", () => {
     const v = vec3(300, 0.5, -20);
-    applyFriction(v, false, p, TICK_DT);
+    applyFriction(v, false, false, 0, p, TICK_DT);
     expect([...v]).toEqual([300, 0.5, -20]);
+    const slow = vec3(0.5, 0, 0);
+    applyFriction(slow, false, true, 0, p, TICK_DT);
+    expect([...slow]).toEqual([0.5, 0, 0]);
+  });
+});
+
+describe("applyFriction (docs/03 §4.2, water and 3D speed)", () => {
+  it("adds s · pm_waterFriction · waterLevel · dt to the ground term", () => {
+    for (const level of [1, 2, 3]) {
+      const v = vec3(300, 0, 0);
+      applyFriction(v, true, false, level, p, TICK_DT);
+      expect(v[0]).toBeCloseTo(300 - (300 * 6) / 60 - (300 * 1 * level) / 60, 10);
+    }
+  });
+
+  it("swims on the water term alone, measured on the 3D speed", () => {
+    const v = vec3(0, 0, -60);
+    applyFriction(v, false, true, 3, p, TICK_DT);
+    expect(v[2]).toBeCloseTo(-60 * (1 - 3 / 60), 10);
+    // Horizontal-only measure would see s = 0 and zero nothing but the horizontal part.
+    const w = vec3(30, 0, 40);
+    applyFriction(w, false, true, 2, p, TICK_DT);
+    const k = (50 - (50 * 2) / 60) / 50;
+    expect(w[0]).toBeCloseTo(30 * k, 10);
+    expect(w[2]).toBeCloseTo(40 * k, 10);
+  });
+
+  it("uses the 3D speed for the ladder's ground term, so a vertical climb has friction", () => {
+    const v = vec3(0, 0, 160);
+    applyFriction(v, true, true, 0, p, TICK_DT);
+    expect(v[2]).toBeCloseTo(160 - (160 * 6) / 60, 10);
+  });
+
+  it("zeroes the whole velocity below 1 u/s in 3D", () => {
+    const v = vec3(0.5, -0.5, 0.5);
+    applyFriction(v, false, true, 1, p, TICK_DT);
+    expect([...v]).toEqual([0, 0, 0]);
+  });
+
+  it("keeps the walk caps in wading water: the water term stays below one tick's acceleration", () => {
+    // At the run, walk and crouch caps, ground plus level-1 water friction removes less than
+    // pm_accelerate · dt · cap, so the walk still reaches exactly the cap (MV-01/03 hold in water).
+    for (const cap of [320, 160, 80]) {
+      const v = vec3(cap, 0, 0);
+      applyFriction(v, true, false, 1, p, TICK_DT);
+      expect(cap - (v[0] as number)).toBeLessThan((10 * cap) / 60);
+    }
   });
 });
 

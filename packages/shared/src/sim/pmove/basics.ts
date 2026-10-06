@@ -83,25 +83,35 @@ export function accelerate(
 }
 
 /**
- * Friction (docs/03 §4.2). `onGround` selects the ground term: the caller passes true when
- * walking on ground that isn't slick. It uses the horizontal speed s: below 1 u/s the horizontal
- * velocity is zeroed; otherwise the whole velocity is scaled by max(s − drop, 0) / s with
- * drop = max(s, pm_stopSpeed) · pm_friction · dt, so friction never reverses the velocity.
+ * Friction (docs/03 §4.2), in place. Two terms, each skipped when its switch is off:
+ * - ground (`groundTerm`: walking on ground that isn't slick, or on a ladder):
+ *   drop = max(s, pm_stopSpeed) · pm_friction · dt;
+ * - water (`waterLevel` 1–3): drop += s · pm_waterFriction · waterLevel · dt.
+ *
+ * The walk move measures s as the horizontal speed (`full3D` false; below 1 u/s the horizontal
+ * velocity is zeroed); the swim and ladder moves use the full 3D speed (below 1 u/s the whole
+ * velocity is zeroed). Otherwise the velocity is scaled by max(s − drop, 0) / s, so friction
+ * never reverses it. With neither term nothing changes, not even a slow velocity.
  */
 export function applyFriction(
   v: Vec3,
-  onGround: boolean,
+  groundTerm: boolean,
+  full3D: boolean,
+  waterLevel: number,
   p: Readonly<PmoveParams>,
   dt: number,
 ): void {
-  if (!onGround) return;
-  const s = Math.sqrt(v[0] * v[0] + v[1] * v[1]);
+  if (!groundTerm && waterLevel <= 0) return;
+  const vz = full3D ? v[2] : 0;
+  const s = Math.sqrt(v[0] * v[0] + v[1] * v[1] + vz * vz);
   if (s < 1) {
     v[0] = 0;
     v[1] = 0;
+    if (full3D) v[2] = 0;
     return;
   }
-  const drop = Math.max(s, p.stopSpeed) * p.friction * dt;
+  let drop = groundTerm ? Math.max(s, p.stopSpeed) * p.friction * dt : 0;
+  if (waterLevel > 0) drop += s * p.waterFriction * waterLevel * dt;
   const k = Math.max(s - drop, 0) / s;
   // + 0: a stop (k = 0) must not leave −0 behind.
   v[0] = v[0] * k + 0;

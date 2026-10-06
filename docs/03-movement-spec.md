@@ -94,11 +94,11 @@ Inputs: the previous `PlayerState` and the `UserCmd` for this tick (`docs/05` §
 - The hull changes only in the pre-checks, at the tick's start origin.
 
 1. **Copy view angles** from the cmd and compute forward/right/up vectors.
-2. **Pre-checks:**
-   - water level (0 = dry, 1 = feet, 2 = waist, 3 = submerged) from content samples at feet, waist and eyes
-   - ladder contact
-   - crouch transitions (try to stand if crouch released; stay crouched if the standing hull doesn't fit)
-   - limp state
+2. **Pre-checks**, in this order, at the tick's start origin (D-024):
+   - crouch transitions (try to stand if crouch released; stay crouched if the standing hull doesn't fit), which pick the tick's hull
+   - water level (0 = dry, 1 = feet, 2 = waist, 3 = submerged) from content samples at feet, waist and eyes (§4.13), the eyes for the stance just picked
+   - ladder contact (§4.14), probed with that hull
+   - limp state (M4)
 3. **Ground trace** (§4.10). If the player was airborne last tick and is grounded now, run **landing** (§5.6/§5.7): fall damage, goomba, slide entry check.
 4. **Mode dispatch** (first match wins):
    1. `climbing` → ledge climb (§5.5)
@@ -133,6 +133,7 @@ The wish velocity is built from `f` and `r` along the movement basis, so diagona
   - If `s < 1`, zero the horizontal velocity.
   - Otherwise: `control = max(s, stopSpeed)`, `drop = control × friction × dt`, `newSpeed = max(s − drop, 0)`, and scale the velocity by `newSpeed / s`.
 - Water adds `drop += s × waterFriction × waterLevel × dt` (use full 3D speed in water).
+  - In M2 (D-024) the walk move measures `s` as the horizontal speed for both terms, so wading (level 1) only adds the water term to its ground friction; the run, walk and crouch caps are unchanged, because at each cap the two terms together remove less than one tick of `pm_accelerate`. The swim move (§4.13) uses the water term alone on the 3D speed, and the ladder move (§4.14) uses the ground term on the 3D speed; below 1 u/s of 3D speed they zero the whole velocity.
 - Sliding uses `slideFriction` instead of `friction` and **no** `stopSpeed` floor.
 
 ### 4.3 Accelerate (identical for ground and air; only the coefficient differs)
@@ -228,25 +229,42 @@ The 0.99 and 0.1 u/s thresholds are design constants (`SLIDE_SAME_PLANE`, `SLIDE
 ### 4.12 Crouch
 - Holding crouch switches to the crouched hull immediately (shrinks from the top).
 - Releasing tries to stand: sweep-test the standing hull at the current origin; stay crouched if blocked.
+  - In M2 both happen only in the pre-check at the tick's start origin (D-023, D-024): the stand test is a position test of the standing hull there, so a player walking out of a low tunnel stands on the first tick whose start origin is clear. `PMF_CROUCHED` holds the stance.
 - **Crouch-down costs stamina** (§5.2); standing up is free.
 - Crouch speed = `runSpeed × duckScale`.
 - Crouch gives **no** weapon accuracy bonus (`docs/04`).
 
 ### 4.13 Water
+- **Water level** (D-024): `pointContents` samples on the origin's vertical, counted from the feet (the hull bottom, origin z − 24): feet + 1 u, feet + 28 u (the middle of the standing hull) and the eye, feet + 50 u standing or feet + 36 u crouched (origin + 26 / + 12, §2). Each level needs the samples below it: 1 = feet, 2 = waist, 3 = eyes under water. `PMF_IN_WATER` is set at level ≥ 1. The sample heights are design constants (`WATER_SAMPLE_FEET`, `WATER_SAMPLE_WAIST`), not ESTIMATEs. It is computed in the pre-check and again after the move.
 - **Water level ≥ 2 → swim:**
   - Wish velocity uses the full 3D view vectors. **Jump = up, crouch = down** (UrT), so the player can strafe and aim like on ground.
+    - Forward and right go along the 3D view forward and right; the vertical axis is world z: jump adds +127 and crouch −127 to the cmd's up axis (clamped to ±127), and the three axes go through command scale (§4.1) together, without the crouch factor.
+    - World z is not orthogonal to a pitched view forward, so the summed wish is capped at the speed command scale picked (never stretched): forward + jump looking straight up swims at 160 u/s, not √2 × 160.
   - Speed scaled by `swimScale`.
   - With no input, sink slowly (wish z = −`pm_waterSinkSpeed`, 60 u/s, ESTIMATE).
+    - "No input" means the forward, right and vertical axes are all 0; jump and crouch held together cancel, so they sink too. The sink wish is not scaled by `swimScale`.
+  - No gravity. Friction is the water term only (§4.2), acceleration `pm_waterAccelerate`, then a step-slide without gravity (§4.9; against the floor plane when grounded), so a swimmer at the surface can climb out over an edge up to `pm_stepSize` high. Jump in the swim move swims; it never starts a ground jump.
+  - Rising to the surface: once the waist sample leaves the water (level 1) the player is in air or walk moves again, falls back and swims up again, bobbing with the waist at the surface. **Water-jump** (climbing out of deep water onto a high edge) is M4.
 - Friction per §4.2; acceleration `waterAccelerate`. **No sprint. No stamina regen.**
 - **Breath** (FACT): 16 s of air while submerged (level 3), refilled instantly on surfacing. After it runs out, drowning kills in 8 s (≈12.5 HP/s).
 
 ### 4.14 Ladders
 - **Ladder contact:** the hull touches a ladder-flagged surface **and** the player faces it (dot(forward, −normal) > `pm_ladderFacing`, 0.5, ESTIMATE). Turning away too far detaches.
+  - **Detection** (D-024): the pre-check sweeps the tick's hull horizontally `pm_ladderReach` (2 u, ESTIMATE) along the yaw-only forward (pitch is ignored). Contact means the sweep hits a plane with the `SURF_LADDER` face flag and dot(forward, −n) > `pm_ladderFacing`. Only the face flag counts; `CONTENTS_LADDER` volumes stay reserved and are ignored by movement.
+  - **No attach while moving away:** a player whose velocity leaves the face faster than 16 u/s (v·n > `LADDER_DETACH_SPEED`, a design constant) does not attach, so a jump-off never re-attaches on the next tick.
+  - **On the ground** the ladder engages only while forward is held (forward > 0); standing at its foot or walking back from it is walking.
+  - `PMF_ON_LADDER` holds the contact for the tick.
 - On the ladder:
   - **forward = up, back = down**, regardless of pitch (FACT); strafe moves sideways along it.
+    - The wish is the cmd's forward axis on world z plus its right axis along the view right projected onto the face plane, through command scale (§4.1, without the crouch factor), times `pm_ladderScale`.
   - No gravity while attached; ladder speed = `runSpeed × pm_ladderScale` (0.5, ESTIMATE).
+    - Friction is the ground term on the 3D speed (§4.2), without the water term even where the ladder reaches into water, and acceleration `pm_accelerate`, so the climb converges to exactly the ladder speed and stops within about 0.4 s of letting go; then a slide move without gravity or ground plane.
   - Jumping off pushes away along the ladder normal (`pm_ladderJumpPush`, 150 u/s, ESTIMATE).
+    - It takes a fresh jump press (the `jumpHeld` edge, §4.11, or `pm_autoHop`), adds n × `pm_ladderJumpPush` to the velocity, detaches at once and emits `jump`.
   - No slide-down.
+  - **At the top** the hull rises past the face, the next probe misses, and the climb ends in an air move that carries the player over the edge onto the top (MV-18: `ladder_base` to `ladder_top`, 384 u, in about 3.1 s).
+  - Ladder faces are vertical walls in M2; climbing is straight up world z whatever the face's tilt.
+  - **Known limit (open, D-024):** a ladder cannot be mounted from its top. Walking backward off the top edge toward the face leaves it faster than `LADDER_DETACH_SPEED`, so contact is refused and the player falls.
 - Climbing is free (no stamina).
 
 ## 5. UrT mechanics layer

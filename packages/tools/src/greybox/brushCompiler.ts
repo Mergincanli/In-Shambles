@@ -23,8 +23,11 @@ import {
  */
 
 export const GREYBOX_COMPILER_NAME = "greybox";
-/** Bumped whenever the output changes on purpose, which explains a changed committed .cmap. */
-export const GREYBOX_COMPILER_VERSION = 1;
+/**
+ * Bumped whenever the output changes on purpose, which explains a changed committed .cmap.
+ * 2: ladder() emits no LADDER volume and puts the rung material on its face (D-024).
+ */
+export const GREYBOX_COMPILER_VERSION = 2;
 
 /**
  * World units per uv unit. Every face is projected onto the plane of its normal's dominant axis

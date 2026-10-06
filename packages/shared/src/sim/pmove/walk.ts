@@ -1,10 +1,8 @@
 import { type Vec3, vec3 } from "../../math/vec3";
 import type { CollisionWorld } from "../../world/collisionWorld";
-import { MASK_PLAYERSOLID, SURF_SLICK } from "../../world/contents";
-import { positionTest } from "../../world/trace";
+import { SURF_SLICK } from "../../world/contents";
 import { ENTITY_NONE } from "../entity";
 import { PMEV_JUMP, type PmoveEvents } from "../events";
-import { HULL_MINS, HULL_STANDING_MAXS } from "../hull";
 import {
   type PlayerState,
   PMF_CLIMBING,
@@ -21,6 +19,7 @@ import {
   clipVelocity,
   cmdScale,
 } from "./basics";
+import { canStand } from "./crouch";
 import type { PmoveTraceLog } from "./debug";
 import type { PmoveParams } from "./params";
 import { ground, moveAxes, viewForward, viewRight, wishVel } from "./scratch";
@@ -68,12 +67,7 @@ export function checkJump(
   if ((cmd.buttons & BUTTON_JUMP) === 0) return false;
   if ((flags & PMF_JUMP_HELD) !== 0 && p.autoHop !== 1) return false;
   if ((flags & PMF_GROUNDED) === 0 || (flags & PMF_CLIMBING) !== 0) return false;
-  if (
-    (flags & PMF_CROUCHED) !== 0 &&
-    !positionTest(world, ps.origin, HULL_MINS, HULL_STANDING_MAXS, MASK_PLAYERSOLID)
-  ) {
-    return false;
-  }
+  if ((flags & PMF_CROUCHED) !== 0 && !canStand(world, ps.origin)) return false;
   ps.velocity[2] = p.jumpVelocity;
   ps.flags = (flags & ~PMF_GROUNDED) | PMF_JUMP_HELD;
   ps.groundEntity = ENTITY_NONE;
@@ -86,7 +80,8 @@ export function checkJump(
 
 /**
  * Walk move (docs/03 §4.4), grounded. The jump check comes first, so a jump on the landing tick
- * skips ground friction. Then friction (none on slick ground), a wish along the view yaw
+ * skips ground friction. Then friction (no ground term on slick ground; the water term in wading
+ * water, docs/03 §4.2), a wish along the view yaw
  * flattened onto the ground plane, acceleration (pm_airAccelerate on slick ground), and the
  * velocity laid back onto the ground plane at its old magnitude, so walking up or down a slope
  * keeps its speed. A step-slide without gravity moves it; no horizontal velocity means a stop.
@@ -109,7 +104,7 @@ export function walkMove(
   const v = ps.velocity;
   const n = ground.normal;
   const slick = (ground.surfaceFlags & SURF_SLICK) !== 0;
-  applyFriction(v, !slick, p, dt);
+  applyFriction(v, !slick, false, ps.waterLevel, p, dt);
   cmdScale(moveAxes, cmd, 0, (ps.flags & PMF_CROUCHED) !== 0, p);
 
   // The basis follows the ground plane under the view yaw.

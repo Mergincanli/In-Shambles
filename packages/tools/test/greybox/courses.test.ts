@@ -34,7 +34,7 @@ import { describe, expect, it } from "vitest";
 import { encodeCmap } from "../../src/greybox/cmapEncode";
 import { COURSE_MAP_DIR, COURSES, courseFileName } from "../../src/greybox/courses";
 import { MATERIAL_FLOOR_ALT } from "../../src/greybox/courses/common";
-import { MATERIAL_FLOOR } from "../../src/greybox/MapBuilder";
+import { MATERIAL_FLOOR, MATERIAL_LADDER_FACE } from "../../src/greybox/MapBuilder";
 import { fromRoot } from "../../src/paths";
 import { courseAnchors, coursePath, loadCourse, type P3 } from "../../src/scenarios/course";
 
@@ -519,18 +519,24 @@ describe("movement_lab fixtures", () => {
     expect(groundZ(world, anchor("water_deep", course))).toBe(-128);
   });
 
-  it("has a ladder: a LADDER volume in front of a SURF_LADDER wall face", () => {
-    const { world } = loadCourse(course);
+  it("has a ladder: a SURF_LADDER wall face with the rung texture, and no LADDER volume (D-024)", () => {
+    const { world, cmap } = loadCourse(course);
     const base = anchor("ladder_base", course);
     const o = rest(base);
     const mins = vec3(o[0] - 15, o[1] - 15, o[2] - 24);
     const maxs = vec3(o[0] + 15, o[1] + 15, o[2] + 32);
-    expect(boxContents(world, mins, maxs) & CONTENTS_LADDER).toBe(CONTENTS_LADDER);
+    expect(boxContents(world, mins, maxs) & CONTENTS_LADDER).toBe(0);
+    expect([...cmap.brushes.contents].some((c) => (c & CONTENTS_LADDER) !== 0)).toBe(false);
     const tr = ray(world, o, rest(base, 0, 64));
     expect(tr.fraction).toBeLessThan(1);
     expect([...tr.normal]).toEqual([0, -1, 0]);
     expect(tr.surfaceFlags & SURF_LADDER).toBe(SURF_LADDER);
     expect(tr.contents).toBe(CONTENTS_SOLID);
+    expect(cmap.materials[cmap.planeMaterial[tr.plane] as number]).toBe(MATERIAL_LADDER_FACE);
+    // The standing hull at the base is 1 u from the face: within pm_ladderReach (2 u, D-024).
+    const reach = sweep(world, o, rest(base, 0, 2), HULL_STANDING_MAXS);
+    expect(reach.fraction).toBeLessThan(1);
+    expect(reach.surfaceFlags & SURF_LADDER).toBe(SURF_LADDER);
     expect(groundZ(world, anchor("ladder_top", course))).toBeGreaterThanOrEqual(256);
   });
 

@@ -35,10 +35,10 @@ import {
 } from "../../src/greybox/brushCompiler";
 import { encodeCmap } from "../../src/greybox/cmapEncode";
 import {
-  LADDER_VOLUME_DEPTH,
   MATERIAL_CLIP,
   MATERIAL_FLOOR,
   MATERIAL_LADDER,
+  MATERIAL_LADDER_FACE,
   MATERIAL_TRIGGER,
   MATERIAL_WALL,
   MATERIAL_WATER,
@@ -137,7 +137,7 @@ describe("MapBuilder primitives", () => {
     expect(faceMaterials(d, 1)).toEqual(Array(6).fill(MATERIAL_FLOOR));
   });
 
-  it("stairs and ladders that fail part-way add none of their brushes", () => {
+  it("stairs that fail part-way, and ladders that fail, add none of their brushes", () => {
     const m = lab();
     m.box({ min: [0, 0, -16], max: [64, 64, 0] });
     // Step 3 reaches past the world limit.
@@ -151,10 +151,9 @@ describe("MapBuilder primitives", () => {
       }),
     ).toThrow(/^unit_lab brush 4 \(stairs step 3\): .*world limit/);
     expect(m.brushCount).toBe(1);
-    // The wall is fine, its volume is not.
     expect(() =>
-      m.ladder({ wallMin: [16000, 0, 0], wallMax: [16380, 64, 64], face: "+x" }),
-    ).toThrow(/^unit_lab brush 2 \(ladder volume\): /);
+      m.ladder({ wallMin: [16000, 0, 0], wallMax: [16390, 64, 64], face: "+x" }),
+    ).toThrow(/^unit_lab brush 1 \(ladder wall\): /);
     expect(m.brushCount).toBe(1);
     expect(m.compile().brushes.contents.length).toBe(1);
   });
@@ -421,46 +420,47 @@ describe("MapBuilder primitives", () => {
     expect(glass.compile().materials).toEqual(["grey/glass"]);
   });
 
-  it("ladder: SURF_LADDER on the wall face and a 16 u LADDER volume in front of it", () => {
-    expect(LADDER_VOLUME_DEPTH).toBe(16);
+  it("ladder: SURF_LADDER and the rung texture on the wall face, no LADDER volume (D-024)", () => {
     const m = lab();
     m.ladder({ wallMin: [900, 0, 0], wallMax: [916, 64, 256], face: "-x" });
     m.ladder({ wallMin: [0, 500, 0], wallMax: [64, 516, 128], face: "+y", material: "grey/brick" });
     const cmap = m.compile();
-    expect([...cmap.brushes.contents]).toEqual([
-      CONTENTS_SOLID,
-      CONTENTS_LADDER,
-      CONTENTS_SOLID,
-      CONTENTS_LADDER,
-    ]);
+    expect([...cmap.brushes.contents]).toEqual([CONTENTS_SOLID, CONTENTS_SOLID]);
     expect(faceFlags(cmap, 0)).toEqual([SURF_LADDER, 0, 0, 0, 0, 0]);
-    expect(bounds(cmap, 1)).toEqual([884, 0, 0, 900, 64, 256]);
-    expect(faceFlags(cmap, 1)).toEqual(Array(6).fill(0));
-    expect(faceFlags(cmap, 2)).toEqual([0, 0, 0, SURF_LADDER, 0, 0]);
-    expect(bounds(cmap, 3)).toEqual([0, 516, 0, 64, 532, 128]);
-    expect(faceMaterials(cmap, 2)).toEqual(Array(6).fill("grey/brick"));
-    expect(faceMaterials(cmap, 3)).toEqual(Array(6).fill(MATERIAL_LADDER));
-    // The wall renders, the volume does not.
+    expect(faceMaterials(cmap, 0)).toEqual([MATERIAL_LADDER_FACE, ...Array(5).fill(MATERIAL_WALL)]);
+    expect(faceFlags(cmap, 1)).toEqual([0, 0, 0, SURF_LADDER, 0, 0]);
+    expect(faceMaterials(cmap, 1)).toEqual([
+      "grey/brick",
+      "grey/brick",
+      "grey/brick",
+      MATERIAL_LADDER_FACE,
+      "grey/brick",
+      "grey/brick",
+    ]);
+    // Every face renders, the rung face with its own material.
     expect([...cmap.surfaces.material].map((i) => cmap.materials[i])).toEqual([
+      MATERIAL_LADDER_FACE,
       MATERIAL_WALL,
       "grey/brick",
     ]);
   });
 
   it.each([
-    ["-x", 0, [884, 0, 0, 900, 64, 256], [884, 32, 128], [1, 0, 0]],
-    ["+x", 1, [916, 0, 0, 932, 64, 256], [932, 32, 128], [-1, 0, 0]],
-    ["-y", 2, [900, -16, 0, 916, 0, 256], [908, -16, 128], [0, 1, 0]],
-    ["+y", 3, [900, 64, 0, 916, 80, 256], [908, 80, 128], [0, -1, 0]],
-  ] as const)("ladder on the %s face", (face, plane, volume, outside, inward) => {
+    ["-x", 0, [884, 32, 128], [1, 0, 0]],
+    ["+x", 1, [932, 32, 128], [-1, 0, 0]],
+    ["-y", 2, [908, -16, 128], [0, 1, 0]],
+    ["+y", 3, [908, 80, 128], [0, -1, 0]],
+  ] as const)("ladder on the %s face", (face, plane, outside, inward) => {
     const m = lab();
     m.ladder({ wallMin: [900, 0, 0], wallMax: [916, 64, 256], face });
     const cmap = m.compile();
     const flags = [0, 0, 0, 0, 0, 0];
     flags[plane] = SURF_LADDER;
     expect(faceFlags(cmap, 0)).toEqual(flags);
-    expect(bounds(cmap, 1)).toEqual([...volume]);
-    // A ray from outside the volume into the wall hits the flagged face.
+    expect(faceMaterials(cmap, 0)[plane]).toBe(MATERIAL_LADDER_FACE);
+    expect(cmap.brushes.contents.length).toBe(1);
+    // A ray from 16 u in front of the face into the wall hits the flagged face, through empty
+    // space: no LADDER volume (D-024).
     const world = buildCollisionWorld(cmap);
     const tr = new TraceResult();
     const start = vec3(outside[0], outside[1], outside[2]);
@@ -472,9 +472,7 @@ describe("MapBuilder primitives", () => {
     traceRay(world, start, end, MASK_PLAYERSOLID, tr);
     expect(tr.fraction).toBeLessThan(1);
     expect(tr.surfaceFlags).toBe(SURF_LADDER);
-    expect(
-      pointContents(world, vec3((volume[0] + volume[3]) / 2, (volume[1] + volume[4]) / 2, 128)),
-    ).toBe(CONTENTS_LADDER);
+    expect(pointContents(world, start)).toBe(0);
   });
 });
 
@@ -600,7 +598,8 @@ describe("MapBuilder.compile", () => {
       name: GREYBOX_COMPILER_NAME,
       version: GREYBOX_COMPILER_VERSION,
     });
-    expect(GREYBOX_COMPILER_VERSION).toBe(1);
+    // 2: ladders lost their LADDER volume and gained the rung material (D-024).
+    expect(GREYBOX_COMPILER_VERSION).toBe(2);
     expect(cmap.name).toBe("sample_course");
     expect(cmap.units).toBe("inch");
     expect(cmap.up).toBe("z");
@@ -619,13 +618,13 @@ describe("MapBuilder.compile", () => {
   it("throws at the call that makes a bad brush, naming the map and brush", () => {
     const m = sampleMap();
     expect(() => m.box({ min: [0, 0, 0], max: [20000, 8, 8] })).toThrow(
-      /^sample_course brush 16 \(box\): /,
+      /^sample_course brush 15 \(box\): /,
     );
     expect(() => m.box({ min: [0, 0, 0], max: [0, 8, 8] })).toThrow(
-      /^sample_course brush 16 \(box\): .*min < max/,
+      /^sample_course brush 15 \(box\): .*min < max/,
     );
     // Failed calls add nothing.
-    expect(m.brushCount).toBe(16);
+    expect(m.brushCount).toBe(15);
   });
 
   it("refuses a map without brushes", () => {
@@ -680,7 +679,7 @@ describe("MapBuilder.compile", () => {
     traceRay(world, vec3(800, 32, 128), vec3(1000, 32, 128), MASK_PLAYERSOLID, tr);
     expect(tr.surfaceFlags).toBe(SURF_LADDER);
     expect(tr.endpos[0]).toBe(900 - TRACE_EPSILON);
-    expect(pointContents(world, vec3(890, 32, 128))).toBe(CONTENTS_LADDER);
+    expect(pointContents(world, vec3(890, 32, 128))).toBe(0);
 
     // The ramp's slope stops a ray at its surface: halfway up, 48 u high.
     traceRay(world, vec3(640, -256, 500), vec3(640, -256, -50), MASK_PLAYERSOLID, tr);

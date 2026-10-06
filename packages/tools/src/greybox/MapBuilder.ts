@@ -49,9 +49,8 @@ export const MATERIAL_CLIP = "tool/clip";
 export const MATERIAL_TRIGGER = "tool/trigger";
 export const MATERIAL_NODRAW = "tool/nodraw";
 export const MATERIAL_LADDER = "tool/ladder";
-
-/** Thickness of the LADDER volume ladder() puts in front of the wall (M1 design I). */
-export const LADDER_VOLUME_DEPTH = 16;
+/** The rung texture ladder() puts on the climbable face (D-024). */
+export const MATERIAL_LADDER_FACE = "grey/ladder";
 
 /** The volume kinds volume() takes: non-solid contents, by docs/07 §2 name. */
 export const VOLUME_CONTENTS = {
@@ -135,9 +134,9 @@ export interface LadderOptions {
   /** The solid wall the ladder is fixed to. */
   readonly wallMin: Triple;
   readonly wallMax: Triple;
-  /** The side of the wall the ladder is on: that face gets SURF_LADDER and the volume. */
+  /** The side of the wall the ladder is on: that face gets SURF_LADDER and the rung texture. */
   readonly face: Direction;
-  /** The wall's material. Default MATERIAL_WALL. */
+  /** The material of the wall's other faces. Default MATERIAL_WALL. */
   readonly material?: string;
 }
 
@@ -366,9 +365,9 @@ export class MapBuilder {
   }
 
   /**
-   * A ladder: the solid wall with SURF_LADDER on the named face, and a LADDER volume
-   * LADDER_VOLUME_DEPTH thick in front of that whole face. M2 decides which of the two the
-   * movement code reads (docs/03 §4.14); M1 emits both.
+   * A ladder: the solid wall with SURF_LADDER and the MATERIAL_LADDER_FACE rung texture on the
+   * named face. The movement code reads only that face (D-024), so no LADDER volume is emitted;
+   * CONTENTS_LADDER stays reserved (volume("LADDER") still builds one).
    */
   ladder(options: LadderOptions): void {
     const wallMin = this.point(options.wallMin, "ladder wallMin");
@@ -377,28 +376,12 @@ export class MapBuilder {
     const batch: Batch = [];
     const planes = this.boxShape(batch, "ladder wall", wallMin, wallMax);
     const flags = [0, 0, 0, 0, 0, 0];
-    flags[sideFace(side)] = SURF_LADDER;
+    const face = sideFace(side);
+    flags[face] = SURF_LADDER;
     const material = options.material ?? MATERIAL_WALL;
-    this.compileInto(
-      batch,
-      "ladder wall",
-      planes,
-      CONTENTS_SOLID,
-      [material, material, material, material, material, material],
-      flags,
-    );
-    const axis = directionAxis(side);
-    const min = [wallMin[0], wallMin[1], wallMin[2]];
-    const max = [wallMax[0], wallMax[1], wallMax[2]];
-    if (directionSign(side) > 0) {
-      min[axis] = wallMax[axis];
-      max[axis] = wallMax[axis] + LADDER_VOLUME_DEPTH;
-    } else {
-      min[axis] = wallMin[axis] - LADDER_VOLUME_DEPTH;
-      max[axis] = wallMin[axis];
-    }
-    const volume = this.boxShape(batch, "ladder volume", min as Triple3, max as Triple3);
-    this.styled(batch, "ladder volume", volume, CONTENTS_LADDER, {});
+    const materials = [material, material, material, material, material, material];
+    materials[face] = MATERIAL_LADDER_FACE;
+    this.compileInto(batch, "ladder wall", planes, CONTENTS_SOLID, materials, flags);
     this.commit(batch);
   }
 

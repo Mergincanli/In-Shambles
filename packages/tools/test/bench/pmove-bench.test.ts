@@ -4,6 +4,7 @@ import {
   HULL_MINS,
   HULL_STANDING_MAXS,
   MASK_PLAYERSOLID,
+  PMF_ON_LADDER,
   playerStateEquals,
   positionTest,
   vec3,
@@ -13,6 +14,7 @@ import {
   buildPmoveWorkload,
   CMD_TICKS,
   formatPmoveBench,
+  LADDER_TOUR_TICKS,
   meetsPmoveBudget,
   PMOVE_PLAYERS,
   PMOVE_SEED,
@@ -20,6 +22,7 @@ import {
   PmoveBenchState,
   pmoveStrictFailure,
   RESPAWN_TICKS,
+  runLadderTour,
   runPmoveBench,
   runPmoveTicks,
 } from "../../bench/pmove.bench";
@@ -41,6 +44,9 @@ function fakeResult(nsPerPlayerTick: number, gcs: number): PmoveBenchResult {
     steps: 0.001,
     lands: 0.01,
     fallbacks: 0,
+    ladder: 0.001,
+    swimming: 0.05,
+    crouched: 0.1,
     sink: 0,
   };
 }
@@ -115,6 +121,29 @@ describe("pmove bench loop", () => {
     expect(steps).toBeGreaterThan(0);
     expect(lands).toBeGreaterThan(50);
     expect(fallbacks).toBe(0);
+  });
+
+  it("swims, crouches and reaches the ladder once the players have toured the anchors", () => {
+    const s = new PmoveBenchState(workload);
+    // Player i moves to spawn point i + k at its k-th respawn: 8 respawns reach the pool and the
+    // ladder anchors from every start.
+    runPmoveTicks(workload, s, 8 * RESPAWN_TICKS);
+    const [, , , , fallbacks, ladder, swimming, crouched] = Array.from(s.tally);
+    expect(ladder).toBeGreaterThan(0);
+    expect(swimming).toBeGreaterThan(0);
+    expect(crouched).toBeGreaterThan(0);
+    expect(fallbacks).toBe(0);
+  });
+
+  it("the warm-up's ladder tour climbs, descends and jumps off the ladder", () => {
+    const s = new PmoveBenchState(workload);
+    const attached = runLadderTour(workload, s);
+    // Up for 60 ticks, down for 20, attached until the jump-off at tick 85.
+    expect(attached).toBeGreaterThanOrEqual(80);
+    expect(attached).toBeLessThan(LADDER_TOUR_TICKS);
+    expect(s.climber.flags & PMF_ON_LADDER).toBe(0);
+    // Pushed off the −y face.
+    expect(s.climber.velocity[1]).toBeLessThan(-100);
   });
 
   it("times the loop and reports per player-tick", async () => {

@@ -79,7 +79,7 @@ export function movementLab(): Cmap {                                        // 
   m.wall({ min: [0,300,0], max: [512,316,256] });                               // wall-jump wall
   m.rotatedBox({ center: [0,600,112], halfExtents: [256,8,128], cos: Math.sqrt(3)/2, sin: 0.5 }); // 30° kick lane
   m.volume("WATER", { min: [-600,-600,-128], max: [-300,-300,0] });
-  m.ladder({ wallMin: [916,0,0], wallMax: [932,64,256], face: "-x" });         // wall + LADDER volume
+  m.ladder({ wallMin: [916,0,0], wallMax: [932,64,256], face: "-x" });         // wall, ladder flag on −x
   m.spawn("info_player_start", [0,0,24], 0);                                    // yaw in degrees
   m.timer("start", {...}); m.timer("stop", {...});
   m.anchor("gap_96_takeoff", [128,0,24]);                                       // named place for tests: ground + 24
@@ -94,14 +94,14 @@ export function movementLab(): Cmap {                                        // 
   - `slope({from, run, normalZ, width, direction?})`: a wedge with rise = run·√(1 − nz²)/nz (computed with `Math.sqrt`, D-016), so the stored normal z is exactly `Math.fround(normalZ)`. Returns the compiled wedge's top (its +z bound, the f32 crest rounded up, not the f64 `from.z + rise`, which can sit several f32 steps lower far from the origin): a platform whose top is that value shares the plane distance with the crest, so the crest has no lip.
   - `rotatedBox({center, halfExtents, cos, sin, contents?})`: a box rotated about +Z, for kick lanes. Callers pass closed forms (sin 15° = (√6 − √2)/4) or dtrig values, never `Math.cos`.
   - `volume(kind, {min, max, material?})`: a non-solid box; `kind` is `WATER`, `LADDER`, `PLAYERCLIP`, `TRIGGER` or `NODRAW`.
-  - `ladder({wallMin, wallMax, face, material?})`: the solid wall with the ladder surface flag on the `face` side and a 16 u LADDER volume in front of that whole face. M2 decides which of the two the movement code reads (`docs/03` §4.14).
+  - `ladder({wallMin, wallMax, face, material?})`: the solid wall with the ladder surface flag (`SURF_LADDER`) and the rung material `grey/ladder` on the `face` side; `material?` is for its other faces. Ladders are detected by that face alone (`docs/03` §4.14, D-024), so no LADDER volume is emitted (M1 emitted a 16 u one in front of the face; `compiler.version` 2 dropped it). `CONTENTS_LADDER` stays reserved: `volume("LADDER", …)` still builds one, and the movement code ignores it.
   - Every other solid primitive also takes `material?` and `surfaceFlags?`, applied to all of its faces (`ladder` takes `material?` only: its flags are fixed). `box`, `wall`, `rotatedBox` and `volume` return the brush index (for entity `brushes` lists); directions and faces are checked at run time too.
 - **Entities** (§4.2 classnames), in call order: `spawn(classname, origin, yaw, props?)` for `info_player_start`, `info_spawn_red`, `info_spawn_blue`; `timer("start" | "stop", {min, max})` makes an invisible TRIGGER brush and an `info_timer_start` / `info_timer_stop` entity whose `brushes` lists it; `anchor(name, origin, yaw?)` makes an `info_target` with `targetname` = name (snake_case, unique per map), so tests name places instead of hard-coding coordinates. Yaw goes in the entity's `angles` as [0, yaw, 0] degrees (§2); yaw 0 faces +x. Origins stay within ±16384 u like brushes, and prop keys are snake_case starting with a letter.
 - **Checks:** each call builds and checks its brushes at once, so a bad shape throws at that call, naming the map and brush (`movement_lab brush 12 (ramp): …`), and a call that throws adds none of its brushes. Besides the brush rules of §2, a brush is refused when it would need edge bevels: for every edge e (between faces with normals n1, n2) and axis k, take u = e × axis_k with the sign that makes u·(n1 + n2) ≥ 0, the side the expanded brush's face would face; u must be parallel (within 1e-6) to an axis or point the same way as one of the brush's face normals. Boxes, boxes rotated about Z and axis-aligned wedges pass.
-- **Materials** default from the contents: `grey/floor` (box, stairs, ramp, slope), `grey/wall` (wall, rotated box, ladder wall), `grey/water`, `tool/clip`, `tool/trigger`, `tool/nodraw`, `tool/ladder`. The cmap `materials` table lists them in order of first use, brush by brush and face by face.
+- **Materials** default from the contents: `grey/floor` (box, stairs, ramp, slope), `grey/wall` (wall, rotated box, ladder wall), `grey/ladder` (the ladder face, a rung texture in M2's renderer), `grey/water`, `tool/clip`, `tool/trigger`, `tool/nodraw`, `tool/ladder` (a LADDER volume). The cmap `materials` table lists them in order of first use, brush by brush and face by face.
 - **Render surfaces:** one merged surface per material, in material order. Solid brushes and water volumes render; PLAYERCLIP, TRIGGER and NODRAW brushes and other non-solid volumes (LADDER) don't. Each face polygon is a triangle fan from its canonical start vertex (the lexicographically smallest (x, y, z)), counter-clockwise seen from outside, with f32 positions and the face normal as every vertex's normal.
 - **uv0 convention** (M2's grid texture relies on it): a planar projection in world space on the face normal's dominant axis, **1 uv per 64 u**: z-dominant faces get (u, v) = (x, y)/64, x-dominant (y, z)/64, y-dominant (x, z)/64; ties go to z, then x, so a 45° ramp maps like the floor. A 64 u grid tile therefore lines up across brushes.
-- **Determinism:** `compile()` returns the map as a loader reads it (it goes through `encodeCmap` and `decodeCmap`, so it is validated and carries its `contentHash`), and the same calls always give byte-identical files. `compiler` is `{name: "greybox", version}`; the version starts at 1 and is bumped whenever the output changes on purpose. The greybox modules are under the D-016 math ban and read no clock, randomness, locale or environment (guard: `packages/tools/test/guards/greybox-determinism.test.ts`).
+- **Determinism:** `compile()` returns the map as a loader reads it (it goes through `encodeCmap` and `decodeCmap`, so it is validated and carries its `contentHash`), and the same calls always give byte-identical files. `compiler` is `{name: "greybox", version}`; the version started at 1 and is bumped whenever the output changes on purpose (2: the ladder change of D-024). The greybox modules are under the D-016 math ban and read no clock, randomness, locale or environment (guard: `packages/tools/test/guards/greybox-determinism.test.ts`).
 
 **Required courses** (each doubles as an automated test fixture, `docs/03` §8). Sizes not set by `docs/03` or §6 are our design values, not ESTIMATEs of the original game:
 
@@ -128,7 +128,7 @@ TrenchBroom supports custom game configurations. Place a folder under its user-d
 
 **Textures:** loose image files (PNG/JPG) under `content/textures/`. Use exclusion patterns to hide PBR helper maps (`*_normal`, `*_rough`, `*_orm`, etc.).
 
-**Special tool textures** (names drive contents): `tool/clip` (PLAYERCLIP, invisible), `tool/nodraw`, `tool/skip`, `tool/trigger`, `tool/water`, `tool/ladder`, `tool/slick`, `tool/nodamage`.
+**Special tool textures** (names drive contents): `tool/clip` (PLAYERCLIP, invisible), `tool/nodraw`, `tool/skip`, `tool/trigger`, `tool/water`, `tool/ladder`, `tool/slick`, `tool/nodamage`. Movement detects ladders by the `SURF_LADDER` face flag, not by a LADDER volume (D-024), so `mapc` must turn `tool/ladder` and `func_ladder` into flagged faces on solid brushes; how it does that is M5's call.
 
 **Prior art** to study (concepts only): FuncGodot (TrenchBroom → Godot), bevy_trenchbroom (TrenchBroom → Bevy), godot-tbloader. They solve the same import problem for other engines.
 
@@ -139,7 +139,7 @@ TrenchBroom supports custom game configurations. Place a folder under its user-d
 | `worldspawn` | solid | `message`, `gravity_scale` (default 1), `ambient` |
 | `func_group`, `func_detail` | solid | organization; detail brushes excluded from visibility pre-pass |
 | `func_water` | solid | water volume (alternative to tool texture) |
-| `func_ladder` | solid | ladder volume |
+| `func_ladder` | solid | ladder (compiles to `SURF_LADDER` faces, D-024) |
 | `trigger_hurt` | solid | `damage`, `instakill` |
 | `trigger_push` | solid | jump pad: `target`, `speed` |
 | `trigger_teleport` | solid | `target` |

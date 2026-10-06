@@ -23,7 +23,7 @@ import { describe, expect, it } from "vitest";
 import { DETERMINISTIC_MATH_RULES } from "../../src/code/deterministicMath";
 import { scanSource } from "../../src/code/scan";
 import { fromRoot } from "../../src/paths";
-import { HoldInput, HopForward, idle, StrafeHop } from "../../src/scenarios/bots";
+import { HoldInput, HopForward, idle, PhasedInput, StrafeHop } from "../../src/scenarios/bots";
 import { anchorYawU16, courseAnchor, courseAnchors, loadCourse } from "../../src/scenarios/course";
 import {
   airtime,
@@ -193,6 +193,33 @@ describe("bots", () => {
     }
     expect(pressed).toEqual([0, 0, BUTTON_JUMP, 0, BUTTON_JUMP, 0, 0]);
     expect(bot.jumps).toBe(2);
+  });
+
+  it("PhasedInput plays its phases by tick count, carries yaw and pitch over and holds the last", () => {
+    const bot = new PhasedInput([
+      { ticks: 2, forward: 127, yaw: 100, pitch: 5 },
+      { ticks: 1, right: -127, up: 64, buttons: BUTTON_JUMP },
+      { ticks: 1, forward: -127, yaw: 70000 },
+    ]);
+    const seen: number[][] = [];
+    for (let i = 0; i < 6; i++) {
+      bot.next(cmd, ps);
+      seen.push([cmd.forward, cmd.right, cmd.up, cmd.buttons, cmd.yaw, cmd.pitch]);
+    }
+    expect(seen).toEqual([
+      [127, 0, 0, 0, 100, 5],
+      [127, 0, 0, 0, 100, 5],
+      [0, -127, 64, BUTTON_JUMP, 100, 5],
+      [-127, 0, 0, 0, 70000 & 0xffff, 5],
+      [-127, 0, 0, 0, 70000 & 0xffff, 5],
+      [-127, 0, 0, 0, 70000 & 0xffff, 5],
+    ]);
+    expect(bot.currentPhase).toBe(2);
+    expect(() => new PhasedInput([])).toThrow(/at least one phase/);
+    for (const ticks of [0, -1, 1.9, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 31, 2 ** 32 + 2]) {
+      expect(() => new PhasedInput([{ ticks }]), String(ticks)).toThrow(/integer ticks/);
+    }
+    expect(() => new PhasedInput([{ ticks: 0x7fffffff }])).not.toThrow();
   });
 
   it("StrafeHop's yaw is a maximum of one tick's air acceleration", () => {
