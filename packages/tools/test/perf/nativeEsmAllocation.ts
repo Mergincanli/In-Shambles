@@ -52,6 +52,9 @@ import {
   vec3,
   wedgePlanes,
 } from "@game/shared";
+import { HoldInput, HopForward, StrafeHop } from "../../src/scenarios/bots";
+import { anchorYawU16, courseAnchor, loadCourse } from "../../src/scenarios/course";
+import { placeAtAnchor, ScenarioRecord, ScenarioRunner } from "../../src/scenarios/runner";
 
 // Child process for native-esm-allocation.test.ts: `node --import tsx` loads shared as native ES
 // modules, as dev:server and bench do. There V8 boxes doubles that the Vitest module runner and
@@ -294,11 +297,82 @@ function runPmove(n: number): void {
   }
 }
 
+/** The scenario harness (D-025), built on first use so the other workloads skip the map load. */
+let scenario: {
+  runner: ScenarioRunner;
+  start: ReturnType<typeof courseAnchor>;
+  record: ScenarioRecord;
+  hold: HoldInput;
+  walk: HoldInput;
+  hop: HopForward;
+  strafe: StrafeHop;
+} | null = null;
+
+function scenarioHarness() {
+  if (scenario === null) {
+    const course = loadCourse("movement_lab");
+    const runner = new ScenarioRunner(course.world);
+    const start = courseAnchor(course, "open_sw");
+    const yaw = anchorYawU16(start);
+    scenario = {
+      runner,
+      start,
+      record: new ScenarioRecord(1024, TICK_DT),
+      hold: new HoldInput(yaw),
+      walk: new HoldInput(yaw, { buttons: BUTTON_WALK, right: 64 }),
+      hop: new HopForward(yaw, { runUpTicks: 0, hops: Number.MAX_SAFE_INTEGER }),
+      strafe: new StrafeHop(yaw, runner.params, runner.dt, {
+        runUpTicks: 0,
+        hops: Number.MAX_SAFE_INTEGER,
+      }),
+    };
+  }
+  return scenario;
+}
+
+/**
+ * Scenario runner ticks on movement_lab from open_sw, in 1000-tick runs held forward, walked
+ * with a strafe, and hopped: the runner's own recording must add nothing to pmove.
+ */
+function runScenario(n: number): void {
+  const h = scenarioHarness();
+  const ps = pps;
+  for (let done = 0, run = 0; done < n; done += 1000, run++) {
+    placeAtAnchor(ps, h.start);
+    h.record.clear();
+    h.record.push(ps);
+    const source = run % 3 === 0 ? h.hold : run % 3 === 1 ? h.walk : h.hop;
+    h.runner.continue(ps, source, Math.min(1000, n - done), h.record);
+    outcomes[run % 3] = (outcomes[run % 3] as number) + h.record.count + h.record.eventCount;
+  }
+}
+
+/**
+ * The strafe bot's per-tick choice (a 65536-yaw search, so a hundredth as many calls), grounded
+ * and airborne at changing velocities, both sides.
+ */
+function runStrafeBot(n: number): void {
+  const h = scenarioHarness();
+  const ps = pps;
+  const calls = n / 100;
+  for (let i = 0; i < calls; i++) {
+    ps.flags = i % 41 === 0 ? PMF_GROUNDED : 0;
+    ps.velocity[0] = 300.5 + (i & 255) * 1.25;
+    ps.velocity[1] = (i & 63) * 3.5 - 100;
+    ps.velocity[2] = 0;
+    h.strafe.next(pcmd, ps);
+    outcomes[pcmd.right > 0 ? 0 : 1] = (outcomes[pcmd.right > 0 ? 0 : 1] as number) + 1;
+    outcomes[2] = (outcomes[2] as number) + (pcmd.yaw & 1);
+  }
+}
+
 const WORKLOADS: Record<string, (n: number) => void> = {
   pmove: runPmove,
   pmoveBasics: runPmoveBasics,
   quantize: runQuantize,
+  scenario: runScenario,
   snap: runSnap,
+  strafeBot: runStrafeBot,
   state: runState,
   trace: runTrace,
 };

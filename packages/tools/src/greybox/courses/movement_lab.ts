@@ -103,6 +103,12 @@ export function movementLab(): Cmap {
     max: [RUNWAY_HALF + TIMER_DEPTH, runwayY + 128, 128],
   });
 
+  // Open-floor starts for hop and strafe runs (MV-07, MV-08): 256 u in from the south-west corner,
+  // facing about 7900 u of clear floor up the diagonal (to 256 u short of the far corner), and
+  // the middle of the floor.
+  m.anchor("open_sw", stand(-OPEN_HALF + 256, -OPEN_HALF + 256, 0), 45);
+  m.anchor("open_center", stand(0, 0, 0), 0);
+
   // Single steps, 256 × 256 u, climbed northwards.
   for (let i = 0; i < STEP_HEIGHTS.length; i++) {
     const h = STEP_HEIGHTS[i] as number;

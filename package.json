@@ -12,7 +12,7 @@
     "dev:server": "pnpm --filter @game/server --fail-if-no-match start",
     "build": "pnpm -r build",
     "test": "vitest run",
-    "test:movement": "node scripts/not-yet.mjs test:movement M2",
+    "test:movement": "vitest run -t \"^MV-\" --silent=false",
     "test:net": "node scripts/not-yet.mjs test:net M2",
     "test:balance": "vitest run -t \"^BAL-\"",
     "test:browser": "vitest run --config vitest.browser.config.ts",

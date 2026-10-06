@@ -6,12 +6,12 @@
 
 | Layer | Tool | What | Where |
 |---|---|---|---|
-| Unit | Vitest | math, quantization, traces, pmove steps, damage rules, codecs | `packages/*/test` |
-| Scenario (sim) | Vitest + greybox courses | movement feel targets (MV-xx), balance rules (BAL-xx) | `packages/shared/test/scenarios` |
-| Parity / determinism | Vitest | client vs. server sim, recorded input streams | `packages/shared/test/parity` |
+| Unit | Vitest | math, quantization, traces, pmove steps on synthetic worlds, damage rules, codecs | `packages/*/test` (sim units in `packages/shared/test`, D-025) |
+| Scenario (sim, D-025) | Vitest + the committed greybox courses (`content/maps`) through the scenario runner (`packages/tools/src/scenarios`: course loading, runner, scripted bots, metrics) | movement feel targets (MV-xx), the feel report, MV-19 build probes; balance rules (BAL-xx) | `packages/tools/test/movement` (`mv-NN-*.test.ts`), `packages/tools/test/balance` |
+| Parity / determinism (D-025) | Vitest | client vs. server sim, recorded input streams, MV-19 (repeat runs and bundled builds) | frozen vectors (pmove from M2) in `packages/shared/test/vectors`; MV-19 build probes and client-vs-server parity runs in `packages/tools/test` |
 | Determinism vectors (D-016, D-017, D-022) | Vitest in Node; Vitest browser mode via `pnpm test:browser` (Chromium locally; Chromium, Firefox and WebKit in the CI `browsers` job) replays every `packages/shared/test/*-vectors.test.ts` unchanged | frozen input → output bits for dtrig (plus a digest of all 65536 `sinU16`/`cosU16` angles), quantizers, PRNG and hash, and for brush traces, `snapOrigin` and `pointContents` on a fixed world | `packages/shared/test/vectors`, JavaScript-only syntax with no imports (regenerate with `pnpm --filter @game/tools vectors`) |
 | Property / fuzz (M1) | Vitest | trace properties P1–P7 against a SAT oracle over the courses and seeded synthetic worlds (no tunneling, startSolid/allSolid, no phantom hits, BVH = brute force, determinism, snap chains); a failure prints a case to paste into `regressions.test.ts`; `FUZZ_SEED` and `FUZZ_CASES` override the default 20k cases for long local runs | `packages/tools/test/fuzz` |
-| Netcode integration | Vitest + in-process server + NetSim | NET-xx under profiles | `packages/server/test/net` |
+| Netcode integration (D-025) | Vitest + the real match code and client net code in process + NetSim | NET-xx under profiles | `packages/tools/test/net` (`net-NN-*.test.ts`); match unit tests stay in `packages/server/test` |
 | Load / soak | bots CLI | 16–32 bots, minutes to hours, metrics | `packages/tools/bots` |
 | Perf benchmarks | `pnpm bench` | µs per op for hot paths | `packages/*/bench` |
 | Manual playtest | checklist | feel sign-off, readability, fun | handoff notes |
@@ -23,9 +23,9 @@
 | Command | Contents |
 |---|---|
 | `pnpm test` | everything fast (< 60 s target) |
-| `pnpm test:movement` | MV-01…MV-20 (`docs/03` §8) |
+| `pnpm test:movement` | MV-01…MV-20 (`docs/03` §8): every test whose name starts with `MV-`, so each `mv-NN-*.test.ts` names its top-level `describe` after its ID (`MV-05: …`; guard: `packages/tools/test/guards/scripts.test.ts`). Runs with `--silent=false`, so each test's measured-vs-target line prints |
 | `pnpm test:balance` | BAL-01…BAL-11 (`docs/04` §13): every test whose name starts with `BAL-`, so each BAL test's top-level `describe` starts with its ID (`BAL-07: …`) |
-| `pnpm test:net` | NET-01…NET-12 (`docs/05` §14), with profiles |
+| `pnpm test:net` | NET-01…NET-12 (`docs/05` §14), with profiles; named like the MV tests (`net-NN-*.test.ts`, `describe("NET-03: …")`) |
 | `pnpm test:browser` | the determinism and trace vectors in headless browsers (D-022): `BROWSERS` is a comma list of `chromium`, `firefox`, `webkit` (default `chromium`); `CHROMIUM_PATH` overrides the Chromium executable. Not part of `pnpm test` |
 | `pnpm bench` | trace, pmove, snapshot build, codec, render-frame microbenchmarks |
 | `pnpm greybox` | recompiles the greybox courses into `content/maps/`; `courses.test.ts` fails with "run pnpm greybox and commit" while a committed map is stale (`docs/07` §3) |

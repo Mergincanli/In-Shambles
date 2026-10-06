@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { vec3 } from "../../../src/math/vec3";
-import { PMEV_STEP, PmoveEvents } from "../../../src/sim/events";
+import { PMEV_LAND, PMEV_STEP, PmoveEvents } from "../../../src/sim/events";
 import { HULL_MINS, HULL_STANDING_MAXS } from "../../../src/sim/hull";
 import { PlayerState, PMF_GROUNDED } from "../../../src/sim/playerState";
 import { PmoveParams } from "../../../src/sim/pmove/params";
@@ -84,6 +84,48 @@ describe("stepSlideMove (docs/03 §4.9)", () => {
     expect(events.filter(([, type]) => type === PMEV_STEP)).toEqual([]);
   });
 
+  it.each([
+    [0.71, "run", 0, 320, 150],
+    [0.8, "run", 0, 320, 150],
+    [0.71, "walk", BUTTON_WALK, 160, 280],
+    [0.8, "walk", BUTTON_WALK, 160, 280],
+  ] as const)(
+    "walks over the crest of a %f slope at %s speed without stalling, at any phase (D-023)",
+    (nz, _, buttons, cap, ticks) => {
+      // The hull rides the slope inside its ε skin, so at the crest the platform's riser stands a
+      // few hundredths of a unit above its leading bottom edge. The stepped path rises with the
+      // walk along the slope, and its trace down must reach back to the platform, or the walk
+      // stops dead on that lip. Where the plain slide clears the lip instead, the walk may kick
+      // off the crest (docs/03 §4.10) for one hop, keeping its speed.
+      const rise = (256 * Math.sqrt(1 - nz * nz)) / nz;
+      const world = worldOf(
+        floorBrush(),
+        brush(wedgePlanes([-96, 64, 0], [96, 320, rise], "+y")),
+        box([-96, 320, 0], [96, 640, rise]),
+      );
+      let slowest = Infinity;
+      for (let k = 0; k < 128; k++) {
+        const ps = player(0, -k / 4);
+        // Forward until well onto the platform, then let go so the walk stops on it.
+        const input = () => cmd({ forward: ps.origin[1] < 448 ? 127 : 0, yaw: 16384, buttons });
+        const { events } = run(ps, world, input, ticks, {
+          each: () => {
+            // From halfway up the slope until well onto the platform.
+            if (ps.origin[1] > 192 && ps.origin[1] < 448) {
+              slowest = Math.min(slowest, horizontalSpeed(ps.velocity));
+            }
+          },
+        });
+        expect(slowest, `start ${-k / 4}`).toBeGreaterThan(cap * nz * 0.99);
+        expect(events.filter(([, type]) => type === PMEV_LAND).length).toBeLessThanOrEqual(1);
+        expect(ps.origin[1], `start ${-k / 4}`).toBeGreaterThan(448);
+        expect(ps.origin[2], `start ${-k / 4}`).toBeGreaterThan(rise - (HULL_MINS[2] as number));
+        expect(ps.origin[2], `start ${-k / 4}`).toBeLessThanOrEqual(restZ(rise) + TRACE_EPSILON);
+        expect(ps.flags & PMF_GROUNDED, `start ${-k / 4}`).toBe(PMF_GROUNDED);
+      }
+    },
+  );
+
   it("steps up a ledge while falling but not while rising with no ground within pm_stepSize", () => {
     // A pillar whose top is at z = 200, high above the floor; the hull's feet are 10 u below
     // the top and 2 u from the pillar's side.
@@ -142,6 +184,23 @@ describe("stepSlideMove (docs/03 §4.9)", () => {
       expect(ps.origin[2] > restZ(20) - 1, name).toBe(climbs);
       expect(eventList(ev).length, name).toBe(climbs ? 1 : 0);
     }
+  });
+
+  it("keeps a rising jump off a ledge just below its path: air moves keep the shorter trace (D-023)", () => {
+    // A ledge whose top is 1 u above the rising feet, 0.5 u ahead, with the floor 4 u below
+    // them. The plain slide hits the ledge's face and goes on up; the stepped one clears it, and
+    // its trace down by the raise plus pm_groundTraceDist ends above the ledge, so the plain
+    // path stays. Reaching further down, as the walk move does, would pull the jump onto it.
+    const world = worldOf(floorBrush(), box([64, -128, 0], [320, 128, 5]));
+    const ps = new PlayerState();
+    ps.origin.set([64 - 15 - 0.5, 0, 4 + 24]);
+    ps.velocity.set([300, 0, 120]);
+    const ev = new PmoveEvents();
+    stepSlideMove(ps, world, HULL_MINS, HULL_STANDING_MAXS, p, TICK_DT, true, null, ev, null);
+    expect(eventList(ev)).toEqual([]);
+    expect(ps.origin[0]).toBeLessThanOrEqual(64 - 15);
+    expect(ps.origin[2]).toBeGreaterThan(4 + 24 + 1.5);
+    expect(ps.velocity[2]).toBeGreaterThan(0);
   });
 
   it.each([

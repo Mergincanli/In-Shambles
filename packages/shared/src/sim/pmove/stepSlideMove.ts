@@ -36,8 +36,10 @@ const stepDelta = new Float64Array(1);
  * pm_groundTraceDist. The stepped path is kept only when that trace lands on walkable ground and
  * the path got STEP_MIN_GAIN farther horizontally; its velocity is then clipped against the
  * landing plane and a PMEV_STEP reports the height change. Within STEP_MIN_GAIN either way it is
- * a tie: the plain origin, with the velocity of whichever path kept more horizontal speed. While rising (vz > 0) with no walkable ground within pm_stepSize
- * below the start, there is no step: a jump against a wall must not climb it.
+ * a tie: the plain origin, with the velocity of whichever path kept more horizontal speed. In a
+ * walk move the trace down also covers any rise of the stepped slide itself, so it reaches at
+ * least pm_groundTraceDist below the start height. While rising (vz > 0) with no walkable ground
+ * within pm_stepSize below the start, there is no step: a jump against a wall must not climb it.
  */
 export function stepSlideMove(
   ps: PlayerState,
@@ -94,9 +96,12 @@ export function stepSlideMove(
 
   // Back down by what was gained, plus the ground probe distance: a player rests ε above the
   // floor (D-017), so a trace of exactly `raised` ends at the start height without reaching it.
+  // A walk move (no gravity) also goes down by whatever its stepped slide rose: walking up a slope
+  // moves along it, and at a crest the trace must reach back down to the platform (D-023).
   probe[0] = o[0];
   probe[1] = o[1];
   probe[2] = o[2] - raised - p.groundTraceDist;
+  if (!gravity) probe[2] = Math.min(probe[2], startOrigin[2] - p.groundTraceDist);
   traceBox(world, o, probe, mins, maxs, MASK_PLAYERSOLID, tr);
   if (dbg !== null) dbg.record(o, probe, mins, maxs, tr);
   if (tr.allSolid || tr.fraction === 1 || tr.normal[2] < p.minWalkNormal) {
