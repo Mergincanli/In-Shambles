@@ -48,7 +48,7 @@ Commands for later milestones (`test:net`, `bots`, `balance-report`, `mapc`) alr
 | Path | Contents |
 |---|---|
 | `packages/shared` | Pure simulation code shared by server and client |
-| `packages/server` | Dedicated Node server |
+| `packages/server` | Match code (runs in Node and in the browser Worker) and the dedicated Node server |
 | `packages/client` | Browser client (Vite, Three.js) |
 | `packages/tools` | Map compiler, bots, reports, content checks |
 | `content/` | Weapon data, names, maps, licenses |

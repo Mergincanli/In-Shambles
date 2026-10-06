@@ -64,4 +64,11 @@ describe("tsconfig guard", () => {
     expect(options?.types).toEqual([]);
     expect(options?.noUncheckedIndexedAccess).toBe(true);
   });
+
+  it("keeps DOM and Node types out of the server's match code (D-027)", () => {
+    const options = read(fromRoot("packages", "server", "tsconfig.match.json")).compilerOptions;
+    expect(options?.lib).toEqual(["ES2023"]);
+    expect(options?.types).toEqual([]);
+    expect(options?.noUncheckedIndexedAccess).toBe(true);
+  });
 });

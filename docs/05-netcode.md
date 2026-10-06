@@ -48,7 +48,13 @@
   3. Clock sync: 5 × `PING`/`PONG`, median RTT.
   4. The client loads the map, then sends `READY`.
   5. The client starts as a spectator; it joins a team and picks a loadout through reliable messages.
-- **Timeouts:** no packet for 5 s → disconnect. Reconnect within 60 s restores the slot (later).
+- **M2 handshake on the server** (`packages/server/src/match/match.ts`, D-027):
+  - `HELLO`: the version is read first from HELLO's frozen first 3 B (§3.2). Another protocol version, or a build hash other than the server's, gets a `KICK` that says why, and the connection closes. A HELLO that doesn't decode gets a strike and a `KICK`.
+  - `WELCOME` carries the newest tick simulated as `serverTick`; `PONG` does too. Clock-sync `PING`s are answered from WELCOME on, and so are console `CMD`s.
+  - `READY` spawns the player at once (M2 has no spectator step) at the map's first `info_player_start`: at rest, facing its yaw (`degreesToU16`), pitch 0, full stamina, grounded when the ground trace finds walkable ground. The origin is the entity's raised by `TRACE_EPSILON` to the D-017 rest height, floor + 1/32 u, so a fresh spawn behaves like a player that has landed: with its feet exactly on the floor it would meet a steep wedge's toe as a wall (D-023, "Steep toes").
+  - The spawn state is the player's state at the tick that handled READY; that tick's snapshot carries the teleport flag, and simulation starts on the next tick. Until the client's first cmd arrives, the server repeats a neutral cmd (no move, the spawn yaw), which is what the client predicts with (D-028).
+  - The Worker's one client is admin: it may change replicated cvars through `CMD` (§3.5).
+- **Timeouts:** no packet for 5 s → disconnect (M3, with the Node transports; M2's match closes a session only on a kick or a transport close, D-027). Reconnect within 60 s restores the slot (later).
 
 ## 3. Protocol
 
@@ -137,7 +143,9 @@ The `INPUT` packet carries:
 - **The hash** is `murmur3Bytes` (`shared/src/rng/hash32.ts`) over the block encoded on its own from bit 0 and zero-padded to a whole byte, with seed `0x63766172` (the ASCII bytes "cvar", big-endian). `CVARS` carries all 32 bits and the decoder checks them against the block it read; `SNAPSHOT` carries the low 16 bits of the hash the server simulated that tick with. The hash does not depend on registration order or on any non-replicated cvar.
 - **The registry keeps every block encodable:** a `REPLICATED` cvar's name is at most 63 chars (registration throws otherwise), and a `REPLICATED` string's value is printable 7-bit ASCII of at most 255 chars (registration throws; `set` and `setFromString` refuse it with a `type` error). So a console or admin value can never make WELCOME or CVARS unencodable or turn the snapshot hash into a sentinel.
 - **Applying a block** to the client's mirror registry is all or nothing: it must name exactly the registry's `REPLICATED` cvars, spelled as registered, with their types and with values inside their min/max (a clamped value would mispredict). Unknown names, non-replicated cvars, a missing cvar, wrong kinds and out-of-range values reject the whole block and change nothing. The server already applied its CHEAT and LATCH rules to what it sends, so the mirror stores CHEAT and LATCH values as sent (`CvarRegistry.setReplicated`), whatever its own cheat setting, and drops any pending latched value. After a successful apply the mirror's hash equals the block's.
-- **`CVARS`** carries `effectiveTick`, the first tick simulated with the new values, so the client switches its prediction parameters at that tick (D-027; the switch lands with the match loop and the predictor, M2 increments 9–10).
+- **`CVARS`** carries `effectiveTick`, the first tick simulated with the new values, so the client switches its prediction parameters at that tick (D-027; the client side lands with the predictor, M2 increment 10).
+- **On the server** the match checks the registry's `version` at the start of every tick, after polling. When it moved, the pmove parameters are refreshed; when the replicated block's hash also changed, every client past WELCOME gets `CVARS` with `effectiveTick` = that tick, whose snapshot already carries the new hash. A change to a non-replicated cvar, or a set to the current value, sends nothing.
+- **Changing a replicated cvar from a client:** a console `set`, `reset` or `toggle` on a `REPLICATED` cvar is not applied locally; the client sends it as `CMD`, the server applies it to its own registry (with its CHEAT and LATCH rules) and replies with `PRINT`, and the `CVARS` broadcast updates every mirror. Changing cvars needs the session's admin flag: the Worker's one client has it; who may on the Node server is decided in M3. A non-admin gets a `PRINT` error and nothing changes. `CMD cvars` is open to everyone and resends the current block with the tick it took effect (the client's recovery when its snapshot hash stays different).
 
 ### 3.6 Protocol v1 layout (`PROTOCOL_VERSION` = 1, D-026)
 
@@ -272,10 +280,19 @@ The client predicts with, stores and sends the sanitized cmd. The server sanitiz
 6. Build and send snapshots (relevance, delta, priority).
 7. Record metrics (tick time, bytes, starvation).
 
-The loop is driven by a monotonic clock (`process.hrtime.bigint()`) with an accumulator. **Never `setInterval`.** Catch-up is capped at 5 ticks; beyond that, log and skip.
+The loop is driven by a monotonic clock with an accumulator. **Never `setInterval`.** Catch-up is capped at 5 ticks; beyond that, log and skip.
+
+**M2 implementation** (`packages/server/src/match/`, D-027):
+- The match code is environment-agnostic: the clock, the timer and the log come from a `LoopHost { now(), schedule(cb, ms), log(level, msg) }` (`performance.now` and `setTimeout` in the Worker; the Node host comes in M3). `tsconfig.match.json` (ES2023, no DOM or Node types) and a purity guard keep it that way.
+- `startMatchLoop(match, host)` re-arms with `schedule` after every wake. A wake runs the ticks due since the loop started (tick k is due at start + k × 1000 / 60 ms; minus the ticks already run or dropped), so wake jitter never adds up; at most 5 per wake, and if more were due it drops them with one warning, leaving less than a tick owed. The due count and the re-arm delay use the same expression, so a wake exactly on time always runs its tick. An early wake runs nothing and re-arms for the next due tick.
+- Step 1's queue (`InputQueue`) has 64 slots indexed `tick & 63`, each remembering its tick. It drops and counts duplicates (4× redundancy makes most cmds arrive several times; a copy arriving after its tick was simulated is still a duplicate), late cmds (for a tick already simulated with a repeat), and cmds 64 or more ticks past the next tick to simulate.
+- Step 2's repeat copies the client's last simulated cmd with attack cleared and its tick set to the current one, flags the snapshot as starved and counts it. Jump stays as it was, so a repeat never makes a phantom jump.
+- Every cmd simulated goes through `sanitizeUserCmd`. The snapshot carries `lastProcessedCmdTick` = the tick simulated and `inputBufferHealth` = newest cmd tick received − that tick, clamped to i8 (§8.2).
+- A tick allocates nothing in steady state (the native-ESM `match` workload, `docs/10` §4).
 
 ### 8.2 Input buffer and time dilation (keeps inputs arriving "just in time")
 - The server reports `inputBufferHealth` = (newest cmd tick received − tick being simulated) to each client. Target: 1–2 ticks, adaptive to jitter.
+  - "Received" includes cmds dropped as late, and a tick past the input queue's horizon counts as the horizon (next tick + 64). Before the client's first cmd after a spawn, the spawn tick stands in for it: the spawn snapshot reports 0, then −1, −2 … until a cmd arrives (D-027).
 - The client gently speeds up or slows down its prediction tick (±3% max) to converge on the target. This avoids both starvation (lost inputs) and excess latency.
 
 ### 8.3 Clock sync

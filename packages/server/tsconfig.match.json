@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // The match code runs in a Web Worker and in Node (D-027): no DOM, no Node APIs, like shared.
+    "lib": ["ES2023"],
+    "types": [],
+    "noUncheckedIndexedAccess": true
+  },
+  "include": ["src/match", "src/index.ts"]
+}

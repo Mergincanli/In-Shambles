@@ -86,8 +86,15 @@ packages/shared/src/
 
 packages/server/src/
   main.ts              process entry, config, match manager
-  match/               tick loop, client sessions, input queues, snapshot builder,
-                       relevance, lag-comp history, rules host
+  index.ts             package entry: the match code only (the Worker and tools import it)
+  match/               environment-agnostic (tsconfig.match.json: ES2023, no DOM/Node types; D-027)
+    host.ts            LoopHost: now, schedule, log (the Worker or Node adapter)
+    loop.ts            accumulator loop: ticks due since start, catch-up cap 5
+    match.ts           Match: handshake, spawn, per-tick order (docs/05 §8.1), snapshots, CVARS
+    session.ts         per-client state, player, input queue, counters, admin flag
+    inputQueue.ts      cmds by tick (64 slots), duplicate/late/early counters
+    commands.ts        CMD: set/reset/toggle on replicated cvars, cvars resend
+                       (later: relevance, lag-comp history, rules host)
   transport/           ws adapter (M3), webtransport adapter (M9)
   admin/               rcon commands, logs, metrics endpoint
 
@@ -161,6 +168,7 @@ DEV / OFFLINE                                  ONLINE
   - `REPLICATED` cvars must fit the cvar block (`docs/05` §3.5, D-027): names of at most 63 chars, string values of printable 7-bit ASCII up to 255 chars. A client's mirror takes the server's values through `setReplicated`, past its own CHEAT and LATCH rules.
   - A `version` counter goes up on every registration and every value change. The sim copies its tunables into plain structs (`PmoveParams`) only when it moves, so no tick looks a cvar up (M2 design §0).
 - **Movement/combat tunables** (`pm_*`, `st_*`, `wp_*` overrides) are `REPLICATED`. The server sends the block on join and on change; the block hash appears in snapshots.
+- **Changing a replicated cvar** (D-027): the server owns them, so a client's console `set`, `reset` or `toggle` on a `REPLICATED` cvar goes to the server as a `CMD`. The server applies it if the session is admin (the Worker's one client is; M3 decides authorization on the Node server), replies with `PRINT`, and broadcasts `CVARS` with the effective tick; the client's mirror registry and its prediction parameters switch at that tick (`docs/05` §3.5).
 - **Console UI:** toggle with the backquote key (`Backquote` code). Commands: `set`, `toggle`, `reset`, `cvarlist [prefix]`, `bind`, `unbind`, `exec <file>`, `connect`, `disconnect`, `net_profile <name>`, `record`/`stoprecord`, `demo <file>`, `rcon <cmd>`.
 - **Binds** use `KeyboardEvent.code` (physical keys) so AZERTY/QWERTZ layouts work.
 - Default binds mirror UrT-style defaults where sensible; all are rebindable.

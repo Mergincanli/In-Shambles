@@ -279,9 +279,9 @@ class Measure {
     ] as const) {
       const base = this.anchor(`slope_${tag}_base`);
       const top = this.anchor(`slope_${tag}_top`);
-      // Landed (feet one ε up, as after any fall; MV-06): a spawn with the feet exactly on the
-      // floor stops dead at a steep toe's bevel without touching the slope (D-023), which says
-      // nothing about how the slope feels.
+      // Landed (feet one ε up, as after any fall and at a match spawn; MV-06, D-027): a start
+      // with the feet exactly on the floor stops dead at a steep toe's bevel without touching the
+      // slope (D-023), which says nothing about how the slope feels.
       const ps = placeAtAnchor(new PlayerState(), base);
       ps.origin[2] += TRACE_EPSILON;
       const r = this.runner.run(

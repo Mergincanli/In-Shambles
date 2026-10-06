@@ -29,9 +29,10 @@ import { placeAtAnchor, placePlayer, ScenarioRunner } from "../../src/scenarios/
 // docs/03 §8 MV-06, §4.10, M2 design §5: the movement_lab slope set either side of
 // pm_minWalkNormal 0.7 (FACT-Q3, docs/03 §2.1). Each approach holds forward (run, and walk) from
 // the base anchor for 4 s and lets go at the top anchor, so it stops on the crest platform. Two
-// starts, as in MV-05: spawned (feet on the floor) and landed (feet one ε above it, D-017). The
-// outcome at the toe and the crest depends on where a tick ends there, so every approach is swept
-// over 64 u of start positions in 1/8 u steps instead of trusting the anchor's one phase.
+// starts, as in MV-05: on the anchor (feet on the floor) and landed (feet one ε above it, D-017;
+// the match's spawn, D-027). The outcome at the toe and the crest depends on where a tick ends
+// there, so every approach is swept over 64 u of start positions in 1/8 u steps instead of
+// trusting the anchor's one phase.
 
 const TICKS = 240; // 4 s
 /**
@@ -61,7 +62,7 @@ const runner = new ScenarioRunner(course.world);
 const gravity = runner.params.gravity;
 
 const STARTS = [
-  ["spawned", 0],
+  ["anchor", 0],
   ["landed", TRACE_EPSILON],
 ] as const;
 const SPEEDS = [
@@ -210,7 +211,7 @@ describe("MV-06: slopes on movement_lab", () => {
           if (lift === 0) {
             // Accepted limit (docs/03 §4.10, D-023): feet exactly on the floor meet the wedge's
             // axial bevel at the toe as a wall, and the walk stops there without touching the
-            // slope. Pinned, so a trace or spawn change that alters it is noticed.
+            // slope. Pinned, so a trace change that alters it is noticed.
             expect(highest, at).toBe(base.origin[2]);
             expect(airborneTicks(record), at).toBe(0);
             expect(horizontalSpeed(record, end), at).toBe(0);

@@ -1,4 +1,5 @@
 import { PerformanceObserver } from "node:perf_hooks";
+import { Match } from "@game/server";
 import {
   ACCEL_AIR,
   ACCEL_GROUND,
@@ -6,6 +7,7 @@ import {
   applyFriction,
   BitReader,
   BitWriter,
+  BUTTON_ATTACK,
   BUTTON_CROUCH,
   BUTTON_JUMP,
   BUTTON_WALK,
@@ -25,16 +27,21 @@ import {
   decodePing,
   decodePong,
   decodeSnapshot,
+  encodeHello,
   encodeInput,
   encodePing,
   encodePong,
+  encodeReady,
   encodeSnapshot,
   findNetProfile,
+  HelloMsg,
   HULL_CROUCHED_MAXS,
   HULL_MINS,
   HULL_STANDING_MAXS,
   InputMsg,
+  type LoopbackEndpoint,
   MASK_PLAYERSOLID,
+  MAX_RELIABLE_BYTES,
   MAX_UNRELIABLE_BYTES,
   MSG_INPUT,
   MSG_PING,
@@ -67,6 +74,7 @@ import {
   refreshPmoveParams,
   registerPmoveCvars,
   rotatedBoxPlanes,
+  SNAP_FLAG_STARVED,
   SnapshotMsg,
   SURF_LADDER,
   sanitizeUserCmd,
@@ -653,8 +661,104 @@ function runTransport(n: number): void {
   }
 }
 
+// The match tick (D-027): a real Match on movement_lab and one client over a loopback pair, past
+// HELLO and READY at setup. Each call sends an INPUT with four redundant cmds (a strafing circle
+// with jumps and attack), skips six in 64 so the starved repeat runs past the redundancy, pings
+// now and then, runs one match tick and decodes what came back. A tick is far heavier than the
+// calls above, so a run is n / 10 ticks, after a longer warm-up.
+class MatchRig {
+  readonly match: Match;
+  readonly client: LoopbackEndpoint;
+  readonly writer = new BitWriter(MAX_RELIABLE_BYTES);
+  readonly reader = new BitReader();
+  readonly input = new InputMsg();
+  readonly snap = new SnapshotMsg();
+  readonly pong = new PongMsg();
+  readonly ping = new PingMsg();
+  /** Warm-up calls left: the first runs eight times as long (see runMatch). */
+  warmup = 1;
+
+  constructor() {
+    const course = loadCourse("movement_lab");
+    this.match = new Match({ cmap: course.cmap, world: course.world, buildHash: "alloc" });
+    const [client, server] = createLoopbackPair();
+    this.client = client;
+    this.match.connect(server, true);
+    client.onMessage((d, len) => this.receive(d, len));
+    const hello = new HelloMsg();
+    hello.buildHash = "alloc";
+    this.writer.reset();
+    encodeHello(this.writer, hello);
+    client.sendReliable(this.writer.bytes, this.writer.byteLength);
+    this.match.tick();
+    client.poll();
+    this.writer.reset();
+    encodeReady(this.writer);
+    client.sendReliable(this.writer.bytes, this.writer.byteLength);
+    this.match.tick();
+    client.poll();
+  }
+
+  private receive(d: Uint8Array, len: number): void {
+    this.reader.reset(d, len);
+    const type = peekMessageType(d, len);
+    if (type === MSG_SNAPSHOT && decodeSnapshot(this.reader, this.snap)) {
+      outcomes[0] = (outcomes[0] as number) + 1;
+      if ((this.snap.flags & SNAP_FLAG_STARVED) !== 0) outcomes[1] = (outcomes[1] as number) + 1;
+    } else if (type === MSG_PONG && decodePong(this.reader, this.pong)) {
+      outcomes[2] = (outcomes[2] as number) + 1;
+    }
+  }
+}
+
+/** Built on the first match call only, so the other workloads' counters never see it. */
+let matchRig: MatchRig | null = null;
+
+function fillMatchCmd(c: UserCmd, tick: number): void {
+  c.tick = tick;
+  c.buttons = (tick % 50 < 2 ? BUTTON_JUMP : 0) | (tick % 3 === 0 ? BUTTON_ATTACK : 0);
+  c.forward = 127;
+  c.right = 127;
+  c.up = 0;
+  c.yaw = (tick * 300) & 0xffff;
+  c.pitch = 0;
+  c.weaponSlot = 0;
+}
+
+function runMatch(n: number): void {
+  if (matchRig === null) matchRig = new MatchRig();
+  const rig = matchRig;
+  const match = rig.match;
+  const client = rig.client;
+  const w = rig.writer;
+  const input = rig.input;
+  // V8 keeps compiling a path this deep for about 150000 ticks; its heap use then settles to 0.
+  const ticks = rig.warmup-- > 0 ? (n / 10) * 8 : n / 10;
+  for (let i = 0; i < ticks; i++) {
+    const newest = match.serverTick + 3;
+    if ((i & 63) < 58) {
+      input.packetSeq = i & 0xffff;
+      input.lastSnapshotTick = match.serverTick;
+      input.count = 4;
+      for (let k = 0; k < 4; k++) fillMatchCmd(input.cmds[k] as UserCmd, newest - k);
+      w.reset();
+      encodeInput(w, input);
+      client.sendUnreliable(w.bytes, w.byteLength);
+    }
+    if (i % 30 === 0) {
+      rig.ping.pingId = i & 0xffff;
+      w.reset();
+      encodePing(w, rig.ping);
+      client.sendUnreliable(w.bytes, w.byteLength);
+    }
+    match.tick();
+    client.poll();
+  }
+}
+
 const WORKLOADS: Record<string, (n: number) => void> = {
   codec: runCodec,
+  match: runMatch,
   pmove: runPmove,
   pmoveModes: runPmoveModes,
   pmoveBasics: runPmoveBasics,

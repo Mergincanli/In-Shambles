@@ -20,8 +20,8 @@ import { placeAtAnchor, ScenarioRunner } from "../../src/scenarios/runner";
 // docs/03 §2.1): 16 and 18 u climb with one STEP event, 19 u blocks, and the 8 × 16 u stairs give
 // eight. Each run holds forward from the base anchor for 1.5 s and lets go once the origin
 // reaches the top anchor, so the player stops on the step instead of running off its far side.
-// Two starts: a spawned player (feet exactly on the floor, as at the anchor) and one that has
-// landed (feet one ε above it, D-017).
+// Two starts: on the anchor (feet exactly on the floor) and landed (feet one ε above it, D-017,
+// as after any fall and as the match spawns a player, D-027).
 
 const TICKS = 90; // 1.5 s
 const STEP_TOLERANCE = 1 / 16;
@@ -29,7 +29,7 @@ const course = loadCourse("movement_lab");
 const runner = new ScenarioRunner(course.world);
 
 const STARTS = [
-  ["spawned", 0],
+  ["anchor", 0],
   ["landed", TRACE_EPSILON],
 ] as const;
 
