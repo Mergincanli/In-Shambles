@@ -1,3 +1,4 @@
+import { CVAR_STRING_MAX, SHORT_TEXT_MAX } from "../net/protocol";
 import { CvarFlag } from "./flags";
 
 export type CvarType = "int" | "float" | "bool" | "string";
@@ -93,8 +94,15 @@ export class CvarRegistry {
     if (def.min !== undefined && def.max !== undefined && def.min > def.max) {
       throw new Error(`cvar "${def.name}": min ${def.min} > max ${def.max}`);
     }
+    if (isReplicatedDef(def) && def.name.length > SHORT_TEXT_MAX) {
+      throw new Error(`replicated cvar "${def.name}": name longer than ${SHORT_TEXT_MAX} chars`);
+    }
     const value: CvarValue = def.default;
-    if (!matchesType(def.type, value) || clampToRange(def, value) !== value) {
+    if (
+      !matchesType(def.type, value) ||
+      clampToRange(def, value) !== value ||
+      !fitsWire(def, value)
+    ) {
       throw new Error(`cvar "${def.name}": default ${String(value)} is not a valid ${def.type}`);
     }
     const entry: CvarEntry = { def: { ...def }, value: normalize(value), latched: undefined };
@@ -171,6 +179,26 @@ export class CvarRegistry {
     return this.assign(entry, entry.def.default);
   }
 
+  /**
+   * Stores a server-sent value of a REPLICATED cvar on a client's mirror (`applyCvarBlock`). The
+   * server already applied its CHEAT and LATCH rules to it, so neither applies here: prediction
+   * must use the server's value. The value is stored as sent, never clamped; false, changing
+   * nothing, for an unknown or non-replicated cvar or a value of the wrong type, outside min/max
+   * or not encodable. Drops any pending latched value.
+   */
+  setReplicated(name: string, value: CvarValue): boolean {
+    const entry = this.lookup(name);
+    if (entry === undefined || !isReplicatedDef(entry.def)) return false;
+    const def = entry.def;
+    if (!matchesType(def.type, value) || clampToRange(def, value) !== value) return false;
+    if (!fitsWire(def, value)) return false;
+    const next = normalize(value);
+    entry.latched = undefined;
+    if (next !== entry.value) this.changes++;
+    entry.value = next;
+    return true;
+  }
+
   /** Apply pending LATCH values (on map restart). Returns the names that changed, sorted. */
   applyLatched(): string[] {
     const applied: string[] = [];
@@ -201,7 +229,9 @@ export class CvarRegistry {
   }
 
   private assign(entry: CvarEntry, value: CvarValue): SetResult {
-    if (!matchesType(entry.def.type, value)) return { ok: false, error: "type" };
+    if (!matchesType(entry.def.type, value) || !fitsWire(entry.def, value)) {
+      return { ok: false, error: "type" };
+    }
     const next = normalize(clampToRange(entry.def, value));
     const clamped = next !== value;
     if ((entry.def.flags ?? 0) & CvarFlag.LATCH) {
@@ -213,6 +243,25 @@ export class CvarRegistry {
     entry.value = next;
     return { ok: true, value: next, clamped, latched: false };
   }
+}
+
+function isReplicatedDef(def: CvarDef): boolean {
+  return ((def.flags ?? 0) & CvarFlag.REPLICATED) !== 0;
+}
+
+/**
+ * A REPLICATED string must fit the cvar block's string encoding (net/cvarBlock.ts): printable
+ * 7-bit ASCII, at most CVAR_STRING_MAX chars. Refusing it here, where it is set, keeps the block
+ * always encodable, so WELCOME, CVARS and the snapshot hash never fail on a console value.
+ */
+function fitsWire(def: CvarDef, value: CvarValue): boolean {
+  if (typeof value !== "string" || !isReplicatedDef(def)) return true;
+  if (value.length > CVAR_STRING_MAX) return false;
+  for (let i = 0; i < value.length; i++) {
+    const c = value.charCodeAt(i);
+    if (c < 0x20 || c > 0x7e) return false;
+  }
+  return true;
 }
 
 function isCheat(entry: CvarEntry): boolean {

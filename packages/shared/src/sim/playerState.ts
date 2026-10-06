@@ -119,9 +119,12 @@ function quantizeWaterLevel(w: number): number {
 /**
  * End-of-tick quantization of the whole state, in place (docs/05 §4.1), on client and server
  * alike so a correct prediction matches the server bit for bit. Idempotent, never yields −0, and
- * every field ends in the range its codec carries:
+ * every field ends in the range its codec carries, except pitch:
  * - origin and velocity: math/quant grids and clamps;
- * - angles `& 0xFFFF` and flags `& PMF_MASK` (wrap, truncating toward zero);
+ * - angles `& 0xFFFF` and flags `& PMF_MASK` (wrap, truncating toward zero). Pitch is only
+ *   masked, not clamped (the frozen D-016 vectors pin that): it stays within ±PITCH_LIMIT_U16,
+ *   which the codec requires, because pmove copies a sanitized cmd pitch, and any other path that
+ *   sets it (spawn, teleport) must clamp it with clampPitchU16;
  * - groundEntity to [ENTITY_NONE, ENTITY_WORLD] and waterLevel to 0..3, truncating;
  * - stamina to the nearest hundredth in 0..65535 (a continuous quantity, so it rounds).
  *

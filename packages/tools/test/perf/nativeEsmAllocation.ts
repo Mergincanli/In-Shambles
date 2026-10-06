@@ -4,6 +4,8 @@ import {
   ACCEL_GROUND,
   accelerate,
   applyFriction,
+  BitReader,
+  BitWriter,
   BUTTON_CROUCH,
   BUTTON_JUMP,
   BUTTON_WALK,
@@ -18,11 +20,26 @@ import {
   cmdScale,
   copyPlayerState,
   createCollisionWorld,
+  decodeInput,
+  decodePing,
+  decodePong,
+  decodeSnapshot,
+  encodeInput,
+  encodePing,
+  encodePong,
+  encodeSnapshot,
   HULL_CROUCHED_MAXS,
   HULL_MINS,
   HULL_STANDING_MAXS,
+  InputMsg,
   MASK_PLAYERSOLID,
+  MAX_UNRELIABLE_BYTES,
+  MSG_INPUT,
+  MSG_PING,
+  MSG_PONG,
+  MSG_SNAPSHOT,
   Mulberry32,
+  PingMsg,
   PlayerState,
   PlayerStateRing,
   PMEV_LAND,
@@ -35,6 +52,8 @@ import {
   PmoveEvents,
   PmoveParams,
   PmoveTraceLog,
+  PongMsg,
+  peekMessageType,
   playerStateEquals,
   pmove,
   pointContents,
@@ -44,6 +63,7 @@ import {
   refreshPmoveParams,
   registerPmoveCvars,
   rotatedBoxPlanes,
+  SnapshotMsg,
   SURF_LADDER,
   sanitizeUserCmd,
   snapOrigin,
@@ -436,7 +456,145 @@ function runStrafeBot(n: number): void {
   }
 }
 
+const codecWriter = new BitWriter(MAX_UNRELIABLE_BYTES);
+const codecReader = new BitReader();
+const snapSent = new SnapshotMsg();
+const snapGot = new SnapshotMsg();
+const inputSent = new InputMsg();
+const inputGot = new InputMsg();
+const pingSent = new PingMsg();
+const pingGot = new PingMsg();
+const pongSent = new PongMsg();
+const pongGot = new PongMsg();
+
+/**
+ * Packets the decoders must refuse, as a server sees from a broken or hostile client: random
+ * bytes behind an INPUT, SNAPSHOT or PONG type byte, and valid messages with a u32 tick set to
+ * 2^32 − 1 (a value that would box if a decoder stored it before checking it). Built once.
+ */
+const HOSTILE_COUNT = 64;
+const hostile: Uint8Array[] = [];
+const hostileTypes = [MSG_INPUT, MSG_SNAPSHOT, MSG_PONG];
+for (let i = 0; i < HOSTILE_COUNT; i++) {
+  const type = hostileTypes[i % 3] as number;
+  if (i < HOSTILE_COUNT / 2) {
+    const bytes = new Uint8Array(1 + rng.nextInt(64));
+    for (let b = 0; b < bytes.length; b++) bytes[b] = rng.nextInt(256);
+    bytes[0] = type;
+    hostile.push(bytes);
+    continue;
+  }
+  codecWriter.reset();
+  if (type === MSG_INPUT) {
+    inputSent.count = 1;
+    encodeInput(codecWriter, inputSent);
+  } else if (type === MSG_SNAPSHOT) {
+    encodeSnapshot(codecWriter, snapSent);
+  } else {
+    encodePong(codecWriter, pongSent);
+  }
+  const bytes = codecWriter.bytes.slice(0, codecWriter.byteLength);
+  // INPUT lastSnapshotTick and PONG serverTick at byte 3; SNAPSHOT serverTick at byte 1 or
+  // lastProcessedCmdTick at byte 9.
+  const at = type === MSG_SNAPSHOT ? ((i & 1) === 0 ? 1 : 9) : 3;
+  bytes.fill(0xff, at, at + 4);
+  hostile.push(bytes);
+}
+/** Hostile packets refused (all of them, when the decoders work). */
+const codecRejected = new Int32Array(1);
+
+/**
+ * The per-tick messages (D-026): SNAPSHOT (a quantized state with fractional origin and velocity),
+ * INPUT with 1–4 cmds, PING and PONG, each encoded, dispatched on its type byte and decoded,
+ * then one hostile packet, which must be refused without allocating either. Outcomes: snapshots,
+ * inputs, pings and pongs that came back equal; `codecRejected` counts the refusals.
+ */
+function runCodec(n: number): void {
+  const w = codecWriter;
+  const r = codecReader;
+  for (let i = 0; i < n; i++) {
+    const e = exact[i & (CASES - 1)] as Vec3;
+    const kind = i & 3;
+    w.reset();
+    if (kind === 0) {
+      const s = snapSent.state;
+      s.origin[0] = e[0];
+      s.origin[1] = e[1];
+      s.origin[2] = e[2];
+      s.velocity[0] = e[1] * 3.3;
+      s.velocity[1] = -e[0] * 1.7;
+      s.velocity[2] = e[2] * 0.1;
+      s.viewYaw = i * 7;
+      s.viewPitch = ((i * 13) % 32401) - 16200 + 0x10000;
+      s.flags = i;
+      s.groundEntity = (i & 1) === 0 ? -1 : 32767;
+      s.waterLevel = i;
+      s.stamina = i & 4095;
+      quantizePlayerState(s);
+      snapSent.serverTick = i;
+      snapSent.lastProcessedCmdTick = i;
+      snapSent.inputBufferHealth = (i & 15) - 8;
+      snapSent.cvarHash = i & 0xffff;
+      snapSent.flags = i & 3;
+      encodeSnapshot(w, snapSent);
+    } else if (kind === 1) {
+      inputSent.packetSeq = i & 0xffff;
+      inputSent.lastSnapshotTick = i;
+      inputSent.count = 1 + ((i >> 2) & 3);
+      for (let k = 0; k < 4; k++) {
+        const c = inputSent.cmds[k] as UserCmd;
+        c.tick = i + 8 - k;
+        c.buttons = (i + k) & 0xfff;
+        c.forward = (((i + k) & 255) % 255) - 127;
+        c.right = (i & 127) - 64;
+        c.up = k;
+        c.yaw = (i * 97) & 0xffff;
+        c.pitch = (((i * 31) % 32401) - 16200) & 0xffff;
+        c.weaponSlot = k;
+      }
+      encodeInput(w, inputSent);
+    } else if (kind === 2) {
+      pingSent.pingId = i & 0xffff;
+      encodePing(w, pingSent);
+    } else {
+      pongSent.pingId = i & 0xffff;
+      pongSent.serverTick = i;
+      encodePong(w, pongSent);
+    }
+    r.reset(w.bytes, w.byteLength);
+    const type = peekMessageType(w.bytes, w.byteLength);
+    if (type === MSG_SNAPSHOT) {
+      if (decodeSnapshot(r, snapGot) && playerStateEquals(snapGot.state, snapSent.state)) {
+        outcomes[0] = (outcomes[0] as number) + 1;
+      }
+    } else if (type === MSG_INPUT) {
+      if (decodeInput(r, inputGot) && inputGot.count === inputSent.count) {
+        outcomes[1] = (outcomes[1] as number) + 1;
+      }
+    } else if (type === MSG_PING) {
+      if (decodePing(r, pingGot) && pingGot.pingId === pingSent.pingId) {
+        outcomes[2] = (outcomes[2] as number) + 1;
+      }
+    } else if (type === MSG_PONG) {
+      if (decodePong(r, pongGot) && pongGot.serverTick === pongSent.serverTick) {
+        outcomes[2] = (outcomes[2] as number) + 1;
+      }
+    }
+    const h = hostile[i & (HOSTILE_COUNT - 1)] as Uint8Array;
+    r.reset(h, h.length);
+    const hType = h[0] as number;
+    const accepted =
+      hType === MSG_INPUT
+        ? decodeInput(r, inputGot)
+        : hType === MSG_SNAPSHOT
+          ? decodeSnapshot(r, snapGot)
+          : decodePong(r, pongGot);
+    if (!accepted) codecRejected[0] = (codecRejected[0] as number) + 1;
+  }
+}
+
 const WORKLOADS: Record<string, (n: number) => void> = {
+  codec: runCodec,
   pmove: runPmove,
   pmoveModes: runPmoveModes,
   pmoveBasics: runPmoveBasics,
@@ -472,4 +630,6 @@ for (let attempt = 0; attempt < 3 && !clean; attempt++) {
   clean = gcs === 0 && growth < 64 * 1024;
 }
 observer.disconnect();
-console.log(JSON.stringify({ clean, attempts, outcomes: Array.from(outcomes) }));
+console.log(
+  JSON.stringify({ clean, attempts, outcomes: Array.from(outcomes), rejected: codecRejected[0] }),
+);

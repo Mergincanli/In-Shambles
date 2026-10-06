@@ -445,3 +445,82 @@ describe("version", () => {
     expect(cvars.get("sv_fps")).toBe(60);
   });
 });
+
+describe("replicated cvars fit the cvar block (D-027)", () => {
+  const R = CvarFlag.REPLICATED;
+
+  it("refuses names past 63 chars and unencodable string defaults at registration", () => {
+    const reg = new CvarRegistry();
+    reg.register({
+      name: `pm_${"a".repeat(60)}`,
+      type: "int",
+      default: 0,
+      description: "",
+      flags: R,
+    });
+    expect(() =>
+      reg.register({
+        name: `pm_${"b".repeat(61)}`,
+        type: "int",
+        default: 0,
+        description: "",
+        flags: R,
+      }),
+    ).toThrow(/longer than 63/);
+    // Not replicated: no wire limit.
+    reg.register({ name: `cl_${"c".repeat(70)}`, type: "int", default: 0, description: "" });
+    for (const bad of ["café", "tab\there", "x".repeat(256)]) {
+      expect(() =>
+        reg.register({ name: "g_motd", type: "string", default: bad, description: "", flags: R }),
+      ).toThrow(/not a valid string/);
+    }
+    reg.register({
+      name: "g_motd",
+      type: "string",
+      default: "x".repeat(255),
+      description: "",
+      flags: R,
+    });
+  });
+
+  it("refuses unencodable values for replicated strings on every set path", () => {
+    const reg = new CvarRegistry();
+    reg.register({ name: "g_motd", type: "string", default: "hi", description: "", flags: R });
+    reg.register({ name: "cl_name", type: "string", default: "hi", description: "" });
+    const v = reg.version;
+    expect(reg.set("g_motd", "Grüße")).toEqual({ ok: false, error: "type" });
+    expect(reg.setFromString("g_motd", "café")).toEqual({ ok: false, error: "type" });
+    expect(reg.set("g_motd", "x".repeat(256))).toEqual({ ok: false, error: "type" });
+    expect(reg.setReplicated("g_motd", "café")).toBe(false);
+    expect([reg.get("g_motd"), reg.version]).toEqual(["hi", v]);
+    expect(reg.set("g_motd", "welcome!").ok).toBe(true);
+    // A local string takes any text.
+    expect(reg.set("cl_name", "Grüße").ok).toBe(true);
+  });
+
+  it("setReplicated stores a server value as sent, past CHEAT and LATCH, but never clamps", () => {
+    const reg = new CvarRegistry();
+    reg.register({
+      name: "pm_gravity",
+      type: "float",
+      default: 800,
+      min: 0,
+      max: 4000,
+      description: "",
+      flags: R | CvarFlag.CHEAT | CvarFlag.LATCH,
+    });
+    reg.register({ name: "cl_fov", type: "float", default: 90, description: "" });
+    expect(reg.set("pm_gravity", 100)).toEqual({ ok: false, error: "cheat" });
+    const v = reg.version;
+    expect(reg.setReplicated("pm_gravity", 400.5)).toBe(true);
+    expect([reg.get("pm_gravity"), reg.version]).toEqual([400.5, v + 1]);
+    expect(reg.setReplicated("pm_gravity", 400.5)).toBe(true);
+    expect(reg.version).toBe(v + 1);
+    for (const bad of [-1, 4001, Number.NaN, "800", true]) {
+      expect(reg.setReplicated("pm_gravity", bad)).toBe(false);
+    }
+    expect(reg.setReplicated("cl_fov", 100)).toBe(false);
+    expect(reg.setReplicated("nope", 1)).toBe(false);
+    expect([reg.get("pm_gravity"), reg.get("cl_fov"), reg.version]).toEqual([400.5, 90, v + 1]);
+  });
+});

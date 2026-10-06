@@ -4,8 +4,7 @@ import { fromRoot } from "../../src/paths";
 
 // The per-tick paths (quantizePlayerState, snapOrigin, the state ring, copy/equals,
 // sanitizeUserCmd, the pmove params refresh and basics, whole pmove ticks in every M2 move mode,
-// the scenario runner
-// and bots, and the BVH queries)
+// the scenario runner and bots, the per-tick message codecs, and the BVH queries)
 // must not allocate under native ES modules either, where V8 boxes a double returned by a call it
 // doesn't inline or joined with a module constant in a ternary. Vitest's module runner hides
 // that, so this runs a child process.
@@ -14,6 +13,8 @@ interface ChildResult {
   clean: boolean;
   attempts: string[];
   outcomes: number[];
+  /** codec only: hostile packets the decoders refused. */
+  rejected: number;
 }
 
 function runChild(workload: string): ChildResult {
@@ -71,6 +72,18 @@ describe("per-tick paths under native ES modules", () => {
   it("the strafe bot's yaw search allocates nothing", () => {
     const r = runChild("strafeBot");
     for (const n of r.outcomes) expect(n).toBeGreaterThan(0);
+    expect(r.clean, r.attempts.join("; ")).toBe(true);
+  }, 30_000);
+
+  it("the INPUT, SNAPSHOT, PING and PONG codecs allocate nothing, refusals included (D-026)", () => {
+    const r = runChild("codec");
+    for (const n of r.outcomes) expect(n).toBeGreaterThan(0);
+    // Every message came back: snapshots and inputs are a quarter each, pings and pongs a half.
+    expect(r.outcomes[0]).toBe(r.outcomes[1]);
+    expect(r.outcomes[2]).toBe(2 * (r.outcomes[0] as number));
+    // And every hostile packet, one per message, was refused, in each run of 200000 calls.
+    expect(r.rejected).toBeGreaterThan(0);
+    expect(r.rejected % 200_000).toBe(0);
     expect(r.clean, r.attempts.join("; ")).toBe(true);
   }, 30_000);
 

@@ -44,7 +44,7 @@
 - **Local/offline:** the *same* server code runs in a **Web Worker** in the browser. The transport is `LoopbackTransport` (postMessage with transferable ArrayBuffers), and the net simulator can inject latency and loss even locally.
 - **Connection lifecycle:**
   1. `HELLO`: protocol version, build hash, client nonce.
-  2. `WELCOME`: client id, tick rate, current server tick, map id + content hash, replicated cvar block, match rules.
+  2. `WELCOME`: client id, tick rate, current server tick, map id + content hash, replicated cvar block, match rules (match rules join WELCOME in a later protocol version; v1 has none, §3.6).
   3. Clock sync: 5 × `PING`/`PONG`, median RTT.
   4. The client loads the map, then sends `READY`.
   5. The client starts as a spectator; it joins a team and picks a loadout through reliable messages.
@@ -73,21 +73,28 @@ Every transport can be wrapped by `NetSimTransport` (latency, jitter, loss, dupl
 
 ### 3.2 Framing and versioning
 - **Binary only** (`ArrayBuffer`/`DataView`), no JSON in hot paths.
-- Every message starts with `u8 type`. `PROTOCOL_VERSION` (u16) is exchanged in `HELLO`; on mismatch → refuse with a clear message.
-- **Bit-packed** writer/reader (`BitWriter`/`BitReader`) with explicit widths. Decoders are bounds-checked: throw → drop the packet and count a strike.
+- Every message starts with `u8 type`. `PROTOCOL_VERSION` (u16) is exchanged in `HELLO`; on mismatch → refuse with a clear message. HELLO's first 3 B (type, protocolVersion) are frozen across all protocol versions, so the server reads a client's version (`peekHelloVersion`) before parsing the rest and can always answer a mismatch with a `KICK`, whatever a newer HELLO adds (D-026).
+- **Bit-packed** writer/reader (`BitWriter`/`BitReader`, `shared/src/net/bitstream.ts`) with explicit widths (1–32 bits), LSB-first: stream bit *i* is bit *i* & 7 of byte *i* >> 3, a value's low bit first. Both work over a preallocated `Uint8Array` and never throw: an overflow, a value its width can't carry or a short read sets a sticky error flag (D-026).
+- **Decoders are bounds-checked** and return false on a short read, a wrong type byte, any value the encoder never writes, or bits left after the message (beyond the zero padding of its last byte). The receiver drops the packet and counts a strike. Encoders refuse fields out of their layout's range the same way, so a bad message is never sent.
+- **One message per packet.** Unreliable packets are at most `MAX_UNRELIABLE_BYTES` = 1200 B (datagram-safe), reliable messages at most `MAX_RELIABLE_BYTES` = 16384 B (`shared/src/net/protocol.ts`).
 
 ### 3.3 Message types
 
-| Dir | Type | Channel | Purpose |
-|---|---|---|---|
-| C→S | `HELLO`, `READY` | reliable | handshake |
-| C→S | `INPUT` | unreliable | UserCmds (redundant) + snapshot ack |
-| C→S | `PING` | unreliable | clock/RTT |
-| C→S | `LOADOUT`, `TEAM`, `CHAT`, `CMD` | reliable | gear, team, chat, console/admin |
-| S→C | `WELCOME`, `CVARS`, `MAP` | reliable | session setup, replicated cvars |
-| S→C | `SNAPSHOT` | unreliable | world state for a tick |
-| S→C | `EVENTS` | reliable | kill feed, hit confirms, damage taken, round state, chat |
-| S→C | `PONG`, `KICK` | unreliable / reliable | |
+| Dir | Type | Channel | Purpose | Since |
+|---|---|---|---|---|
+| C→S | `HELLO`, `READY` | reliable | handshake | v1 (M2) |
+| C→S | `INPUT` | unreliable | UserCmds (redundant) + snapshot ack | v1 (M2) |
+| C→S | `PING` | unreliable | clock/RTT | v1 (M2) |
+| C→S | `CMD` | reliable | console/admin command text | v1 (M2) |
+| C→S | `LOADOUT`, `TEAM`, `CHAT` | reliable | gear, team, chat | later |
+| S→C | `WELCOME`, `CVARS` | reliable | session setup, replicated cvars | v1 (M2) |
+| S→C | `MAP` | reliable | map change | later |
+| S→C | `SNAPSHOT` | unreliable | world state for a tick | v1 (M2) |
+| S→C | `PONG` | unreliable | clock/RTT reply | v1 (M2) |
+| S→C | `PRINT`, `KICK` | reliable | console output; disconnect with a reason | v1 (M2) |
+| S→C | `EVENTS` | reliable | kill feed, hit confirms, damage taken, round state, chat | later |
+
+The exact v1 layouts are in §3.6.
 
 ### 3.4 UserCmd and the INPUT message
 Each UserCmd (~12 bytes):
@@ -108,21 +115,62 @@ Each UserCmd (~12 bytes):
 The `INPUT` packet carries:
 - `packetSeq` (u16)
 - `lastSnapshotTick` (u32): **ack** for delta baselines
-- the **last N = 4 UserCmds** (redundancy, so a lost packet rarely loses an input)
+- the **last N = 4 UserCmds** (redundancy, so a lost packet rarely loses an input), newest first: the newest cmd's tick in full (u32), each older one as a u8 offset back from it (`tickBack`, 1–255, strictly rising, never below tick 0). Four cmds take 435 bits, 55 B, so about 3.3 KB/s up at 60 Hz (§3.6).
+- Decoded cmds must already be in the ranges `sanitizeUserCmd` forces (buttons bits 12–15 clear, axes ±127, pitch ±16201, weaponSlot 0–7), or the packet is dropped; the server still sanitizes every cmd it simulates.
 
 ### 3.5 Replicated cvars
 - Physics and gameplay tunables (`pm_*`, `st_*`, weapon overrides) are **server-owned**.
 - They are sent on join and on change, versioned by a hash. Snapshots carry the hash; if it mismatches, the client requests a resend.
 - **Prediction must use the replicated values only.**
+- **The block** (D-027, `shared/src/net/cvarBlock.ts`) lists every `REPLICATED` cvar in ascending lowercase-name order, with no duplicates, so one set of values has exactly one encoding:
+  - count (u10, at most 1023 entries);
+  - per entry: name (u6 length + 7-bit ASCII: the registry's name grammar, at most 63 chars), kind (u2: 0 int, 1 float, 2 bool, 3 string), then the value: int as i32; float as the f64's raw IEEE-754 bits, low word first (exact, so client and server simulate with the same double; finite, never −0); bool as 1 bit; string as a u8 length + 7-bit printable ASCII.
+- **The hash** is `murmur3Bytes` (`shared/src/rng/hash32.ts`) over the block encoded on its own from bit 0 and zero-padded to a whole byte, with seed `0x63766172` (the ASCII bytes "cvar", big-endian). `CVARS` carries all 32 bits and the decoder checks them against the block it read; `SNAPSHOT` carries the low 16 bits of the hash the server simulated that tick with. The hash does not depend on registration order or on any non-replicated cvar.
+- **The registry keeps every block encodable:** a `REPLICATED` cvar's name is at most 63 chars (registration throws otherwise), and a `REPLICATED` string's value is printable 7-bit ASCII of at most 255 chars (registration throws; `set` and `setFromString` refuse it with a `type` error). So a console or admin value can never make WELCOME or CVARS unencodable or turn the snapshot hash into a sentinel.
+- **Applying a block** to the client's mirror registry is all or nothing: it must name exactly the registry's `REPLICATED` cvars, spelled as registered, with their types and with values inside their min/max (a clamped value would mispredict). Unknown names, non-replicated cvars, a missing cvar, wrong kinds and out-of-range values reject the whole block and change nothing. The server already applied its CHEAT and LATCH rules to what it sends, so the mirror stores CHEAT and LATCH values as sent (`CvarRegistry.setReplicated`), whatever its own cheat setting, and drops any pending latched value. After a successful apply the mirror's hash equals the block's.
+- **`CVARS`** carries `effectiveTick`, the first tick simulated with the new values, so the client switches its prediction parameters at that tick (D-027; the switch lands with the match loop and the predictor, M2 increments 9–10).
+
+### 3.6 Protocol v1 layout (`PROTOCOL_VERSION` = 1, D-026)
+
+Every message starts with the `u8` type: 1 `HELLO`, 2 `WELCOME`, 3 `READY`, 4 `INPUT`, 5 `SNAPSHOT`, 6 `PING`, 7 `PONG`, 8 `CVARS`, 9 `CMD`, 10 `PRINT`, 11 `KICK` (0 is never a message). Fields follow in this order, LSB-first, and the last byte is zero-padded. Ticks are written in 32 bits but must be ≤ `TICK_MAX` (2^30 − 1). "short ASCII" is a u6 length + 7 bits per printable char (0x20–0x7e, at most 63); "text" is a u10 length + 8 bits per Latin-1 char (printable, plus tab and newline; at most 1023).
+
+| Msg | Channel | Fields after the type byte (bits) | Size |
+|---|---|---|---|
+| `HELLO` C→S | reliable | protocolVersion 16 (with the type byte, frozen for every version, §3.2), buildHash (short ASCII), nonce 32 | ≤ 63 B |
+| `WELCOME` S→C | reliable | protocolVersion 16, clientId 8, tickRate 8 (1–255), serverTick 32, mapName (short ASCII), mapHash lo 32 + hi 32 (the cmap `contentHash`), cvar block (§3.5) | ≈ 0.5 KB with the M2 cvars |
+| `READY` C→S | reliable | none | 1 B |
+| `INPUT` C→S | unreliable | packetSeq 16, lastSnapshotTick 32, count 3 (1–4), newestTick 32; per cmd, newest first: tickBack 8 (not for the first cmd), buttons 16, forward 8, right 8, up 8 (i8 each, ±127), yaw 16, pitch 16 (±16201), weaponSlot 8 (0–7) | 55 B for 4 cmds |
+| `SNAPSHOT` S→C | unreliable | serverTick 32, baselineTick 32 (0 = full; must be 0 in M2), lastProcessedCmdTick 32, inputBufferHealth i8, cvarHash 16, flags 8 (bit 0 starved, bit 1 teleport; the rest must be 0), then the player state below | 335 bits, 42 B |
+| `PING` C→S | unreliable | pingId 16 | 3 B |
+| `PONG` S→C | unreliable | pingId 16, serverTick 32 | 7 B |
+| `CVARS` S→C | reliable | effectiveTick 32, blockHash 32, cvar block (§3.5) | ≈ 0.5 KB |
+| `CMD` C→S | reliable | text | ≤ 1026 B |
+| `PRINT` S→C | reliable | level 2 (0 info, 1 warn, 2 error; 3 is refused), text | ≤ 1026 B |
+| `KICK` S→C | reliable | reason (text) | ≤ 1026 B |
+
+**Player state** (`shared/src/net/playerStateCodec.ts`, 199 bits), in the units of end-of-tick quantization (§4.1), so a quantized state encodes exactly and decodes to the same bits:
+
+| Field | Bits | Encoding and decode check |
+|---|---|---|
+| origin x, y, z | 3 × 21 | signed, 1/32 u; within ±524288 (±16384 u) |
+| velocity x, y, z | 3 × 20 | signed, 1/16 u/s; within ±524287 (−2^19 is refused) |
+| viewYaw | 16 | u16 angle units |
+| viewPitch | 16 | u16 angle units; within ±16201 (±89°) |
+| flags | 10 | `PMF_*` bits |
+| groundEntity + 1 | 16 | 0 (`ENTITY_NONE`) … 32768 (`ENTITY_WORLD`); above is refused |
+| waterLevel | 2 | 0–3 |
+| stamina | 16 | hundredths |
+
+INPUT, SNAPSHOT, PING and PONG encode and decode without allocating, refused packets included: decoders read a tick as two u16 halves and reject it past `TICK_MAX` before it becomes a number V8 would box. The text and cvar-block fields of the reliable messages allocate (rare). A decoder that accepts a packet re-encodes it to the same bytes (NET-01).
 
 ## 4. State encoding and quantization
 
 ### 4.1 End-of-tick quantization (both sides, every tick)
 | Quantity | Quantum | Storage |
 |---|---|---|
-| Origin | 1/32 u (nearest clear grid point, D-017) | i32 per axis; clamped to ±16384 u |
+| Origin | 1/32 u (nearest clear grid point, D-017) | i21 per axis on the wire (±2^19 units, §3.6); clamped to ±16384 u |
 | Velocity | 1/16 u/s | i20 per axis; clamped to ±(2^19 − 1)/16 = ±32767.9375 u/s |
-| Angles | 360/65536° | u16 |
+| Angles | 360/65536° | u16; pitch is only masked, so whatever sets it must keep it within ±16201 (pmove copies the sanitized cmd pitch; a spawn or teleport clamps with `clampPitchU16`), or the codec refuses the state |
 | Stamina | 0.01 | u16 |
 | Timers | 1 ms or ticks | u16 |
 
@@ -136,6 +184,8 @@ The origin is not simply rounded: pmove snaps it to the nearest clear 1/32 u gri
   - `lastProcessedCmdTick` (u32, for this client)
   - `inputBufferHealth` (i8, §8.2)
   - `cvarHash` (u16)
+  - `flags` (u8: starved, teleport)
+- **M2 (v1) sends only this header and the local player's full movement state** (the §3.6 layout). The local player block below, the combat state, the entity list and delta coding join with M3 and later, with a protocol version bump.
 - **Local player block:** the full authoritative `PlayerState` (`docs/03` §6) plus the combat state (ammo, weapon state, zoom, bleeding, wounds), delta-coded against the baseline.
 - **Entities:** count, then per entity:
   - `id` (u16), `removed` bit

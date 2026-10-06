@@ -15,7 +15,7 @@ import type { Vec3 } from "./vec3";
  * boxes a double passed to a call or joined with a module constant (native ES modules).
  */
 
-/** Origin grid: 1/32 u, within ±16384 u (i32 per axis on the wire). */
+/** Origin grid: 1/32 u, within ±16384 u (i21 per axis on the wire, docs/05 §3.6). */
 export const ORIGIN_SCALE = 32;
 export const ORIGIN_LIMIT = 16384;
 

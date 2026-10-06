@@ -34,7 +34,7 @@ packages/shared/src/
   math/                vec3 (Float64Array, out-params, per-module scratch), plane, aabb,
                        quant (quantizers), dtrig (deterministic sin/cos, u16 table), angles (D-016)
   rng/                 mulberry32, hash32 (seeding: match/shooter/tick/shot)
-  cvars/               registry, flags, replicated block (hash), defaults from docs
+  cvars/               registry, flags, version counter, defaults from docs
   debug/               DEV_ASSERT / setDevAsserts (dev-only checks behind a runtime flag)
   world/
     cmap.ts            compiled map format v1 (docs/07 §2): types, validating decodeCmap → CmapError,
@@ -73,9 +73,12 @@ packages/shared/src/
     entities.ts        typed entity store (ids, kinds, component arrays)
     rules/             mode plug-ins: ffa, tdm, survivor, ctf, trials (interfaces only in shared)
   net/
-    bitstream.ts       BitWriter/BitReader (bounds-checked)
-    schema/            message codecs (INPUT, SNAPSHOT, EVENTS…), PROTOCOL_VERSION
-    delta.ts           field masks, baseline diff/apply
+    bitstream.ts       BitWriter/BitReader: LSB-first, explicit widths, sticky error flag (D-026)
+    protocol.ts        PROTOCOL_VERSION, MSG_* type ids, packet and text size limits
+    messages.ts        protocol v1 message structs + encodeX/decodeX (docs/05 §3.6)
+    playerStateCodec.ts  the PlayerState bit layout and its decode-time range checks
+    cvarBlock.ts       replicated cvar block: canonical encoding, hash, all-or-nothing apply (D-027)
+    delta.ts           field masks, baseline diff/apply (M3)
     transport.ts       Transport interface, LoopbackTransport, NetSimTransport
 
 packages/server/src/
@@ -152,6 +155,7 @@ DEV / OFFLINE                                  ONLINE
 - **Registry** in `shared/cvars`.
   - Each cvar: name, type, default, min/max, description, flags.
   - Flags: `ARCHIVE` (persist client setting), `REPLICATED` (server-owned, sent to clients, used by prediction), `CHEAT` (dev only), `SERVER` (server-only), `LATCH` (applies on map restart).
+  - `REPLICATED` cvars must fit the cvar block (`docs/05` §3.5, D-027): names of at most 63 chars, string values of printable 7-bit ASCII up to 255 chars. A client's mirror takes the server's values through `setReplicated`, past its own CHEAT and LATCH rules.
   - A `version` counter goes up on every registration and every value change. The sim copies its tunables into plain structs (`PmoveParams`) only when it moves, so no tick looks a cvar up (M2 design §0).
 - **Movement/combat tunables** (`pm_*`, `st_*`, `wp_*` overrides) are `REPLICATED`. The server sends the block on join and on change; the block hash appears in snapshots.
 - **Console UI:** toggle with the backquote key (`Backquote` code). Commands: `set`, `toggle`, `reset`, `cvarlist [prefix]`, `bind`, `unbind`, `exec <file>`, `connect`, `disconnect`, `net_profile <name>`, `record`/`stoprecord`, `demo <file>`, `rcon <cmd>`.
