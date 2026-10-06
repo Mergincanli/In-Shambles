@@ -1,6 +1,6 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { Browser } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
@@ -21,6 +21,8 @@ import { decodePng, distinctColors, type Png } from "../scripts/png";
 // drawn. Without WebGL the sim and network path are still checked (M2 plan, risk 7).
 
 const RUN_MS = 3000;
+/** Where the console-and-HUD run saves its screenshot, when set (`E2E_SCREENSHOT_DIR`). */
+const SHOT_DIR = process.env.E2E_SCREENSHOT_DIR;
 /** The sky colour (src/render/renderer.ts) and how far a pixel may be from it to count as sky. */
 const SKY = [0x9d, 0xb3, 0xc9] as const;
 const SKY_TOLERANCE = 6;
@@ -92,5 +94,83 @@ describe("client e2e smoke (M2 design §5)", () => {
     expect(distinctColors(shot)).toBeGreaterThan(8);
     // The bot looks level, so the floor fills the lower half: the world is drawn, lit and aimed.
     expect(nonSkyShare(shot, shot.height >> 1, shot.height)).toBeGreaterThan(0.9);
+  }, 60_000);
+
+  it("opens the console with Backquote, round-trips set pm_gravity and shows the HUD", async () => {
+    const page = await (browser as Browser).newPage({ viewport: { width: 960, height: 540 } });
+    const errors = watchErrors(page);
+    await page.goto(`${served?.url}?autotest=1&bot=circle`);
+    await waitForRunning(page);
+    const consoleBox = page.locator("#console");
+    const input = page.locator("#console-input");
+    const output = page.locator("#console-output");
+    await expect.poll(() => consoleBox.isVisible()).toBe(false);
+    await page.keyboard.press("Backquote");
+    await expect.poll(() => consoleBox.isVisible()).toBe(true);
+    // The key that opened it typed nothing, and the input has the focus.
+    expect(await input.inputValue()).toBe("");
+    expect(await input.evaluate((el) => el === document.activeElement)).toBe(true);
+    for (const line of ["set pm_gravity 400", "set cl_netgraph 1", "set cl_speedometer 1"]) {
+      await input.fill(line);
+      await input.press("Enter");
+    }
+    // The server's PRINT reply, then the client's mirror holding the new value.
+    await expect.poll(() => output.textContent(), { timeout: 5000 }).toContain("pm_gravity = 400");
+    // The mirror switches at the CVARS' effective tick, a little after the PRINT: ask again
+    // until it does.
+    await expect
+      .poll(
+        async () => {
+          await input.fill("pm_gravity");
+          await input.press("Enter");
+          return output.locator("div").last().textContent();
+        },
+        { timeout: 5000 },
+      )
+      .toMatch(/^pm_gravity = 400 \(default 800, replicated/);
+    const net = page.locator("#hud-net");
+    const speed = page.locator("#hud-speed");
+    await expect.poll(() => net.isVisible()).toBe(true);
+    await expect.poll(() => net.textContent(), { timeout: 5000 }).toMatch(/rtt \d+ ms/);
+    await expect.poll(() => speed.isVisible()).toBe(true);
+    await expect.poll(() => speed.textContent(), { timeout: 5000 }).toMatch(/\d+ u\/s {2}vz/);
+    await page.waitForTimeout(1500);
+    const s = await readStatus(page);
+    if (SHOT_DIR !== undefined && SHOT_DIR !== "") {
+      const dir = resolve(SHOT_DIR);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "e2e_console_hud.png"), await page.screenshot());
+    }
+    // Backquote from the console's input closes it again.
+    await input.press("Backquote");
+    await expect.poll(() => consoleBox.isVisible()).toBe(false);
+    // With the input's focus lost (a click on the view, Tab), Backquote and Escape still close
+    // it, and a held Backquote's auto-repeat does not flip it.
+    for (const close of ["Backquote", "Escape"]) {
+      await page.keyboard.press("Backquote");
+      await expect.poll(() => consoleBox.isVisible()).toBe(true);
+      await input.press("Tab");
+      await page.mouse.click(480, 500);
+      expect(await input.evaluate((el) => el === document.activeElement)).toBe(false);
+      await page.keyboard.press(close);
+      await expect.poll(() => consoleBox.isVisible()).toBe(false);
+    }
+    await page.keyboard.down("Backquote");
+    for (let i = 0; i < 5; i++) {
+      await page.evaluate(() => {
+        const init = { code: "Backquote", key: "`", repeat: true, bubbles: true, cancelable: true };
+        (document.activeElement ?? document.body).dispatchEvent(new KeyboardEvent("keydown", init));
+      });
+    }
+    await page.keyboard.up("Backquote");
+    expect(await consoleBox.isVisible()).toBe(true);
+    await page.keyboard.press("Escape");
+    await expect.poll(() => consoleBox.isVisible()).toBe(false);
+    await page.close();
+
+    expect(errors).toEqual([]);
+    expect(s.state).toBe("running");
+    // D-027: a live cvar change switches by tick, with no correction.
+    expect(Number(s.corrections), JSON.stringify(s)).toBe(0);
   }, 60_000);
 });

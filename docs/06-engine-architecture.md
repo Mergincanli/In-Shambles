@@ -203,30 +203,65 @@ DEV / OFFLINE                                  ONLINE
   - A `version` counter goes up on every registration and every value change. The sim copies its tunables into plain structs (`PmoveParams`) only when it moves, so no tick looks a cvar up (M2 design §0).
 - **Movement/combat tunables** (`pm_*`, `st_*`, `wp_*` overrides) are `REPLICATED`. The server sends the block on join and on change; the block hash appears in snapshots.
 - **Changing a replicated cvar** (D-027): the server owns them, so a client's console `set`, `reset` or `toggle` on a `REPLICATED` cvar goes to the server as a `CMD`. The server applies it if the session is admin (the Worker's one client is; M3 decides authorization on the Node server), replies with `PRINT`, and broadcasts `CVARS` with the effective tick; the client's mirror registry and its prediction parameters switch at that tick (`docs/05` §3.5).
-- **Console UI:** toggle with the backquote key (`Backquote` code). Commands: `set`, `toggle`, `reset`, `cvarlist [prefix]`, `bind`, `unbind`, `exec <file>`, `connect`, `disconnect`, `net_profile <name>`, `record`/`stoprecord`, `demo <file>`, `rcon <cmd>`.
-- **Binds** use `KeyboardEvent.code` (physical keys) so AZERTY/QWERTZ layouts work.
-- Default binds mirror UrT-style defaults where sensible; all are rebindable.
+- **Console UI:** toggle with the backquote key (`Backquote` code); Escape also closes it, and both still do when the console's input has lost focus (a click on the view or its output). A held toggle key does not flip it again on auto-repeat. While it is open it owns the keyboard: every bound key is released, and the pointer lock with it. Planned commands: `set`, `toggle`, `reset`, `cvarlist [prefix]`, `bind`, `unbind`, `exec <file>`, `connect`, `disconnect`, `net_profile <name>`, `record`/`stoprecord`, `demo <file>`, `rcon <cmd>`.
+- **Implemented in M2** (`client/src/console/commands.ts`; tokens split at whitespace, double quotes group one with spaces, as the server's CMD parser does):
+
+  | Command | Effect |
+  |---|---|
+  | `set <cvar> <value>` | a client cvar changes at once (clamped to its range, with a note); a `REPLICATED` one is sent to the server as `CMD` and changes when its `CVARS` arrives (D-027) |
+  | `toggle <cvar>` | a bool flips; a number goes to 1 from 0, else to 0; replicated ones as for `set` |
+  | `reset <cvar>` | back to the default; replicated ones as for `set` |
+  | `cvarlist [prefix]` | each cvar with its flags (`A`rchive, `R`eplicated, `C`heat, `L`atch, `S`erver) and value, then the count |
+  | `bind <code> [command]` | shows or sets a key's command: a `+action` or any console line; refuses an empty command, Ctrl/Alt/Meta keys, and taking `toggleconsole` off its last key |
+  | `unbind <code>` | removes a key's bind, except the last key bound to `toggleconsole` |
+  | `net_profile [name]` | shows, or switches, the client end's simulated link (`docs/10` §3 profiles; the page always wraps its transport in the net simulator, starting at `lan`) |
+  | `clear` | empties the console |
+  | `toggleconsole` | opens or closes the console (what Backquote is bound to) |
+  | `help` | lists these; a cvar's name alone prints its value, default and description |
+
+  `exec`, `connect`, `disconnect`, demos and `rcon` come with the milestones that need them.
+- **Binds** use `KeyboardEvent.code` (physical keys) so AZERTY/QWERTZ layouts work; mouse buttons are `Mouse0`..`Mouse4`. Codes match ignoring case. A `+action` is held while its key is down (a key releases what it pressed even if rebound meanwhile); any other bound line runs once on the press. Bound keys call `preventDefault` (Space must not scroll); presses with Ctrl, Meta or Alt held go to the browser, so those keys cannot be bound (`ControlLeft`/`Right`, `AltLeft`/`Right`, `MetaLeft`/`Right`; a Ctrl crouch would also swallow the movement keys pressed under it). An auto-repeat never runs a command again. One key always stays bound to `toggleconsole`: binds are saved, and without it nothing could reopen the console to repair them. A hidden tab or a lost focus releases every key.
+- **Default binds** (M2 design §2; all rebindable). There are no Ctrl binds: the browser keeps Ctrl+W and its kin.
+
+  | Key (`code`) | Bind |
+  |---|---|
+  | `KeyW` / `KeyS` / `KeyA` / `KeyD` | `+forward` / `+back` / `+moveleft` / `+moveright` |
+  | `Space` | `+jump` |
+  | `KeyC` | `+crouch` |
+  | `KeyX` | `+walk` |
+  | `ShiftLeft` | `+sprint` (sent as `BUTTON_SPRINT`; inert until M4) |
+  | `Mouse0` | `+attack` (sent as `BUTTON_ATTACK`; inert until combat) |
+  | `Backquote` | `toggleconsole` |
+- **Saved settings** (`client/src/app/settings.ts`): the `ARCHIVE` cvars that differ from their defaults, and the binds when they differ from the defaults, as JSON under the localStorage key `inshambles.settings` (version 1), saved after each console command that changed something. Replicated cvars are never saved. Missing, throwing or corrupt storage leaves the defaults; unknown or invalid cvar entries are skipped with a console warning; a stored bind set with any invalid entry, or with no key on `toggleconsole`, is ignored as a whole (the default binds stay), and a save that storage refused is retried after the next command. Autotest pages (`?autotest=1`) neither load nor save.
 
 ## 7. Client specifics
 
-**Client cvars** (M2 design §4): `ARCHIVE` settings, saved per player and never replicated, so they never reach the simulation (prediction uses the replicated `pm_*` values only, §6). `cl_inputBuffer`, `cl_correctionSmoothMs` and `cl_teleportDist` are registered by the net code (`client/src/net/cvars.ts`); `cl_fov`, `cl_stepSmoothMs` and `cl_viewHeightSmoothMs` by the view (`client/src/render/viewCvars.ts`, M2 increment 11); the rest arrive with the console and HUD (M2 increment 12).
+**Client cvars** (M2 design §4): `ARCHIVE` settings, saved per player and never replicated, so they never reach the simulation (prediction uses the replicated `pm_*` values only, §6). `registerClientCvars` (`client/src/console/clientCvars.ts`) registers them all: the net code's (`client/src/net/cvars.ts`), the view's (`client/src/render/viewCvars.ts`) and the console's and HUD's own. A doc-golden test (`packages/tools/test/docs/client-cvars-docs.test.ts`) keeps this table equal to the registered set.
 
 | Cvar | Default | Label / note |
 |---|---|---|
-| `sensitivity` | 5 | Q3 default |
-| `m_yaw`, `m_pitch` | 0.022 | Q3 convention: degrees per mouse count |
+| `sensitivity` | 5 | Q3 default; turn per count = `sensitivity` × `m_yaw` (or `m_pitch`) |
+| `m_yaw` | 0.022 | Q3 convention: degrees per mouse count |
+| `m_pitch` | 0.022 | Q3 convention: degrees per mouse count; negative inverts |
 | `cl_fov` | 90 | ESTIMATE (horizontal, Hor+) |
-| `cl_inputBuffer` | 2 ticks | ESTIMATE (`docs/05` §8.2: target 1–2 ticks); the clock's buffer-health target |
+| `cl_inputBuffer` | 2 | ESTIMATE (ticks; `docs/05` §8.2: target 1–2 ticks); the clock's buffer-health target |
 | `cl_correctionSmoothMs` | 100 | ESTIMATE (`docs/05` §5: "~100 ms"); render-offset decay |
-| `cl_teleportDist` | 64 u | design value (`docs/05` §5); a longer correction snaps |
+| `cl_teleportDist` | 64 | design value (u; `docs/05` §5); a longer correction snaps |
 | `cl_stepSmoothMs` | 150 | ESTIMATE; step-up view smoothing |
 | `cl_viewHeightSmoothMs` | 100 | ESTIMATE; crouch view-height smoothing |
-| `cl_netgraph`, `cl_speedometer`, `cl_thirdPerson`, `r_debug*` | off | toggles |
+| `cl_speedometer` | off | toggle: the speedometer |
+| `cl_netgraph` | off | toggle: the netgraph |
+| `cl_thirdPerson` | off | toggle: the camera 120 u (design value) behind the eye, pulled in by a trace short of walls |
+| `r_debugHull` | off | toggle: the hull box |
+| `r_debugTraces` | off | toggle: pmove's traces |
+| `r_debugGround` | off | toggle: the ground normal |
 
 - **Input:**
-  - Pointer Lock. Request unadjusted (raw) movement where supported, with fallback.
-  - Sensitivity in Quake-style units (`m_yaw`/`m_pitch` = 0.022 degrees per count) so players can port their sens.
+  - Pointer Lock. Request unadjusted (raw) movement where supported (`requestPointerLock({unadjustedMovement: true})`), falling back to plain pointer lock where it is refused (Firefox). A click on the canvas takes the lock; mouse buttons route through the binds only while it holds, so that click never fires.
+  - Sensitivity in Quake-style units (`m_yaw`/`m_pitch` = 0.022 degrees per count) so players can port their sens: `yaw −= dx · sensitivity · m_yaw`, `pitch += dy · sensitivity · m_pitch`, pitch clamped to ±89°, yaw kept in [0, 360).
   - No mouse smoothing; optional acceleration off by default.
+  - The counts gathered between frames turn the view at the start of the next frame, before its ticks sample it. The camera uses these live float angles; each cmd carries them rounded to u16 units (`degreesToU16`), and the predictor sanitizes the cmd as the server does.
+  - Buttons and axes come from the `+actions` (§6): an action counts the keys holding it and latches a press until the next sample, so a tap shorter than a tick still reaches one cmd.
 - **Camera:**
   - The view applies the latest mouse delta every frame.
   - The eye is the predicted origin interpolated between the last two ticks, plus the correction's render offset, plus the step smoother's offset, plus the stance's eye height (26 u standing, 12 u crouched) smoothed over `cl_viewHeightSmoothMs` (M2 design §2).
@@ -239,6 +274,8 @@ DEV / OFFLINE                                  ONLINE
 - **Space conversion** (`render/space.ts`): `three.x = q.x × 0.0254`, `three.y = q.z × 0.0254`, `three.z = −q.y × 0.0254`; yaw/pitch mapped accordingly: `setViewAngles` sets Euler order YXZ with `rotation.y = yaw − 90°` and `rotation.x = −pitch` (sim yaw 0 faces +X, positive pitch looks down). The mapping is a proper rotation, so map vertices are converted once at load time (`convertVertices`) and keep their winding. Unit-test the conversions.
 - **World (M2):** one mesh per cmap render surface (one per material), `MeshLambertMaterial` with a procedural 256² grid `CanvasTexture` per material (16 u minor and 64 u major lines, repeat-wrapped; uv0 is 1 per 64 u, `docs/07` §3): floor light grey, wall mid grey, `grey/ladder` with rungs, water blue at 0.5 opacity, double-sided, no depth write, anything else magenta. Hemisphere plus directional light, no shadows; geometry, materials and textures are disposed on unload.
 - **HUD:** DOM overlay updated imperatively (refs). Crosshair and ammo update immediately; scoreboard and minimap at ≤ 15 Hz. No framework re-render per frame. Menus may use a UI framework later.
+  - M2 (`client/src/hud`): a crosshair; a click-to-play prompt while the pointer is free; a blue tint while the camera is inside water (`pointContents` at the camera); the speedometer (`cl_speedometer`: horizontal speed, vertical velocity and ground/air/water/ladder, the mode pmove dispatches on); the netgraph (`cl_netgraph`, bottom right: RTT, jitter, snapshot loss % and snapshots/s; corrections/s with mean and largest size and the render offset left; input-buffer health, starved cmds/s and clock adjustments; bytes in and out per second; hard and pending-parameter resyncs; the simulated profile). Rates are over the last second; the panels' text refreshes at ≤ 15 Hz.
+- **Debug draw** (M2, `client/src/render/debug/debugDraw.ts`): one `LineSegments` with buffers sized once. `r_debugHull` draws the hull box at the drawn origin; `r_debugTraces` the traces of the frame's first predictions from pmove's `PmoveTraceLog` (green when clear, red when they hit, with an 8 u tick along the hit normal; kept while frames predict no tick); `r_debugGround` the ground normal from a short sweep under the predicted state, drawn under the hull's interpolated origin (yellow when walkable, magenta when steep). The segments are built in sim space and converted through `space.ts`.
 - **Audio:**
   - Footsteps and gunshots are positional (HRTF) with priority and voice limits. Footsteps are the gameplay-critical sound.
   - Event-driven from predicted (local) and snapshot (remote) events.

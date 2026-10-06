@@ -11,7 +11,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.net.json && tsc --noEmit -p tsconfig.worker.json && tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.scripts.json && tsc --noEmit -p tsconfig.test.json",
-    "screenshot": "node --import tsx scripts/screenshot.ts"
+    "screenshot": "node --import tsx scripts/screenshot.ts",
+    "vectors-page": "node --import tsx scripts/vectorsPage.ts"
   },
   "devDependencies": {
     "@types/three": "~0.186.0",

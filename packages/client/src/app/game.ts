@@ -1,12 +1,34 @@
 import {
+  CONTENTS_WATER,
+  HULL_CROUCHED_MAXS,
+  HULL_MINS,
+  HULL_STANDING_MAXS,
+  MASK_SOLID,
   PlayerState,
   PMEV_STEP,
   PMF_CROUCHED,
+  PmoveTraceLog,
+  pointContents,
+  TraceResult,
+  traceBox,
+  u16ToDegrees,
   VIEW_HEIGHT_CROUCHED,
   VIEW_HEIGHT_STANDING,
   vec3,
 } from "@game/shared";
-import { type ClientSim, STAT_CORRECTIONS, STAT_SNAPSHOTS, StepSmoother, ViewHeight } from "../net";
+import { ClientSettings, refreshClientSettings } from "../console/clientCvars";
+import type { GameHud } from "../hud/overlay";
+import type { MouseLook } from "../input/mouse";
+import {
+  type ClientSim,
+  STAT_CORRECTIONS,
+  STAT_HARD_RESYNCS,
+  STAT_SNAPSHOTS,
+  STAT_STARVED,
+  StepSmoother,
+  ViewHeight,
+} from "../net";
+import { DebugLines } from "../render/debug/debugDraw";
 import type { GameRenderer } from "../render/renderer";
 import { refreshViewSettings, ViewSettings } from "../render/viewCvars";
 
@@ -14,6 +36,12 @@ import { refreshViewSettings, ViewSettings } from "../render/viewCvars";
 const DEG_PER_U16 = 360 / 65536;
 /** How often the autotest status is written to the page, ms (it allocates strings). */
 const STATUS_INTERVAL_MS = 250;
+const RAD_PER_DEG = Math.PI / 180;
+/** `cl_thirdPerson` pulls the camera this far behind the eye, u (M2 design §2). */
+export const THIRD_PERSON_DISTANCE = 120;
+/** The third-person camera's box, kept clear of walls by a trace (half-size 4 u). */
+const CAMERA_MINS = vec3(-4, -4, -4);
+const CAMERA_MAXS = vec3(4, 4, 4);
 
 /** Where the autotest hooks report (M2 design §2): `document.documentElement.dataset`. */
 export type StatusSink = Record<string, string | undefined>;
@@ -31,16 +59,33 @@ export interface GameOptions {
   /** The autotest status sink, or null outside autotest. */
   readonly status: StatusSink | null;
   readonly camera?: CameraOverride | null;
+  /**
+   * The player's mouse look: the view uses its live angles (the cmds carry them rounded). Null
+   * for scripted input, whose view follows the predicted angles.
+   */
+  readonly look?: MouseLook | null;
+  /** The DOM overlay; null in tests and headless runs. */
+  readonly hud?: GameHud | null;
+  /** Runs at the end of every frame (the page drains the server's PRINTs into the console). */
+  readonly onFrame?: (() => void) | null;
 }
 
 /**
  * The frame loop (docs/06 §7 "Render loop", M2 design §2 "Frame order"): per animation frame,
- * the client's frame (poll and reconcile, then the tick accumulator: sample, predict, send),
- * then the view from the interpolated prediction (render offset, step smoothing, eye height),
- * then the scene. The view only reads the prediction; it never changes it.
+ * the mouse's counts turn the view, then the client's frame (poll and reconcile, then the tick
+ * accumulator: sample, predict, send), then the view from the interpolated prediction (render
+ * offset, step smoothing, eye height, the third-person pull-back), the debug lines, the scene
+ * and the HUD. The view only reads the prediction; it never changes it.
  */
 export class Game {
   readonly settings = new ViewSettings();
+  readonly clientSettings = new ClientSettings();
+  /** The segments the renderer's debug draw shows (`r_debug*`). */
+  readonly debugLines = new DebugLines();
+  /** pmove's traces of this frame's first predictions, while `r_debugTraces` is on. */
+  readonly traceLog = new PmoveTraceLog();
+  /** The camera is inside water this frame (the HUD tints the view). */
+  underwater = false;
   /** The view this frame: [0..2] eye position (sim u), [3] yaw, [4] pitch (degrees). */
   readonly pose = new Float64Array(5);
   frames = 0;
@@ -62,12 +107,21 @@ export class Game {
   private readonly travel = new Float64Array([Number.NaN, 0, 0, 0]);
   private running = false;
   private readonly frameCb: () => void;
+  private readonly look: MouseLook | null;
+  private readonly hud: GameHud | null;
+  private readonly onFrame: (() => void) | null;
+  private readonly camStart = vec3();
+  private readonly camEnd = vec3();
+  private readonly camTrace = new TraceResult();
 
   constructor(options: GameOptions) {
     this.client = options.client;
     this.renderer = options.renderer;
     this.status = options.status;
     this.cameraOverride = options.camera ?? null;
+    this.look = options.look ?? null;
+    this.hud = options.hud ?? null;
+    this.onFrame = options.onFrame ?? null;
     this.steps = new StepSmoother(this.renderTick);
     this.eye = new ViewHeight(this.client.now);
     this.frameCb = () => this.loop();
@@ -92,6 +146,18 @@ export class Game {
   /** One frame (see the class comment). */
   frame(): void {
     const c = this.client;
+    const cs = this.clientSettings;
+    refreshClientSettings(c.cvars, cs);
+    // Mouse look is immediate: this frame's ticks sample the turned view.
+    if (this.look !== null) this.look.apply(cs);
+    const p = c.predictor;
+    if (cs.debugTraces) {
+      p.traceLog = this.traceLog;
+      this.traceLog.clear();
+    } else if (p.traceLog !== null) {
+      p.traceLog = null;
+      this.debugLines.clearTraces();
+    }
     c.frame();
     this.frames++;
     refreshViewSettings(c.cvars, this.settings);
@@ -103,18 +169,74 @@ export class Game {
         this.steps.clear();
         this.eye.reset(VIEW_HEIGHT_STANDING);
         if (this.firstTick < 0) this.firstTick = c.startTick;
+        // Face the way the server spawned us.
+        const ps = p.state;
+        this.look?.set(u16ToDegrees(ps.viewYaw), (((ps.viewPitch << 16) >> 16) * 360) / 65536);
       }
       this.steps.shift(c.pathShift[0] as number);
       this.fileSteps();
       this.updatePose();
+      this.updateDebug();
+      const cam = this.camStart;
+      cam[0] = this.pose[0] as number;
+      cam[1] = this.pose[1] as number;
+      cam[2] = this.pose[2] as number;
+      this.underwater = (pointContents(c.world, cam) & CONTENTS_WATER) !== 0;
     }
     this.wasActive = active;
     const r = this.renderer;
     if (r !== null && active) {
       r.view.pose.set(this.pose);
+      r.debug.update(this.debugLines, cs.debugTraces);
       r.render(this.settings.fov);
     }
+    if (this.hud !== null) this.hud.frame(c, cs, active && this.underwater);
     if (this.status !== null) this.report();
+    if (this.onFrame !== null) this.onFrame();
+  }
+
+  /** The `r_debug*` segments: this frame's traces, the hull where it is drawn, the ground. */
+  private updateDebug(): void {
+    const cs = this.clientSettings;
+    const d = this.debugLines;
+    if (cs.debugTraces) d.takeTraces(this.traceLog);
+    d.beginShapes();
+    if (!cs.debugHull && !cs.debugGround) return;
+    const p = this.client.predictor;
+    const maxs = (p.state.flags & PMF_CROUCHED) !== 0 ? HULL_CROUCHED_MAXS : HULL_STANDING_MAXS;
+    if (cs.debugHull) d.hull(this.origin, HULL_MINS, maxs);
+    // Traced from the predicted state, which pmove left on the grid and out of solid; drawn
+    // under the interpolated origin with the hull.
+    if (cs.debugGround) {
+      const params = p.paramsFor(p.latestTick);
+      d.ground(this.client.world, p.state.origin, HULL_MINS, maxs, params, this.origin);
+    }
+  }
+
+  /**
+   * `cl_thirdPerson`: the camera THIRD_PERSON_DISTANCE behind the eye along the view, pulled in
+   * where a wall is closer (a small box traced from the eye). Presentation only.
+   */
+  private pullBack(): void {
+    const pose = this.pose;
+    const yaw = (pose[3] as number) * RAD_PER_DEG;
+    const pitch = (pose[4] as number) * RAD_PER_DEG;
+    const cp = Math.cos(pitch);
+    const a = this.camStart;
+    const b = this.camEnd;
+    a[0] = pose[0] as number;
+    a[1] = pose[1] as number;
+    a[2] = pose[2] as number;
+    // Forward is (cos p · cos y, cos p · sin y, −sin p): positive pitch looks down.
+    b[0] = (a[0] as number) - cp * Math.cos(yaw) * THIRD_PERSON_DISTANCE;
+    b[1] = (a[1] as number) - cp * Math.sin(yaw) * THIRD_PERSON_DISTANCE;
+    b[2] = (a[2] as number) + Math.sin(pitch) * THIRD_PERSON_DISTANCE;
+    const tr = this.camTrace;
+    traceBox(this.client.world, a, b, CAMERA_MINS, CAMERA_MAXS, MASK_SOLID, tr);
+    if (tr.allSolid) return;
+    pose[0] = tr.endpos[0] as number;
+    pose[1] = tr.endpos[1] as number;
+    pose[2] = tr.endpos[2] as number;
   }
 
   /**
@@ -158,8 +280,8 @@ export class Game {
     pose[1] = origin[1] as number;
     pose[2] =
       (origin[2] as number) + (this.stepOffset[0] as number) + (this.eye.height[0] as number);
-    // Until mouse look (increment 12) the view follows the predicted angles, interpolated like
-    // the origin and along the shorter way round.
+    // Scripted input's view follows the predicted angles, interpolated like the origin and
+    // along the shorter way round; the player's mouse look replaces them below.
     const prev = this.prev;
     if (!p.stateAt(p.latestTick - 1, prev)) {
       prev.viewYaw = ps.viewYaw;
@@ -174,6 +296,13 @@ export class Game {
     const pitch1 = ((ps.viewPitch | 0) << 16) >> 16;
     pose[3] = (yaw0 + dyaw * a) * DEG_PER_U16;
     pose[4] = (pitch0 + (pitch1 - pitch0) * a) * DEG_PER_U16;
+    const look = this.look;
+    if (look !== null) {
+      // The player's view: the live mouse angles, not the cmds' rounded ones.
+      pose[3] = look.angles[0] as number;
+      pose[4] = look.angles[1] as number;
+    }
+    if (this.clientSettings.thirdPerson) this.pullBack();
   }
 
   /** Autotest status (M2 design §2), a few times a second. */
@@ -189,6 +318,8 @@ export class Game {
     s.ticks = String(this.firstTick < 0 ? 0 : Math.max(0, c.predictor.latestTick - this.firstTick));
     s.snapshots = String(t[STAT_SNAPSHOTS]);
     s.corrections = String(t[STAT_CORRECTIONS]);
+    s.hardResyncs = String(t[STAT_HARD_RESYNCS]);
+    s.starved = String(t[STAT_STARVED]);
     s.drawCalls = String(this.renderer?.drawCalls ?? 0);
     s.triangles = String(this.renderer?.triangles ?? 0);
     // How far the player went (u, horizontal, sampled per report): proof a bot moves.

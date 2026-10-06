@@ -1,6 +1,7 @@
 import type { Cmap } from "@game/shared";
 import { Color, DirectionalLight, HemisphereLight, Scene, WebGLRenderer } from "three";
 import { FirstPersonCamera } from "./camera";
+import { DebugDraw } from "./debug/debugDraw";
 import { GreyboxMaterials, type GridCanvas } from "./materials";
 import { toThreeDir } from "./space";
 import { buildWorldMesh, type WorldMesh } from "./world";
@@ -30,6 +31,8 @@ export function webglAvailable(): boolean {
 export class GameRenderer {
   readonly scene = new Scene();
   readonly view = new FirstPersonCamera();
+  /** The `r_debug*` lines (game.ts fills them each frame). */
+  readonly debug = new DebugDraw();
   private world: WorldMesh | null = null;
   private materials: GreyboxMaterials | null = null;
 
@@ -45,6 +48,7 @@ export class GameRenderer {
     toThreeDir(SUN_DIR[0], SUN_DIR[1], SUN_DIR[2], sun.position).normalize().multiplyScalar(100);
     this.scene.add(sun);
     this.scene.add(sun.target);
+    this.scene.add(this.debug.object);
   }
 
   /**
@@ -109,6 +113,7 @@ export class GameRenderer {
 
   dispose(): void {
     this.unloadMap();
+    this.debug.dispose();
     this.gl.dispose();
   }
 }

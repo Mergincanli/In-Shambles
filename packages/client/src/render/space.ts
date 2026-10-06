@@ -87,3 +87,23 @@ export function convertVertices(src: Float32Array, first = 0, count?: number): F
   }
   return out;
 }
+
+/**
+ * `count` xyz positions (sim u) from `src` as scene positions (m) into `out` from float
+ * `outOffset`, per frame: the debug lines. Writes in place, so it allocates nothing.
+ */
+export function positionsToThree(
+  src: Float32Array,
+  count: number,
+  out: Float32Array,
+  outOffset: number,
+): void {
+  const k = METERS_PER_UNIT;
+  for (let i = 0; i < count; i++) {
+    const s = i * 3;
+    const d = outOffset + s;
+    out[d] = (src[s] as number) * k;
+    out[d + 1] = (src[s + 2] as number) * k;
+    out[d + 2] = -(src[s + 1] as number) * k;
+  }
+}

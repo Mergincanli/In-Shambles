@@ -10,7 +10,7 @@ import { describe, expect, it } from "vitest";
 const clientDir = fileURLToPath(new URL("../..", import.meta.url));
 
 describe("view frame under native ES modules", () => {
-  it("Game.frame allocates nothing: steps, crouch, turns, hard resyncs", () => {
+  it("Game.frame allocates nothing: steps, crouch, turns, resyncs, mouse look, debug draw", () => {
     const out = spawnSync(
       process.execPath,
       ["--import", "tsx", "test/perf/viewFrameAllocation.ts"],
@@ -18,7 +18,7 @@ describe("view frame under native ES modules", () => {
     );
     expect(out.status, out.stderr).toBe(0);
     const r = JSON.parse(out.stdout) as { clean: boolean; attempts: string[]; outcomes: number[] };
-    // STEP events, crouched frames, hard resyncs, frames.
+    // STEP events, crouched frames, hard resyncs, frames, debug traces and shapes.
     for (const n of r.outcomes) expect(n).toBeGreaterThan(0);
     expect(r.clean, r.attempts.join("; ")).toBe(true);
   }, 60_000);

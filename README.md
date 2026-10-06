@@ -44,7 +44,21 @@ pnpm typecheck && pnpm lint && pnpm test
 
 `pnpm dev` opens `movement_lab`. Add `?bot=circle` to the URL to watch the scripted strafe-jump circuit, `?autotest=1` to have the page report its status in `<html data-*>`, and `?cam=x,y,z,yaw,pitch` for a fixed camera (map units and degrees). `pnpm --filter @game/client screenshot <dir>` saves PNG screenshots of a few viewpoints from the production build (`--dev` uses the dev server).
 
+`pnpm --filter @game/client vectors-page <out.html>` builds the determinism vectors page as one self-contained HTML file: open it in any browser (a phone's Safari, say) and it replays every vector table there, showing PASS/FAIL per table. `pnpm dev` also serves it at http://localhost:5173/vectors.html.
+
 Commands for later milestones (`bots`, `balance-report`, `mapc`) already exist and print the milestone that adds them. `CLAUDE.md` has the full list.
+
+## Try it
+
+1. `pnpm dev`, open http://localhost:5173 and click the view to take the mouse (Escape gives it back).
+2. Move with W A S D, jump with Space, crouch with C, walk with X. Mouse sensitivity uses Quake units: `sensitivity` × `m_yaw` (0.022) degrees per count, so a sensitivity from Quake-style games carries over.
+3. Backquote opens the console (Backquote or Escape closes it). `help` lists the commands. Some to try:
+   - `set cl_speedometer 1` and `set cl_netgraph 1`: speed and movement state, and the link, corrections, input buffer and traffic.
+   - `net_profile wan-150-loss2`: play over a simulated 150 ms link with 2% loss (`net_profile` lists the profiles; `lan` is the default). Movement should stay smooth and the netgraph's corrections rare and small.
+   - `set pm_gravity 400`: a server cvar; the change goes to the in-browser server and comes back to your prediction without a correction.
+   - `set cl_thirdPerson 1` with `set r_debugHull 1`, `set r_debugTraces 1` and `set r_debugGround 1`: the hull, pmove's traces and the ground normal.
+   - `bind KeyQ +jump`, `unbind KeyQ`, `cvarlist cl_`.
+4. Settings (sensitivity, field of view, HUD toggles, binds) are saved in the browser.
 
 ## Layout
 

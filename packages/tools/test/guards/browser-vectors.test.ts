@@ -7,6 +7,7 @@ import browserConfig, {
   parseBrowsers,
   VECTORS_GLOB,
 } from "../../../../vitest.browser.config";
+import { VECTOR_INPUT_TABLES, VECTOR_TABLES } from "../../../shared/test/helpers/vectorReplay";
 import { fromRoot } from "../../src/paths";
 
 // D-022: `pnpm test:browser` replays packages/shared/test/*-vectors.test.ts in browser engines,
@@ -73,6 +74,26 @@ describe("browser vectors (D-022)", () => {
       | { include?: string[]; browser?: Record<string, unknown>; environment?: string }
       | undefined;
   }
+
+  it("replays every table of every test/vectors module (the tests and the phone page)", async () => {
+    const dir = join(testDir, "vectors");
+    const modules = readdirSync(dir)
+      .filter((file) => file.endsWith(".ts"))
+      .map((file) => file.slice(0, -3))
+      .sort();
+    expect([...new Set(VECTOR_TABLES.map((t) => t.file as string))].sort()).toEqual(modules);
+    const vectorTest = readFileSync(join(testDir, "vector-replay.test.ts"), "utf8");
+    for (const name of modules) {
+      expect(vectorTest, `vector-replay.test.ts imports ${name}`).toContain(`./vectors/${name}"`);
+      const exports = (await import(join(dir, `${name}.ts`))) as Record<string, unknown>;
+      for (const [table, rows] of Object.entries(exports)) {
+        if ((VECTOR_INPUT_TABLES as readonly string[]).includes(table)) continue;
+        const replays = VECTOR_TABLES.filter((t) => t.name.split(" ")[0] === table);
+        expect(replays.length, `${name}.${table}`).toBeGreaterThan(0);
+        for (const t of replays) expect([t.file, t.rows === rows]).toEqual([name, true]);
+      }
+    }
+  });
 
   it("replays them in headless browser mode, default chromium", () => {
     const test = project("vectors") as {

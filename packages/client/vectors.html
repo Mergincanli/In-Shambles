@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Determinism Vectors</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #f6f6f4;
+        --fg: #1d1f23;
+        --muted: #646a73;
+        --line: #d9dadd;
+        --pass: #1d7a3e;
+        --fail: #b3261e;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root:not([data-theme="light"]) {
+          --bg: #16181c;
+          --fg: #e8e8e8;
+          --muted: #9aa0a8;
+          --line: #2c3036;
+          --pass: #5fd08a;
+          --fail: #ff8a80;
+        }
+      }
+      :root[data-theme="dark"] {
+        --bg: #16181c;
+        --fg: #e8e8e8;
+        --muted: #9aa0a8;
+        --line: #2c3036;
+        --pass: #5fd08a;
+        --fail: #ff8a80;
+      }
+      body {
+        margin: 0;
+        padding: 16px;
+        background: var(--bg);
+        color: var(--fg);
+        font: 15px/1.45 system-ui, -apple-system, sans-serif;
+      }
+      main {
+        max-width: 44rem;
+        margin: 0 auto;
+      }
+      h1 {
+        font-size: 1.3rem;
+        margin: 0 0 4px;
+      }
+      #engine,
+      .muted {
+        color: var(--muted);
+        font-size: 0.85rem;
+        overflow-wrap: anywhere;
+      }
+      #verdict {
+        margin: 14px 0;
+        font-size: 1.15rem;
+        font-weight: 600;
+      }
+      .pass {
+        color: var(--pass);
+      }
+      .fail {
+        color: var(--fail);
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-variant-numeric: tabular-nums;
+      }
+      th,
+      td {
+        padding: 6px 4px;
+        border-bottom: 1px solid var(--line);
+        text-align: right;
+        vertical-align: top;
+      }
+      th:first-child,
+      td:first-child {
+        text-align: left;
+        overflow-wrap: anywhere;
+      }
+      pre {
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        font-size: 0.75rem;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Determinism vectors</h1>
+      <div id="engine"></div>
+      <div id="verdict">Running…</div>
+      <table>
+        <thead>
+          <tr><th>Table</th><th>Rows</th><th>Pass</th><th>Fail</th></tr>
+        </thead>
+        <tbody id="tables"></tbody>
+      </table>
+      <p class="muted">
+        Every committed vector table replayed with the game's real shared code (D-022). A row
+        passes when it comes back bit for bit.
+      </p>
+      <div id="details"></div>
+    </main>
+    <script type="module" src="/src/dev/vectorsPage.ts"></script>
+  </body>
+</html>

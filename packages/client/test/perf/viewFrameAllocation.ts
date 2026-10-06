@@ -6,6 +6,10 @@
  * there), and a frame hitch every 2048 ticks forces a hard resync: STEP events, eye-height
  * changes, angle interpolation and the step smoother's re-timing all run. The walk stops short
  * of the stairs' top: sliding into the walls past it is pmove's path, covered in tools.
+ *
+ * The player's per-frame paths run too (M2 increment 12): mouse look with counts every frame,
+ * the cmd sampler with keys going up and down, the third-person pull-back, the underwater test,
+ * every `r_debug*` line (hull, ground normal, pmove's trace log) and their three.js upload.
  */
 import { readFileSync } from "node:fs";
 import { PerformanceObserver } from "node:perf_hooks";
@@ -13,17 +17,24 @@ import { fileURLToPath } from "node:url";
 import { Match } from "@game/server";
 import {
   buildCollisionWorld,
+  CvarRegistry,
   createLoopbackPair,
   decodeCmap,
   MOVE_AXIS_MAX,
   type PlayerState,
   PMEV_STEP,
   PMF_CROUCHED,
+  registerPmoveCvars,
   TRACE_EPSILON,
-  type UserCmd,
+  UserCmd,
 } from "@game/shared";
 import { Game } from "../../src/app/game";
+import { ACTION_FORWARD, ACTION_JUMP } from "../../src/console/binds";
+import { registerClientCvars } from "../../src/console/clientCvars";
+import { MouseLook } from "../../src/input/mouse";
+import { ActionState, PlayerInput } from "../../src/input/sampler";
 import { ClientSim, type CmdSampler, MixedInput, STAT_HARD_RESYNCS } from "../../src/net";
+import { DebugDraw } from "../../src/render/debug/debugDraw";
 
 const FRAMES = 20_000;
 const FRAME_MS = 1000 / 144;
@@ -60,15 +71,27 @@ const input = new Cycle();
 const [clientEnd, serverEnd] = createLoopbackPair();
 const match = new Match({ cmap, world, buildHash: "alloc" });
 match.connect(serverEnd, true);
+const cvars = new CvarRegistry();
+registerPmoveCvars(cvars);
+registerClientCvars(cvars);
+for (const name of ["cl_thirdPerson", "r_debugHull", "r_debugTraces", "r_debugGround"]) {
+  cvars.set(name, true);
+}
 const client = new ClientSim({
   transport: clientEnd,
   cmap,
   world,
   buildHash: "alloc",
   clock: () => time[0] as number,
+  cvars,
   input,
 });
-const game = new Game({ client, renderer: null, status: null });
+const look = new MouseLook();
+const actions = new ActionState();
+const player = new PlayerInput(actions, look);
+const playerCmd = new UserCmd();
+const draw = new DebugDraw();
+const game = new Game({ client, renderer: null, status: null, look });
 client.connect();
 /** Client frames are skipped until this server tick (a hitch: a hard resync). */
 let pausedUntil = 0;
@@ -97,7 +120,14 @@ function run(frames: number): void {
       }
     }
     if (match.serverTick < pausedUntil) continue;
+    look.addCounts((f & 7) - 3, (f & 2) - 1);
     game.frame();
+    draw.update(game.debugLines, true);
+    if ((f & 15) === 0) actions.press(ACTION_FORWARD);
+    if ((f & 15) === 8) actions.release(ACTION_FORWARD);
+    if ((f & 31) === 4) actions.press(ACTION_JUMP);
+    if ((f & 31) === 5) actions.release(ACTION_JUMP);
+    player.sample(playerCmd, client.predictor.state);
     const ev = client.events;
     for (let i = 0; i < ev.count; i++) {
       if (ev.types[i] === PMEV_STEP) counts[0] = (counts[0] as number) + 1;
@@ -127,5 +157,12 @@ for (let attempt = 0; attempt < 3 && !clean; attempt++) {
   clean = gcs === 0 && growth < 64 * 1024;
 }
 observer.disconnect();
-const outcomes = [counts[0], counts[1], client.stats.totals[STAT_HARD_RESYNCS], game.frames];
+const outcomes = [
+  counts[0],
+  counts[1],
+  client.stats.totals[STAT_HARD_RESYNCS],
+  game.frames,
+  game.debugLines.traces.count,
+  game.debugLines.shapes.count,
+];
 console.log(JSON.stringify({ clean, attempts, outcomes }));
