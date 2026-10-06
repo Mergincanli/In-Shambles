@@ -45,9 +45,14 @@ function importGraph(entry: string) {
 }
 
 describe("browser vectors (D-022)", () => {
-  it("finds the determinism and trace vectors", () => {
+  // The pmove vectors are MV-19's browser leg (docs/10 §1): renaming one off the glob must fail.
+  it("finds the determinism, trace and pmove vectors", () => {
     expect(vectorTests.map((file) => relative(testDir, file)).sort()).toEqual(
-      expect.arrayContaining(["determinism-vectors.test.ts", "trace-vectors.test.ts"]),
+      expect.arrayContaining([
+        "determinism-vectors.test.ts",
+        "pmove-vectors.test.ts",
+        "trace-vectors.test.ts",
+      ]),
     );
   });
 

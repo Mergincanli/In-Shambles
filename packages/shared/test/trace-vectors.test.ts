@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { vec3 } from "../src/math/vec3";
-import { createCollisionWorld } from "../src/world/collisionWorld";
 import {
   pointContents,
   snapOrigin,
@@ -9,6 +8,7 @@ import {
   traceBoxBrute,
 } from "../src/world/trace";
 import { f64ToHex, hexToF64 } from "./helpers/f64";
+import { worldFromRows } from "./helpers/vectorWorld";
 import { POINT_CONTENTS_VECTORS, SNAP_VECTORS, TRACE_VECTORS, TRACE_WORLD } from "./vectors/trace";
 
 // The committed trace vectors (D-016, D-017): the world is rebuilt from its frozen plane bits,
@@ -16,17 +16,7 @@ import { POINT_CONTENTS_VECTORS, SNAP_VECTORS, TRACE_VECTORS, TRACE_WORLD } from
 const u32 = (hex: string | undefined) => Number.parseInt(hex ?? "", 16);
 const f64 = (hex: string | undefined) => hexToF64(hex ?? "");
 
-const world = createCollisionWorld(
-  TRACE_WORLD.map((row) => {
-    const f = row.split(" ");
-    const faceCount = Number(f[1]);
-    const planeCount = Number(f[2]);
-    const bounds = Float64Array.from(f.slice(3, 9), (h) => f64(h));
-    const planes = Float64Array.from(f.slice(9, 9 + 4 * planeCount), (h) => f64(h));
-    const surfaceFlags = f.slice(9 + 4 * planeCount).map((h) => u32(h));
-    return { contents: u32(f[0]), faceCount, planes, bounds, surfaceFlags };
-  }),
-);
+const world = worldFromRows(TRACE_WORLD);
 
 /** Rows whose recomputed fields differ, as "row → recomputed". */
 function mismatches(rows: readonly string[], recompute: (f: string[]) => string): string[] {

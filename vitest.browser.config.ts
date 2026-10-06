@@ -1,7 +1,7 @@
 import { playwright } from "@vitest/browser-playwright";
 import { defineConfig } from "vitest/config";
 
-// D-022: the shared determinism and trace vectors, replayed unchanged in real browser engines.
+// D-022: the shared determinism, trace and pmove vectors, replayed unchanged in real browser engines.
 // `pnpm test` (the Node run) never loads this file. WebKit runs JavaScriptCore, Safari's engine.
 export const ENGINES = ["chromium", "firefox", "webkit"] as const;
 export type Engine = (typeof ENGINES)[number];

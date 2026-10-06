@@ -29,7 +29,7 @@ pnpm typecheck && pnpm lint && pnpm test
 | `pnpm test` | All tests |
 | `pnpm test:movement` | Movement tests (MV-xx) on the greybox courses, each printing measured vs. target |
 | `pnpm test:balance` | Balance tests (BAL-xx) |
-| `pnpm test:browser` | Determinism and trace vectors in headless browsers (`BROWSERS=chromium,firefox,webkit`, default `chromium`) |
+| `pnpm test:browser` | Determinism, trace and pmove vectors in headless browsers (`BROWSERS=chromium,firefox,webkit`, default `chromium`) |
 | `pnpm typecheck` | Type-check all packages |
 | `pnpm lint` | Biome lint and format check |
 | `pnpm format` | Apply Biome formatting and safe fixes |

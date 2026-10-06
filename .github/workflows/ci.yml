@@ -32,7 +32,7 @@ jobs:
       - run: pnpm test
       - run: pnpm build
 
-  # D-022: the shared determinism and trace vectors replayed in all three browser engines.
+  # D-022: the shared determinism, trace and pmove vectors replayed in all three browser engines.
   # WebKit runs JavaScriptCore, Safari's engine.
   browsers:
     runs-on: ubuntu-latest

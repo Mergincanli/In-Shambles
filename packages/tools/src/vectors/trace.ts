@@ -27,6 +27,7 @@ import {
   vec3,
   wedgePlanes,
 } from "@game/shared";
+import { brushRow, f64Hex, section, u32Hex } from "./rows";
 
 /**
  * Renders packages/shared/test/vectors/trace.ts: a small fixed brush world as raw plane bits, and
@@ -35,17 +36,6 @@ import {
  * M2 replays the same file in real browsers.
  */
 export const TRACE_VECTORS_FILE = ["packages", "shared", "test", "vectors", "trace.ts"];
-
-const view = new DataView(new ArrayBuffer(8));
-
-function f64Hex(x: number): string {
-  view.setFloat64(0, x);
-  return view.getBigUint64(0).toString(16).padStart(16, "0");
-}
-
-function u32Hex(x: number): string {
-  return (x >>> 0).toString(16).padStart(8, "0");
-}
 
 function solid(planes: Float64Array, contents = CONTENTS_SOLID, topSurf = 0): CollisionBrushSource {
   const b = buildBrush(planes);
@@ -80,19 +70,6 @@ function traceWorldBrushes(): CollisionBrushSource[] {
     // A 41 u slide gap.
     solid(boxPlanes([-40, -300, 41], [40, -220, 105])),
   ];
-}
-
-function brushRow(b: CollisionBrushSource): string {
-  const planeCount = b.planes.length / 4;
-  const surf = b.surfaceFlags ?? [];
-  return [
-    u32Hex(b.contents),
-    b.faceCount,
-    planeCount,
-    ...Array.from(b.bounds, f64Hex),
-    ...Array.from(b.planes, f64Hex),
-    ...Array.from({ length: planeCount }, (_, p) => u32Hex(surf[p] ?? 0)),
-  ].join(" ");
 }
 
 interface TraceCase {
@@ -320,16 +297,6 @@ function pointRows(world: CollisionWorld): string[] {
     ]);
   }
   return points.map((p) => [...p.map(f64Hex), pointContents(world, vec3(...p))].join(" "));
-}
-
-function section(name: string, doc: string, rows: string[]): string {
-  return [
-    `/** ${doc} */`,
-    `export const ${name} = [`,
-    ...rows.map((r) => `  "${r}",`),
-    "];",
-    "",
-  ].join("\n");
 }
 
 export function renderTraceVectors(): string {

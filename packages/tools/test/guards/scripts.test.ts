@@ -232,12 +232,12 @@ const testFiles = readdirSync(fromRoot("packages"), { recursive: true, encoding:
   .map((file) => join(fromRoot("packages"), file));
 
 /**
- * prefix, root script, IDs that must have a file. MV lists the IDs landed so far; M2 increment 6
- * adds 19. NET has none yet: its files land with NET-03.
+ * prefix, root script, IDs that must have a file. NET has none yet: its files land with NET-03
+ * (M2 increment 10). acceptance-ids.test.ts checks the full docs/09 lists.
  */
 const ID_SUITES = [
   ["BAL", "test:balance", ["01"]],
-  ["MV", "test:movement", ["01", "03", "04", "05", "06", "07", "08", "17", "18"]],
+  ["MV", "test:movement", ["01", "03", "04", "05", "06", "07", "08", "17", "18", "19"]],
   ["NET", "test:net", []],
 ] as const;
 
