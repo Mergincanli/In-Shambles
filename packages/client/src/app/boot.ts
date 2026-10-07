@@ -116,6 +116,8 @@ export async function boot(
     input = bot ?? new NeutralInput();
     playerLook = null;
   }
+  /** The session ended: the error box says why, and the prompt and crosshair stay hidden. */
+  let closed = false;
   const port = new PortTransport(unreliable.port1, reliable.port1);
   // One pump callback for every wake (one per scheduled packet under a non-lan profile).
   const pump = () => netsim.pump();
@@ -141,6 +143,13 @@ export async function boot(
       else if (level === "warn") console.warn(msg);
       else console.info(msg);
     },
+    // Fires from a frame's poll, after boot returned (connect() is its last step), so the HUD
+    // and the prompt below exist by then.
+    onClosed: (reason) => {
+      closed = true;
+      onError(`disconnected: ${reason}`);
+      updatePrompt();
+    },
   });
 
   const renderer = GameRenderer.create(canvas);
@@ -149,7 +158,7 @@ export async function boot(
   if (status !== null) status.webgl = renderer === null ? "0" : "1";
 
   const app = canvas.parentElement ?? document.body;
-  const hud = new Hud(app, netsim);
+  const hud = new Hud(app, netsim, renderer);
   const lock = new PointerLock(canvas, (locked) => {
     if (!locked) router.releaseAll();
     updatePrompt();
@@ -162,6 +171,7 @@ export async function boot(
     toggleConsole: () => gameConsole.toggle(),
     sendServer: (text) => client.sendCommand(text),
     net: netsim,
+    corrections: client.predictor.corrections,
   };
   const run = (line: string) => {
     runConsoleCommand(line, host);
@@ -179,8 +189,8 @@ export async function boot(
     },
   });
   function updatePrompt(): void {
-    hud.setPrompt(!params.autotest && !lock.locked && !gameConsole.open);
-    hud.setCrosshair(!gameConsole.open && (params.autotest || lock.locked));
+    hud.setPrompt(!closed && !params.autotest && !lock.locked && !gameConsole.open);
+    hud.setCrosshair(!closed && !gameConsole.open && (params.autotest || lock.locked));
   }
   updatePrompt();
   attachKeyboard(window, router, {

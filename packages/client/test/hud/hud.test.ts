@@ -20,6 +20,7 @@ import {
   NG_STARVED,
   netgraphLines,
 } from "../../src/hud/netgraph";
+import { renderStatsText } from "../../src/hud/renderStats";
 import { moveState, speedometerText } from "../../src/hud/speedometer";
 import {
   type ClientSim,
@@ -49,6 +50,13 @@ describe("speedometer", () => {
     expect(moveState(ps)).toBe("water");
     ps.flags |= PMF_ON_LADDER;
     expect(moveState(ps)).toBe("ladder");
+  });
+});
+
+describe("renderer panel", () => {
+  it("shows the last frame's draw calls and triangles and the live geometries and textures", () => {
+    const s = { drawCalls: 12, frameTriangles: 3400, geometries: 9, textures: 4 };
+    expect(renderStatsText(s)).toBe("render calls 12  tris 3400  geo 9  tex 4");
   });
 });
 

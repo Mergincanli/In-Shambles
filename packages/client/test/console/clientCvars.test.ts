@@ -62,6 +62,7 @@ describe("client cvars (docs/06 §7)", () => {
       ["r_debugHull", "debugHull"],
       ["r_debugTraces", "debugTraces"],
       ["r_debugGround", "debugGround"],
+      ["r_stats", "renderStats"],
     ] as const;
     for (const [name, field] of bools) {
       for (const [other] of bools) reg.set(other, other === name);

@@ -2,6 +2,7 @@ import type { ClientSettings } from "../console/clientCvars";
 import type { NetProfileControl } from "../console/commands";
 import type { ClientSim } from "../net";
 import { Netgraph } from "./netgraph";
+import { type RenderStats, RenderStatsPanel } from "./renderStats";
 import { Speedometer } from "./speedometer";
 
 /** The panels (speedometer, netgraph) refresh at most this often, ms (≤ 15 Hz, client-render). */
@@ -22,7 +23,7 @@ function div(parent: HTMLElement, id: string, text = ""): HTMLDivElement {
 
 /**
  * The DOM overlay over the canvas (docs/06 §7 "HUD", M2 design §2): crosshair, the underwater
- * tint, the click-to-play prompt, the speedometer and the netgraph. Updated imperatively: the
+ * tint, the click-to-play prompt, the speedometer, the netgraph and the renderer panel. Updated imperatively: the
  * tint and the toggles only when they change, the panels' text at ≤ 15 Hz. It reads the
  * prediction and the stats and never changes them.
  */
@@ -30,6 +31,7 @@ export class Hud implements GameHud {
   readonly root: HTMLDivElement;
   readonly speedometer: Speedometer;
   readonly netgraph: Netgraph;
+  readonly renderPanel: RenderStatsPanel;
   private readonly crosshair: HTMLDivElement;
   private readonly tint: HTMLDivElement;
   private readonly prompt: HTMLDivElement;
@@ -37,20 +39,25 @@ export class Hud implements GameHud {
   private underwater = false;
   private showSpeed = false;
   private showNet = false;
+  private showRender = false;
 
   constructor(
     parent: HTMLElement,
     private readonly net: NetProfileControl | null,
+    /** The renderer's figures for `r_stats`; null without a picture. */
+    private readonly render: RenderStats | null = null,
   ) {
     this.root = div(parent, "hud");
     this.tint = div(this.root, "hud-water");
     this.crosshair = div(this.root, "hud-crosshair");
     this.speedometer = new Speedometer(div(this.root, "hud-speed"));
     this.netgraph = new Netgraph(div(this.root, "hud-net"));
+    this.renderPanel = new RenderStatsPanel(div(this.root, "hud-render"));
     this.prompt = div(this.root, "hud-prompt", "Click to play");
     this.tint.hidden = true;
     this.speedometer.el.hidden = true;
     this.netgraph.el.hidden = true;
+    this.renderPanel.el.hidden = true;
     this.prompt.hidden = true;
   }
 
@@ -79,11 +86,18 @@ export class Hud implements GameHud {
       this.showNet = net;
       this.netgraph.el.hidden = !net;
     }
-    if (!speed && !net) return;
+    const render = this.render;
+    const stats = settings.renderStats && render !== null;
+    if (stats !== this.showRender) {
+      this.showRender = stats;
+      this.renderPanel.el.hidden = !stats;
+    }
+    if (!speed && !net && !stats) return;
     const now = client.now[0] as number;
     if (now - this.lastPanels < HUD_PANEL_INTERVAL_MS) return;
     this.lastPanels = now;
     if (speed) this.speedometer.update(client.predictor.state);
     if (net) this.netgraph.update(client, this.net === null ? null : this.net.profile().name);
+    if (stats && render !== null) this.renderPanel.update(render);
   }
 }

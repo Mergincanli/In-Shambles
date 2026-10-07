@@ -1,5 +1,6 @@
 import type { Cmap } from "@game/shared";
 import { Color, DirectionalLight, HemisphereLight, Scene, WebGLRenderer } from "three";
+import type { RenderStats } from "../hud/renderStats";
 import { FirstPersonCamera } from "./camera";
 import { DebugDraw } from "./debug/debugDraw";
 import { GreyboxMaterials, type GridCanvas } from "./materials";
@@ -28,7 +29,7 @@ export function webglAvailable(): boolean {
  * plus a directional light (no shadows), and the first-person camera. It only reads what the game
  * hands it each frame; nothing here touches the simulation.
  */
-export class GameRenderer {
+export class GameRenderer implements RenderStats {
   readonly scene = new Scene();
   readonly view = new FirstPersonCamera();
   /** The `r_debug*` lines (game.ts fills them each frame). */
@@ -95,6 +96,21 @@ export class GameRenderer {
   /** Draw calls of the last frame. */
   get drawCalls(): number {
     return this.gl.info.render.calls;
+  }
+
+  /** Triangles drawn in the last frame (debug lines not counted). */
+  get frameTriangles(): number {
+    return this.gl.info.render.triangles;
+  }
+
+  /** Geometries alive on the GPU. */
+  get geometries(): number {
+    return this.gl.info.memory.geometries;
+  }
+
+  /** Textures alive on the GPU. */
+  get textures(): number {
+    return this.gl.info.memory.textures;
   }
 
   /** Draws a frame from the camera's pose (the caller filled it) at `cl_fov`. */

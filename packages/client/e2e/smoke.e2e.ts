@@ -110,7 +110,12 @@ describe("client e2e smoke (M2 design §5)", () => {
     // The key that opened it typed nothing, and the input has the focus.
     expect(await input.inputValue()).toBe("");
     expect(await input.evaluate((el) => el === document.activeElement)).toBe(true);
-    for (const line of ["set pm_gravity 400", "set cl_netgraph 1", "set cl_speedometer 1"]) {
+    for (const line of [
+      "set pm_gravity 400",
+      "set cl_netgraph 1",
+      "set cl_speedometer 1",
+      "set r_stats 1",
+    ]) {
       await input.fill(line);
       await input.press("Enter");
     }
@@ -134,6 +139,14 @@ describe("client e2e smoke (M2 design §5)", () => {
     await expect.poll(() => net.textContent(), { timeout: 5000 }).toMatch(/rtt \d+ ms/);
     await expect.poll(() => speed.isVisible()).toBe(true);
     await expect.poll(() => speed.textContent(), { timeout: 5000 }).toMatch(/\d+ u\/s {2}vz/);
+    // The renderer panel (r_stats) shows renderer.info whenever there is a picture.
+    const render = page.locator("#hud-render");
+    if ((await readStatus(page)).webgl === "1") {
+      await expect.poll(() => render.isVisible()).toBe(true);
+      await expect
+        .poll(() => render.textContent(), { timeout: 5000 })
+        .toMatch(/^render calls [1-9]\d* {2}tris [1-9]\d* {2}geo [1-9]\d* {2}tex [1-9]\d*$/);
+    }
     await page.waitForTimeout(1500);
     const s = await readStatus(page);
     if (SHOT_DIR !== undefined && SHOT_DIR !== "") {
@@ -172,5 +185,28 @@ describe("client e2e smoke (M2 design §5)", () => {
     expect(s.state).toBe("running");
     // D-027: a live cvar change switches by tick, with no correction.
     expect(Number(s.corrections), JSON.stringify(s)).toBe(0);
+  }, 60_000);
+
+  it("tells the player why the session closed and hides the click-to-play prompt", async () => {
+    const page = await (browser as Browser).newPage({ viewport: { width: 640, height: 360 } });
+    const errors = watchErrors(page);
+    // The Worker server gets another build hash than the client's HELLO, so it kicks the client.
+    await page.addInitScript(() => {
+      const post = Worker.prototype.postMessage;
+      Worker.prototype.postMessage = function (this: Worker, ...args: unknown[]) {
+        const m = args[0] as { type?: string; buildHash?: string };
+        if (m?.type === "start") m.buildHash = "other-build";
+        return Reflect.apply(post, this, args);
+      } as typeof post;
+    });
+    // A player's page (no autotest), so the prompt would show while the pointer is not locked.
+    await page.goto(served?.url ?? "");
+    const box = page.locator("#error");
+    await expect.poll(() => box.isVisible(), { timeout: 10_000 }).toBe(true);
+    expect(await box.textContent()).toMatch(/^disconnected: kicked: build .* other-build/);
+    expect(await page.locator("#hud-prompt").isVisible()).toBe(false);
+    expect(await page.locator("#hud-crosshair").isVisible()).toBe(false);
+    await page.close();
+    expect(errors.filter((e) => !e.includes("disconnected: kicked"))).toEqual([]);
   }, 60_000);
 });

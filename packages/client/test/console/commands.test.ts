@@ -10,8 +10,9 @@ import { describe, expect, it } from "vitest";
 import { Binds } from "../../src/console/binds";
 import { registerClientCvars } from "../../src/console/clientCvars";
 import { CONSOLE_COMMANDS, type ConsoleHost, runConsoleCommand } from "../../src/console/commands";
+import { CorrectionLog } from "../../src/net/predictor";
 
-function host(connected = true, withNet = true) {
+function host(connected = true, withNet = true, corrections: CorrectionLog | null = null) {
   const cvars: CvarRegistry = new Registry();
   registerPmoveCvars(cvars);
   registerClientCvars(cvars);
@@ -39,6 +40,7 @@ function host(connected = true, withNet = true) {
           },
         }
       : null,
+    corrections,
   };
   const run = (line: string) => {
     out.length = 0;
@@ -57,6 +59,24 @@ function host(connected = true, withNet = true) {
 }
 
 describe("console commands (M2 design §2)", () => {
+  it("net_corrections prints the correction log with what differed", () => {
+    expect(host().run("net_corrections")).toEqual(["no prediction to report on"]);
+    const log = new CorrectionLog();
+    const t = host(true, true, log);
+    expect(t.run("net_corrections")).toEqual(["0 corrections; the newest 0:"]);
+    const r = log.push();
+    r.tick = 300;
+    r.latestTick = 309;
+    r.distance = 1.23456;
+    r.predicted.origin[0] = 10;
+    r.server.origin[0] = 12;
+    r.predicted.stamina = r.server.stamina;
+    expect(t.run("net_corrections")).toEqual([
+      "1 corrections; the newest 1:",
+      "tick 300 (to 309) 1.23 u: origin[0]: 10 → 12",
+    ]);
+  });
+
   it("set a client cvar locally, with clamping and type errors", () => {
     const t = host();
     expect(t.run("set sensitivity 2.5")).toEqual(["sensitivity = 2.5"]);
@@ -167,6 +187,10 @@ describe("console commands (M2 design §2)", () => {
     t.run("toggleconsole");
     expect([t.cleared(), t.toggled()]).toEqual([1, 1]);
     expect(t.run("help")).toHaveLength(CONSOLE_COMMANDS.length);
+    // Verbs match ignoring case, like key codes.
+    expect(t.run("SET sensitivity 3")).toEqual(["sensitivity = 3"]);
+    expect(t.run("Bind KeyQ +jump")).toEqual(["KeyQ = +jump"]);
+    expect(t.run("bind KeyQ")).toEqual(["KeyQ = +jump"]);
     expect(t.run('set sensitivity "3')).toEqual(["unterminated quote"]);
     expect(t.run("   ")).toEqual([]);
   });

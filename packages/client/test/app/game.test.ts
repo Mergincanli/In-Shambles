@@ -8,6 +8,7 @@ import {
   decodeCmap,
   degreesToU16,
   ENTITY_NONE,
+  HULL_MINS,
   MOVE_AXIS_MAX,
   PlayerState,
   registerPmoveCvars,
@@ -174,8 +175,19 @@ describe("game frame loop (M2 design §2)", () => {
     expect(maxStep).toBeLessThan(6);
 
     const fixed = session(new StrafeCircuit(), [1, 2, 3, 45, -10]);
+    fixed.client.cvars.set("r_debugHull", true);
     fixed.run(2000);
     expect(Array.from(fixed.game.pose)).toEqual([1, 2, 3, 45, -10]);
+    // The debug hull still follows the player, not the sim origin: its first corner is at the
+    // drawn origin + HULL_MINS, within a frame's travel of the predicted origin.
+    const corner = fixed.game.debugLines.shapes.positions;
+    const o = fixed.client.predictor.state.origin;
+    expect(
+      Math.abs((corner[0] as number) - ((o[0] as number) + (HULL_MINS[0] as number))),
+    ).toBeLessThan(8);
+    expect(
+      Math.abs((corner[1] as number) - ((o[1] as number) + (HULL_MINS[1] as number))),
+    ).toBeLessThan(8);
   });
 
   it("smooths a step: the eye rises over cl_stepSmoothMs, not in one tick", () => {
@@ -464,6 +476,7 @@ describe("player input, console, HUD and debug draw in the frame (M2 increment 1
       toggleConsole: () => {},
       sendServer: (t) => p.client.sendCommand(t),
       net: null,
+      corrections: p.client.predictor.corrections,
     };
     p.actions.press(ACTION_FORWARD);
     p.actions.press(ACTION_JUMP);

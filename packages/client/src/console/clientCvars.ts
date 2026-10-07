@@ -69,6 +69,12 @@ export const CLIENT_CVARS = Object.freeze([
     default: false,
     description: "Draw the ground normal under the player",
   }),
+  Object.freeze({
+    name: "r_stats",
+    type: "bool" as const,
+    default: false,
+    description: "Show the renderer's draw calls, triangles, geometries and textures",
+  }),
 ]);
 
 /** Registers every client cvar: the net code's, the view's and CLIENT_CVARS, all ARCHIVE. */
@@ -98,6 +104,7 @@ export class ClientSettings {
   debugHull = false;
   debugTraces = false;
   debugGround = false;
+  renderStats = false;
   version = -1;
   registry: CvarRegistry | null = null;
 }
@@ -114,6 +121,7 @@ export function refreshClientSettings(reg: CvarRegistry, out: ClientSettings): b
   out.debugHull = reg.get("r_debugHull") === true;
   out.debugTraces = reg.get("r_debugTraces") === true;
   out.debugGround = reg.get("r_debugGround") === true;
+  out.renderStats = reg.get("r_stats") === true;
   out.version = reg.version;
   out.registry = reg;
   return true;

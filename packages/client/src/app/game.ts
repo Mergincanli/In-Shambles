@@ -255,6 +255,9 @@ export class Game {
   private updatePose(): void {
     const c = this.client;
     const pose = this.pose;
+    // The drawn origin first: the debug hull and ground normal follow the player even when a
+    // fixed camera watches.
+    c.renderOrigin(this.origin);
     const o = this.cameraOverride;
     if (o !== null) {
       pose[0] = o[0];
@@ -266,7 +269,6 @@ export class Game {
     }
     const p = c.predictor;
     const ps = p.state;
-    c.renderOrigin(this.origin);
     c.renderTick(this.renderTick, 0);
     this.steps.sample(this.stepOffset, 0);
     const crouched = (ps.flags & PMF_CROUCHED) !== 0;

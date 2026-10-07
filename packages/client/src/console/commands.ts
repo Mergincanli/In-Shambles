@@ -8,6 +8,7 @@ import {
   type NetProfile,
   type SetResult,
 } from "@game/shared";
+import type { CorrectionLog } from "../net/predictor";
 import { actionOf, type Binds, isKeyCode } from "./binds";
 
 /**
@@ -37,6 +38,8 @@ export interface ConsoleHost {
   sendServer(text: string): boolean;
   /** Null when the link is not simulated (net_profile then says so). */
   readonly net: NetProfileControl | null;
+  /** The prediction's correction log, for `net_corrections`; null without a client. */
+  readonly corrections: CorrectionLog | null;
 }
 
 /** Every command and its usage, for `help` and docs/06 §6. */
@@ -48,6 +51,7 @@ export const CONSOLE_COMMANDS: readonly (readonly [string, string])[] = Object.f
   ["bind", "bind <code> [command]: show or set what a key runs (KeyboardEvent.code, Mouse0..4)"],
   ["unbind", "unbind <code>: remove a key's bind (one key always keeps toggleconsole)"],
   ["net_profile", "net_profile [name]: show or switch the simulated network profile"],
+  ["net_corrections", "net_corrections: the newest prediction corrections and what differed"],
   ["clear", "clear: empty the console"],
   ["toggleconsole", "toggleconsole: open or close the console"],
   ["help", "help: this list; a cvar's name alone shows its value"],
@@ -82,6 +86,21 @@ function describeSet(name: string, r: SetResult, input: string): string {
   if (r.error === "type") return `${name}: "${input}" is not a valid value`;
   if (r.error === "cheat") return `${name} is cheat protected`;
   return `unknown cvar ${name}`;
+}
+
+/** The correction log, oldest first: each snapshot tick, the distance and the fields that differed. */
+function netCorrections(host: ConsoleHost): void {
+  const log = host.corrections;
+  if (log === null) {
+    host.print("no prediction to report on");
+    return;
+  }
+  host.print(`${log.total} corrections; the newest ${log.count}:`);
+  for (let i = 0; i < log.count; i++) {
+    const r = log.at(i);
+    const d = Math.round(r.distance * 100) / 100;
+    host.print(`tick ${r.tick} (to ${r.latestTick}) ${d} u: ${r.diff().join(", ")}`);
+  }
 }
 
 function describeProfile(p: NetProfile): string {
@@ -125,6 +144,9 @@ export function runConsoleCommand(text: string, host: ConsoleHost): void {
       return;
     case "net_profile":
       netProfile(args[0], host);
+      return;
+    case "net_corrections":
+      netCorrections(host);
       return;
     case "clear":
       host.clear();

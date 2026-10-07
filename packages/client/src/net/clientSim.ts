@@ -149,6 +149,8 @@ export interface ClientSimOptions {
   readonly input?: CmdSampler;
   readonly nonce?: number;
   readonly log?: ClientLog;
+  /** The session ended (kicked, refused or closed); the page shows `reason` to the player. */
+  readonly onClosed?: (reason: string) => void;
 }
 
 function ignoreLog(): void {}
@@ -255,6 +257,7 @@ export class ClientSim {
     this.offset = new RenderOffset(this.now);
     this.predictor = new Predictor(this.world);
     this.t[MISMATCH_SINCE] = Number.NaN;
+    const onClosed = options.onClosed;
     const handler: ConnectionHandler = {
       onWelcome: (m) => this.onWelcome(m),
       onSnapshot: (m) => this.onSnapshot(m),
@@ -262,7 +265,10 @@ export class ClientSim {
       onPrint: (_level, text) => {
         this.prints.push(text);
       },
-      onClosed: (reason) => this.log("info", `disconnected: ${reason}`),
+      onClosed: (reason) => {
+        this.log("info", `disconnected: ${reason}`);
+        onClosed?.(reason);
+      },
     };
     this.connection = new Connection(
       options.transport,
