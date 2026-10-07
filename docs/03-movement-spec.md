@@ -125,6 +125,7 @@ Let `f`, `r`, `u` = forwardmove, rightmove, upmove (−127..127).
 - Otherwise: `scale = speed × max(|f|,|r|,|u|) / (127 × sqrt(f² + r² + u²))`.
 
 `speed` is the current speed cap: run, sprint, walk (`runSpeed × walkScale`), times `duckScale` when crouched and `limpScale` when limping.
+- **Known limit (open, D-024):** the crouch factor applies in the air too, so a crouch in the air cuts the air wish speed (§4.5) to `runSpeed × duckScale`, weakening air strafing on a crouch-jump and on every M4 power-slide approach. The Q3 lineage applies it on the ground only.
 
 The wish velocity is built from `f` and `r` along the movement basis, so diagonal input never exceeds the cap.
 
@@ -265,6 +266,7 @@ The 0.99 and 0.1 u/s thresholds are design constants (`SLIDE_SAME_PLANE`, `SLIDE
   - No slide-down.
   - **At the top** the hull rises past the face, the next probe misses, and the climb ends in an air move that carries the player over the edge onto the top (MV-18: `ladder_base` to `ladder_top`, 384 u, in about 3.1 s).
   - Ladder faces are vertical walls in M2; climbing is straight up world z whatever the face's tilt.
+  - **Known limit (open, D-024):** a jump at a ladder's foot with forward held pushes off the ladder (the ladder move is dispatched first) rather than jumping. A standing jump at the foot with no move input, facing the face, is caught by the ladder on the next tick (the forward rule applies on the ground only, and a vertical jump has v·n = 0), and the player hangs about 35 u up until back or jump is pressed.
   - **Known limit (open, D-024):** a ladder cannot be mounted from its top. Walking backward off the top edge toward the face leaves it faster than `LADDER_DETACH_SPEED`, so contact is refused and the player falls.
 - Climbing is free (no stamina).
 
@@ -439,7 +441,7 @@ This makes the client's predicted state **bit-identical** to the server's state 
 - `flags` bits 0–9 are the ten flags above, in the order listed; new flags take the next bit.
 - Every scalar field holds an integer. Quantize clamps `origin` to ±16384 u and `velocity` to ±(2^19 − 1)/16 u/s (the i20 range) per axis, wraps the view angles to u16, clamps `groundEntity` to −1…32767 (32767 is the world) and `waterLevel` to 0–3, truncating toward zero.
 - A non-finite value is a bug (a dev assert). With asserts off it falls back to 0, except `groundEntity`, which falls back to −1 (none) because 0 is a real entity.
-- Rounding biases: stamina rounds to 0.01 every tick, so a per-second rate moves in steps of 0.6/s at 60 Hz (an 11/s drain runs at 10.8/s, 5/s regen at 4.8/s); M2 tunes the `st_*` cvars with this in mind. Origin rounding to 1/32 u each tick can add about 0.2% distance at 320 u/s, so feel tests measure velocity, not distance travelled.
+- Rounding biases: stamina rounds to 0.01 every tick, so a per-second rate moves in steps of 0.6/s at 60 Hz (an 11/s drain runs at 10.8/s, 5/s regen at 4.8/s); M2 tunes the `st_*` cvars with this in mind. Origin rounding to 1/32 u each tick can add about 0.2% distance at 320 u/s, so feel tests measure velocity, not distance travelled. Velocity rounding to 1/16 u/s biases gravity: an airborne vz on the 1/16 grid loses 800·dt rounded to 1/16 every tick, 13.3125 u/s at 60 Hz (an effective 798.75 u/s², about −0.16%) and 6.6875 u/s at 120 Hz (802.5 u/s²). The standing-jump apex is 45.625 u at 60 Hz and 45.406 u at 120 Hz against 45.556 unrounded, so all of MV-04's 60-vs-120 Hz gap is this rounding, not the integration. M4 calibrates fall-damage heights and airtimes against the simulated arc, not the closed-form one.
 
 ## 7. Measurements log (fill from reference captures, `docs/02` §13)
 
@@ -465,7 +467,7 @@ Every test runs headless at 60 Hz on code-built test courses (`docs/07` §3). Ea
 | MV-01 | Run cap | Holding forward on flat ground converges to 320 ± 0.5 within 0.6 s. |
 | MV-02 | Sprint cap | Converges to `sprintSpeed` ± 0.5. Drains stamina at the configured rate. |
 | MV-03 | Walk / crouch caps | 160 ± 1 / 80 ± 1. |
-| MV-04 | Jump apex | 45.56 ± 0.5 u from flat ground. Identical at TICK_RATE 60 and 120 within 0.5 u (integration check). |
+| MV-04 | Jump apex | 45.56 ± 0.5 u from flat ground. Identical at TICK_RATE 60 and 120 within 0.5 u (integration check; the remaining ~0.22 u gap is velocity rounding, §6). |
 | MV-05 | Step-up | 18 u step climbed without jumping; 19 u step blocks. Smooth `step` events. |
 | MV-06 | Slopes | Walkable at normal.z = 0.71; slides on 0.69. |
 | MV-07 | No straight-hop gain | 20 consecutive forward-only hops (no turning, no strafe) never exceed the cap + 2%. |
@@ -498,3 +500,6 @@ Every test runs headless at 60 Hz on code-built test courses (`docs/07` §3). Ea
 3. Does crouch-landing reduce fall damage (Q3 doubled it while ducked)? Default: no effect.
 4. Ledge reach heights and whether you can grab while moving upward.
 5. Stamina rates and whether low stamina weakens jumps.
+6. Ladder foot and top (D-024, design): should a jump at the foot jump rather than push off or attach, and should a ladder be mountable from its top? (§4.14)
+7. Crouched air move (D-024, design): should the crouch factor cut the air wish speed? (§4.1)
+8. Flush pool rims (D-024, design): bring the water-jump forward or relax the rising-step refusal if maps need rims flush with the surface. (§4.13)

@@ -6,7 +6,8 @@ import { airtime, apex, jumps, lands, logMeasured } from "../../src/scenarios/me
 import { placeAtAnchor, ScenarioRunner } from "../../src/scenarios/runner";
 
 // docs/03 §8 MV-04, §4.6, M2 design §5: a standing jump on flat ground. The half-step gravity
-// makes the arc independent of the tick rate, so 60 and 120 Hz agree (D-023: dt is a parameter).
+// keeps the integration exact at any tick rate (D-023: dt is a parameter); what separates 60 and
+// 120 Hz is the end-of-tick velocity rounding to 1/16 u/s, which biases gravity (docs/03 §6).
 
 const APEX = (270 * 270) / (2 * 800); // 45.5625 u from pm_jumpVelocity and pm_gravity (FACT-Q3)
 const APEX_TOLERANCE = 0.5;
@@ -49,6 +50,25 @@ describe("MV-04: jump apex at 60 and 120 Hz", () => {
       expect(run.record.grounded(end)).toBe(true);
       expect(run.record.x(end)).toBe(run.start.origin[0]);
       expect(run.record.z(end) - run.start.origin[2]).toBeLessThanOrEqual(1 / 32);
+    },
+  );
+
+  // docs/03 §6: airborne, vz loses 800·dt rounded to 1/16 every tick (798.75 u/s² at 60 Hz,
+  // 802.5 at 120 Hz), the documented bias M4 calibrates fall damage against.
+  it.each(runs.map((r) => [1 / r.dt, r] as const))(
+    "%d Hz: airborne vz drops by 800·dt rounded to 1/16 u/s every tick",
+    (_, run) => {
+      const step = Math.round(800 * run.dt * 16) / 16;
+      const r = run.record;
+      let airborne = 0;
+      for (let i = 1; i + 1 < r.count; i++) {
+        if (r.grounded(i) || r.grounded(i + 1)) continue;
+        expect((r.velocity[3 * i + 2] as number) - (r.velocity[3 * (i + 1) + 2] as number)).toBe(
+          step,
+        );
+        airborne++;
+      }
+      expect(airborne).toBeGreaterThan(30);
     },
   );
 
