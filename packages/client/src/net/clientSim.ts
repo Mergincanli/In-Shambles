@@ -48,6 +48,7 @@ import {
   STAT_SNAPSHOTS,
   STAT_SNAPSHOTS_LOST,
   STAT_STARVED,
+  STAT_STARVED_CORRECTIONS,
 } from "./stats";
 
 /**
@@ -567,6 +568,7 @@ export class ClientSim {
       stats.add(STAT_CORRECTIONS, 1);
       stats.add(STAT_CORRECTION_DIST, dist[0] as number);
       stats.add(STAT_CORRECTION_MAX, dist[0] as number);
+      if ((m.flags & SNAP_FLAG_STARVED) !== 0) stats.add(STAT_STARVED_CORRECTIONS, 1);
       this.changed = true;
     } else if (result === SNAPSHOT_HARD_RESYNC) {
       // A backlog after a stall resyncs on every snapshot ahead of the last; it is one event,

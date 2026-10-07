@@ -142,7 +142,40 @@ describe("game frame loop (M2 design §2)", () => {
     expect(Number(status.corrections)).toBe(0);
     expect(Number(status.frames)).toBeGreaterThan(game.frames - 40);
     expect(Number(status.frames)).toBeLessThanOrEqual(game.frames);
+    // The page clock at the report, at most one status interval old.
+    expect(Number(status.statusAt)).toBeGreaterThan(3500 - 250);
+    expect(Number(status.statusAt)).toBeLessThanOrEqual(3500);
     expect(status.drawCalls).toBe("0");
+  });
+
+  it("reports the frames longer than the input buffer and the hard resyncs they caused", () => {
+    const { game, client, status, run, hitch } = session(new StrafeCircuit());
+    run(2000);
+    // At 144 Hz every gap is under 7 ms.
+    expect(Number(status.maxFrameMs)).toBe(7);
+    expect(status.longFrames).toBe("0");
+    expect(status.lateResyncs).toBe("0");
+    // A gap inside the 2-tick input buffer (33 ms) is not long and resyncs nothing.
+    const resyncs = client.stats.totals[STAT_HARD_RESYNCS] as number;
+    hitch(15);
+    run(1000);
+    expect(game.longFrames).toBe(0);
+    expect(client.stats.totals[STAT_HARD_RESYNCS]).toBe(resyncs);
+    // A 300 ms stall: one long frame, its hard resync counted as a late one, the gap reported
+    // by the report that frame writes (more than 250 ms since the last).
+    hitch(300);
+    run(7);
+    expect(game.longFrames).toBe(1);
+    expect(client.stats.totals[STAT_HARD_RESYNCS]).toBe(resyncs + 1);
+    expect(game.lateResyncs).toBe(1);
+    expect(status.longFrames).toBe("1");
+    expect(status.lateResyncs).toBe("1");
+    expect(Number(status.maxFrameMs)).toBeGreaterThanOrEqual(300);
+    expect(Number(status.maxFrameMs)).toBeLessThan(315);
+    // The longest gap is per report: the next one is back to the frame period.
+    run(500);
+    expect(Number(status.maxFrameMs)).toBe(7);
+    expect(status.lateResyncs).toBe("1");
   });
 
   it("puts the eye at the interpolated origin plus the eye height, facing the spawn's yaw", () => {

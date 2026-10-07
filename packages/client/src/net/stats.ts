@@ -27,7 +27,12 @@ export const STAT_PARAM_RESYNCS = 10;
 export const STAT_HARD_RESYNCS = 11;
 /** Packets that did not decode or did not fit the connection's state. */
 export const STAT_STRIKES = 12;
-export const STAT_COUNT = 13;
+/**
+ * Of the corrections, those on a snapshot the server flagged starved: it simulated a repeat of a
+ * cmd of ours that came late, so the prediction could not match (timing, not a misprediction).
+ */
+export const STAT_STARVED_CORRECTIONS = 13;
+export const STAT_COUNT = 14;
 
 const BUCKETS = 10;
 const BUCKET_MS = 100;

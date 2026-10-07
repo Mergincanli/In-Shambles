@@ -10,6 +10,9 @@ import {
   MixedInput,
   NeutralInput,
   SCRIPTED_INPUTS,
+  STAT_CORRECTIONS,
+  STAT_STARVED,
+  STAT_STARVED_CORRECTIONS,
   STAT_STRIKES,
   StrafeCircuit,
 } from "@game/client/net";
@@ -19,6 +22,7 @@ import {
   createLoopbackPair,
   encodePong,
   encodeSnapshot,
+  findNetProfile,
   MAX_RELIABLE_BYTES,
   PlayerState,
   PMEV_JUMP,
@@ -153,6 +157,31 @@ describe("client session", () => {
     expect(Math.max(...h.frames.offset)).toBeGreaterThan(0);
     // It decays: the last frame's offset is gone.
     expect(h.frames.offset.at(-1)).toBe(0);
+  });
+
+  it("counts a correction on a starved snapshot apart: a late cmd, not a misprediction", () => {
+    // wan-50: a 70 ms stall sends cmds past the input buffer, so the server repeats one it had
+    // not received; the client already predicted that tick with the real cmd and is corrected.
+    const h = new NetHarness({ input: new StrafeCircuit(), profile: findNetProfile("wan-50") });
+    h.run(3000);
+    const t = h.client.stats.totals;
+    expect([t[STAT_STARVED], t[STAT_CORRECTIONS], t[STAT_STARVED_CORRECTIONS]]).toEqual([0, 0, 0]);
+    h.hitch(70);
+    h.run(1000);
+    expect(t[STAT_STARVED]).toBeGreaterThan(0);
+    expect(t[STAT_CORRECTIONS]).toBeGreaterThan(0);
+    expect(t[STAT_STARVED_CORRECTIONS]).toBe(t[STAT_CORRECTIONS]);
+    // A server-side push the client could not predict is a correction on an on-time snapshot.
+    const corrections = t[STAT_CORRECTIONS] as number;
+    let push = true;
+    h.beforeServerTick = () => {
+      const player = h.match.session(0)?.player;
+      if (push && player !== undefined) player.velocity[2] += 300;
+      push = false;
+    };
+    h.run(1000);
+    expect(t[STAT_CORRECTIONS]).toBeGreaterThan(corrections);
+    expect(t[STAT_STARVED_CORRECTIONS]).toBe(corrections);
   });
 
   it("files each first prediction's movement events under its tick, once", () => {

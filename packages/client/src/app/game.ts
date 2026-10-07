@@ -25,7 +25,9 @@ import {
   STAT_HARD_RESYNCS,
   STAT_SNAPSHOTS,
   STAT_STARVED,
+  STAT_STARVED_CORRECTIONS,
   StepSmoother,
+  TICK_MS,
   ViewHeight,
 } from "../net";
 import { DebugLines } from "../render/debug/debugDraw";
@@ -89,6 +91,15 @@ export class Game {
   /** The view this frame: [0..2] eye position (sim u), [3] yaw, [4] pitch (degrees). */
   readonly pose = new Float64Array(5);
   frames = 0;
+  /**
+   * Frames that came longer after the previous one than the input buffer the clock keeps
+   * (`cl_inputBuffer` ticks, 33 ms by default): the slack of the prediction's lead, whose rest
+   * covers the round trip. On `lan` such a gap can starve the server and hard-resync by design
+   * (D-028 known limit); it says nothing about the prediction.
+   */
+  longFrames = 0;
+  /** Hard resyncs that came in a long frame (the rest would be prediction faults). */
+  lateResyncs = 0;
   private readonly client: ClientSim;
   private readonly renderer: GameRenderer | null;
   private readonly status: StatusSink | null;
@@ -103,6 +114,11 @@ export class Game {
   private wasActive = false;
   private firstTick = -1;
   private lastStatus = Number.NEGATIVE_INFINITY;
+  /**
+   * Frame timing: [0] the previous frame's time (ms; NaN before the first), [1] the longest gap
+   * since the last report, [2] the hard resyncs before this frame's client step.
+   */
+  private readonly timing = new Float64Array([Number.NaN, 0, 0]);
   /** [0..2] the predicted origin at the last report, [3] horizontal path length since spawn. */
   private readonly travel = new Float64Array([Number.NaN, 0, 0, 0]);
   private running = false;
@@ -158,8 +174,10 @@ export class Game {
       p.traceLog = null;
       this.debugLines.clearTraces();
     }
+    this.timing[2] = c.stats.totals[STAT_HARD_RESYNCS] as number;
     c.frame();
     this.frames++;
+    this.timeFrame();
     refreshViewSettings(c.cvars, this.settings);
     const active = c.active;
     if (active) {
@@ -193,6 +211,20 @@ export class Game {
     if (this.hud !== null) this.hud.frame(c, cs, active && this.underwater);
     if (this.status !== null) this.report();
     if (this.onFrame !== null) this.onFrame();
+  }
+
+  /** The gap since the previous frame: the longest per report, the long frames and their resyncs. */
+  private timeFrame(): void {
+    const c = this.client;
+    const g = this.timing;
+    const prev = g[0] as number;
+    g[0] = c.now[0] as number;
+    if (Number.isNaN(prev)) return;
+    const dt = (g[0] as number) - prev;
+    if (dt > (g[1] as number)) g[1] = dt;
+    if (dt <= c.settings.inputBuffer * TICK_MS) return;
+    this.longFrames++;
+    if ((c.stats.totals[STAT_HARD_RESYNCS] as number) > (g[2] as number)) this.lateResyncs++;
   }
 
   /** The `r_debug*` segments: this frame's traces, the hull where it is drawn, the ground. */
@@ -317,11 +349,19 @@ export class Game {
     const t = c.stats.totals;
     if (s.state !== "error") s.state = c.closed ? "closed" : c.active ? "running" : "connecting";
     s.frames = String(this.frames);
+    // The page clock at this report (ms), so a reader can rate `frames` without its own read lag.
+    s.statusAt = String(Math.round(now));
     s.ticks = String(this.firstTick < 0 ? 0 : Math.max(0, c.predictor.latestTick - this.firstTick));
     s.snapshots = String(t[STAT_SNAPSHOTS]);
     s.corrections = String(t[STAT_CORRECTIONS]);
     s.hardResyncs = String(t[STAT_HARD_RESYNCS]);
     s.starved = String(t[STAT_STARVED]);
+    s.starvedCorrections = String(t[STAT_STARVED_CORRECTIONS]);
+    // Frame timing, which explains the hard resyncs and starved cmds of a slow host (D-028).
+    s.longFrames = String(this.longFrames);
+    s.lateResyncs = String(this.lateResyncs);
+    s.maxFrameMs = String(Math.round(this.timing[1] as number));
+    this.timing[1] = 0;
     s.drawCalls = String(this.renderer?.drawCalls ?? 0);
     s.triangles = String(this.renderer?.triangles ?? 0);
     // How far the player went (u, horizontal, sampled per report): proof a bot moves.
