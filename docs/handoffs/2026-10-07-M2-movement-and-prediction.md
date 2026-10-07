@@ -35,7 +35,7 @@ Each of the 12 increments was built, reviewed from 4–5 angles and fixed before
   - ✅ **NET-03:** 0 corrections on a lossless loopback over a 3600-tick mixed session, including out-of-range input, wan-50, and a live `set pm_gravity 400`.
   - ✅ **Smooth at `wan-150-loss2`.** Automated as NET-04 (basic) on every profile: under 1 correction/s, mean under 2 u, render offset under 8 u, no frame-to-frame jumps. A new NET-04 block uses browser-like frame timing: 60 fps with hitches, 33–83 ms frames, 50–83 ms frames. Before the input-buffer fix it showed up to 8 corrections/s and errors up to 23 u; now it has 0 corrections on wan-50, wan-100-loss1 and wan-150-loss2. ⏳ Still to do: your own manual check on a laptop (§9).
   - ✅ **`pnpm feel-report`** prints the base metrics: 17 of 17 checked metrics meet target, and it writes `reports/feel.md` (git-ignored).
-  - ✅ **Determinism vectors replay bit for bit in browsers.** Chromium passes locally. The one-file vectors page passed every table on your phone (Mustafa, 2026-10-07). ⏳ Firefox and WebKit run in the new CI `browsers` job, whose first run is on the PR.
+  - ✅ **Determinism vectors replay bit for bit in browsers.** Chromium passes locally. The one-file vectors page passed every table on your phone (Mustafa, 2026-10-07). Firefox and WebKit passed the trace, determinism and pmove vectors in the CI `browsers` job on the M2 PR's first run (2026-10-07), which also ran the e2e smoke test green on a GitHub runner.
 
 ## 3. What was built (by package)
 - `shared/`:
@@ -176,7 +176,6 @@ Each of the 12 increments was built, reviewed from 4–5 angles and fixed before
 - **Risks:**
   - **Learning glide:** when frames turn bad while you move fast, the clock needs about 1.4 s to learn the new rhythm. Until then there are 0–9 small corrections, then one forward glide of 22–57 u over 100 ms. It happens once per change of frame rhythm. Smooth dilation (NET-07, M3) will hide it.
   - **e2e under heavy load:** with 2 of 4 cores busy, 1 of 18 e2e runs had a hard resync in a normal-length frame while moving, which the smoke test rejects. The clock before the fix passed 9 of 9 loaded runs; the difference isn't significant. If CI shows it, the likely cause is the Worker server's thread being starved; the next step is to log frame and server-tick timing around the resync.
-  - **Firefox and WebKit** are proven only by the CI `browsers` job, whose first run is on the PR.
   - **Warm-up transient:** a pmove branch first reached after V8 optimized its function (the first stairs, the first ladder) boxes doubles for a while: 1.7–5.4 MB once per process. It is not a steady state (`docs/10` §4). M3 adds the primer.
   - **Bench machine:** the numbers come from a cloud VM; please run `pnpm bench` on your laptop.
   - **Small netgraph overlap:** at very small windows the netgraph covers the speedometer.
@@ -191,7 +190,7 @@ Each of the 12 increments was built, reviewed from 4–5 angles and fixed before
   - The phone vectors page passed every table on your phone (2026-10-07).
 
 ## 8. Next steps (ordered)
-1. Merge the M2 PR once CI is green. Its first `browsers` job run proves Firefox and WebKit.
+1. Merge the M2 PR: CI is green, including the `browsers` job in Chromium, Firefox and WebKit.
 2. Try the game on your laptop (§9), especially the manual `net_profile wan-150-loss2` check.
 3. Answer the §7 questions when convenient. Questions 2 and 3 should be settled before M4.
 4. Optional style spike (`docs/08` §18), or go straight to `/milestone M3`: the Node dedicated server, delta snapshots, remote players, bots, smooth time dilation and the pmove primer.
