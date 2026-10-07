@@ -131,11 +131,12 @@ describe.concurrent("per-tick paths under native ES modules", () => {
     expect(r.clean, r.attempts.join("; ")).toBe(true);
   }, 30_000);
 
-  it("client prediction allocates nothing: frames, predict, reconcile with re-simulation, clock steps, hard resyncs, render offset (D-027, D-028)", async ({
+  it("client prediction allocates nothing: frames, predict, reconcile with re-simulation, clock steps (adaptive buffer included), hard resyncs, render offset (D-027, D-028)", async ({
     expect,
   }) => {
     const r = await runChild("predict");
-    // Corrections (dropped inputs), clock steps (input delay steps), hard resyncs (frame hitches).
+    // Corrections (dropped inputs), clock steps (the delay steps run every phase; this counts the
+    // ones in the slow-host phase, the low edge's), hard resyncs (frame hitches).
     for (const n of r.outcomes) expect(n).toBeGreaterThan(0);
     expect(r.clean, r.attempts.join("; ")).toBe(true);
   }, 30_000);

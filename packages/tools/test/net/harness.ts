@@ -30,7 +30,8 @@ import { loadCourse } from "../../src/scenarios/course";
  * real client net code (`ClientSim`) over an in-memory loopback pair, optionally impaired by
  * `NetSimTransport` on the client's end, all on one fake clock. A tiny event loop runs the
  * server's own match loop (through a fake `LoopHost`), the simulator's wakes and client frames at
- * 144 Hz (or `frameHz`) ± 1 ms jitter, in time order, so a seed gives one run.
+ * 144 Hz (or `frameHz`) ± 1 ms jitter, or as a frame model draws them (`frameIntervalMs`), in time
+ * order, so a seed gives one run.
  *
  * It records the server's state of the player after every tick, the client's prediction of every
  * tick (the first one, and the one standing when the tick's snapshot was reconciled), and per frame
@@ -39,6 +40,34 @@ import { loadCourse } from "../../src/scenarios/course";
 
 export const HARNESS_BUILD = "net-harness";
 export const FRAME_HZ = 144;
+
+/** Draws the gap before the next client frame (ms) from the harness's seeded generator. */
+export type FrameModel = (rng: Mulberry32) => number;
+
+/** Steady 144 Hz ± 1 ms: the default. */
+export const FRAMES_144HZ: FrameModel = (rng) => 1000 / FRAME_HZ + (rng.nextFloat() * 2 - 1);
+/**
+ * A browser at 60 fps ± 1 ms with hitches: 15% of the frames take 50–80 ms (layout, a slow
+ * draw, a minor GC), so cmds leave in bursts of 3–5 ticks now and then.
+ */
+export const FRAMES_BROWSER_HITCHES: FrameModel = (rng) =>
+  rng.nextFloat() < 0.15 ? 50 + rng.nextFloat() * 30 : 1000 / 60 + (rng.nextFloat() * 2 - 1);
+/** A slow host: every frame 33–83 ms (12–30 fps), uniformly. */
+export const FRAMES_SLOW_HOST: FrameModel = (rng) => 33 + rng.nextFloat() * 50;
+/** A slower host: every frame 50–83 ms (12–20 fps), like SwiftShader in the e2e. */
+export const FRAMES_SLOWER_HOST: FrameModel = (rng) => 50 + rng.nextFloat() * 33;
+/**
+ * `before` for the first `ms` of frames, then `after`: frames that turn bad mid-play. One per run
+ * (it keeps the time it has drawn).
+ */
+export function framesSwitchingAt(ms: number, before: FrameModel, after: FrameModel): FrameModel {
+  let elapsed = 0;
+  return (rng) => {
+    const gap = elapsed < ms ? before(rng) : after(rng);
+    elapsed += gap;
+    return gap;
+  };
+}
 
 interface Timer {
   at: number;
@@ -54,6 +83,11 @@ export interface HarnessOptions {
   readonly map?: string;
   /** Client frame rate (FRAME_HZ by default); each frame still jitters by ±1 ms. */
   readonly frameHz?: number;
+  /**
+   * Draws each frame gap instead of `frameHz` (from the harness's generator, so a seed is one
+   * run); FRAMES_144HZ by default.
+   */
+  readonly frameIntervalMs?: FrameModel;
   /** Wraps the client's transport (after NetSim), e.g. to drop or rewrite what it receives. */
   readonly wrap?: (t: Transport) => Transport;
 }
@@ -61,6 +95,8 @@ export interface HarnessOptions {
 /** Per-frame records for the smoothness checks. */
 export class FrameLog {
   readonly time: number[] = [];
+  /** The client's newest predicted tick. */
+  readonly tick: number[] = [];
   readonly x: number[] = [];
   readonly y: number[] = [];
   readonly z: number[] = [];
@@ -68,6 +104,12 @@ export class FrameLog {
   readonly speed: number[] = [];
   /** Length of the render offset, u. */
   readonly offset: number[] = [];
+  /** The clock's input buffer health: the mean and the low edge, ticks. */
+  readonly buffer: number[] = [];
+  readonly bufferLow: number[] = [];
+  /** Since connecting: the clock steps taken (fast-forwards and holds) and the hard resyncs. */
+  readonly clockSteps: number[] = [];
+  readonly hardResyncs: number[] = [];
 }
 
 export class NetHarness {
@@ -96,6 +138,7 @@ export class NetHarness {
   private seq = 0;
   private readonly rng: Mulberry32;
   private readonly frameHz: number;
+  private readonly frameModel: FrameModel;
   private lastFirst = -1;
   private lastFinal = -1;
   private readonly pos = vec3();
@@ -111,6 +154,11 @@ export class NetHarness {
     const course = loadCourse(options.map ?? "movement_lab");
     this.profile = options.profile ?? NET_PROFILE_LAN;
     this.frameHz = options.frameHz ?? FRAME_HZ;
+    this.frameModel =
+      options.frameIntervalMs ??
+      (options.frameHz === undefined
+        ? FRAMES_144HZ
+        : (rng) => 1000 / this.frameHz + (rng.nextFloat() * 2 - 1));
     this.rng = new Mulberry32(((options.seed ?? 1) ^ 0x51f7) >>> 0);
     this.match = new Match({ cmap: course.cmap, world: course.world, buildHash: HARNESS_BUILD });
     const [clientEnd, serverEnd] = createLoopbackPair();
@@ -253,7 +301,7 @@ export class NetHarness {
   // -------------------------------------------------------------------------------------------
 
   private frameInterval(): number {
-    return 1000 / this.frameHz + (this.rng.nextFloat() * 2 - 1);
+    return this.frameModel(this.rng);
   }
 
   private schedule(at: number, cb: () => void): void {
@@ -330,11 +378,16 @@ export class NetHarness {
     if (p.stateAt(p.latestTick, this.a)) speed = speedOf(this.a);
     if (p.stateAt(p.latestTick - 1, this.b)) speed = Math.max(speed, speedOf(this.b));
     f.time.push(this.now);
+    f.tick.push(p.latestTick);
     f.x.push(this.pos[0] as number);
     f.y.push(this.pos[1] as number);
     f.z.push(this.pos[2] as number);
     f.speed.push(speed);
     f.offset.push(Math.hypot(this.off[0] as number, this.off[1] as number, this.off[2] as number));
+    f.buffer.push(c.clock.bufferHealth);
+    f.bufferLow.push(c.clock.bufferLow);
+    f.clockSteps.push(c.stats.totals[STAT_CLOCK_ADJUSTMENTS] as number);
+    f.hardResyncs.push(c.stats.totals[STAT_HARD_RESYNCS] as number);
   }
 }
 

@@ -13,7 +13,7 @@ export const CLIENT_NET_CVARS = Object.freeze([
     default: 2, // ESTIMATE (docs/05 §8.2: target 1–2 ticks)
     min: 0,
     max: 30,
-    description: "Input buffer the clock aims for, in ticks",
+    description: "Input buffer the clock keeps at the health's low point, in ticks",
   }),
   Object.freeze({
     name: "cl_correctionSmoothMs",

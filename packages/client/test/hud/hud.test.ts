@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   NetgraphReadout,
   NG_BUFFER,
+  NG_BUFFER_LOW,
   NG_BYTES_IN,
   NG_BYTES_OUT,
   NG_CLOCK_ADJUSTMENTS,
@@ -66,12 +67,13 @@ describe("netgraph", () => {
     v[NG_RTT] = 151.6;
     v[NG_LOSS] = 2;
     v[NG_CORRECTION_MEAN] = 0.5;
-    v[NG_BUFFER] = 2.04;
+    v[NG_BUFFER] = 4.04;
+    v[NG_BUFFER_LOW] = 1;
     const lines = netgraphLines(v, "wan-150-loss2");
     expect(lines).toHaveLength(5);
     expect(lines[0]).toBe("link   rtt 152 ms  jitter 0.0 ms  loss 2.0%  snaps 0/s");
     expect(lines[1]).toBe("corr   0/s  mean 0.50 u  max 0.00 u  offset 0.00 u");
-    expect(lines[2]).toBe("input  buffer 2.0 ticks  starved 0/s  clock adj 0");
+    expect(lines[2]).toBe("input  buffer 4.0 low 1 ticks  starved 0/s  clock adj 0");
     expect(lines[3]).toBe("bytes  in 0.0 kB/s  out 0.0 kB/s");
     expect(lines[4]).toBe("resync hard 0  params 0  net wan-150-loss2");
     v[NG_RTT] = Number.NaN;
@@ -98,7 +100,7 @@ describe("netgraph readout", () => {
     totals[STAT_PARAM_RESYNCS] = 6;
     const stub = {
       stats: { totals, lastSecond: (out: Float64Array) => out.set(second) },
-      clock: { rttMs: 101, jitterMs: 4.5, bufferHealth: 2.25 },
+      clock: { rttMs: 101, jitterMs: 4.5, bufferHealth: 2.25, bufferLow: 1 },
       offset: {
         sample: (out: Float64Array) => {
           out[0] = 3;
@@ -126,6 +128,7 @@ describe("netgraph readout", () => {
       [NG_BYTES_OUT, 700],
       [NG_HARD_RESYNCS, 5],
       [NG_PARAM_RESYNCS, 6],
+      [NG_BUFFER_LOW, 1],
     ];
     expect(want).toHaveLength(NG_COUNT);
     for (const [i, x] of want) expect([i, v[i]]).toEqual([i, x]);

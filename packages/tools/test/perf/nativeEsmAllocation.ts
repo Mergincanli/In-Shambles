@@ -784,7 +784,10 @@ function runMatch(n: number): void {
 // - every 1200 ticks the INPUTs' delay switches between 0 and 10 ticks (a pooled ring), so the
 //   buffer health leaves its band and the clock fast-forwards and holds;
 // - every 2048 ticks the client skips its frames for 8 ticks, a hitch longer than the lead, so a
-//   backlog of snapshots overtakes the prediction and it hard-resyncs and re-anchors.
+//   backlog of snapshots overtakes the prediction and it hard-resyncs and re-anchors;
+// - every 4096 ticks, for 1024 ticks, the client runs a frame only every 5th server tick (83 ms,
+//   a slow host), so the buffer health saw-tooths: the low edge's window, its dip count and the
+//   adaptive lead run, and the clock fast-forwards on the dips (and holds after the phase).
 // A run is n / 10 server ticks (and 2.4 frames per tick), after a warm-up 12 times as long: V8
 // keeps optimizing this path for some 250000 ticks before its heap use settles to 0.
 
@@ -864,6 +867,11 @@ class PredictRig {
   warmup = 1;
   /** Client frames are skipped until this server tick (a hitch). */
   pausedUntil = 0;
+  /** Until this server tick the client runs a frame only every 5th tick (a slow host). */
+  slowUntil = 0;
+  lastFrameTick = -1;
+  /** Clock steps taken during the slow phases. */
+  slowSteps = 0;
 
   constructor() {
     const course = loadCourse("movement_lab");
@@ -910,13 +918,19 @@ function runPredict(n: number): void {
       if ((t & 255) === 0) link.dropLeft = 6;
       if (t % 1200 === 0) link.delay = link.delay === 0 ? 10 : 0;
       if ((t & 2047) === 1024) rig.pausedUntil = t + 8;
+      if ((t & 4095) === 2048) rig.slowUntil = t + 1024;
     }
     if (match.serverTick < rig.pausedUntil) continue;
+    const slow = match.serverTick < rig.slowUntil;
+    if (slow && (match.serverTick % 5 !== 0 || match.serverTick === rig.lastFrameTick)) continue;
+    rig.lastFrameTick = match.serverTick;
+    const steps = client.clock.adjustments;
     client.frame();
+    if (slow) rig.slowSteps += client.clock.adjustments - steps;
     client.renderOrigin(rig.out);
   }
   outcomes[0] = totals[STAT_CORRECTIONS] as number;
-  outcomes[1] = totals[STAT_CLOCK_ADJUSTMENTS] as number;
+  outcomes[1] = Math.min(totals[STAT_CLOCK_ADJUSTMENTS] as number, rig.slowSteps);
   outcomes[2] = totals[STAT_HARD_RESYNCS] as number;
 }
 

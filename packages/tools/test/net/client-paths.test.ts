@@ -325,6 +325,49 @@ describe("ClientSim recovery paths", () => {
     expect(h.unreconciled()).toEqual([]);
   });
 
+  it("a lone long frame on lan resyncs without growing the lead; a second within 1.5 s grows it", () => {
+    // On lan the lead is all buffer (3 ticks, 50 ms): a 60–70 ms gap overtakes the prediction.
+    const h = new NetHarness({ input: new NeutralInput() });
+    h.runTicks(600);
+    const c = h.client;
+    h.hitch(70);
+    h.run(500);
+    expect(h.totals().hardResyncs).toBe(1);
+    // A lone gap is not a frame rhythm (like a lone dip): the lead stays, and nothing to hold.
+    expect(c.clock.adaptiveTicks).toBe(0);
+    expect(h.lead()).toBeLessThanOrEqual(c.settings.inputBuffer + 2);
+    h.run(5000);
+    expect(c.clock.holds).toBe(0);
+    // A second gap within the window is a pattern: its resync grows the adaptive lead.
+    h.hitch(70);
+    h.run(200);
+    h.hitch(70);
+    h.run(500);
+    expect(h.totals().hardResyncs).toBeGreaterThanOrEqual(2);
+    expect(c.clock.adaptiveTicks).toBeGreaterThan(0);
+  });
+
+  it("a hard resync after a short frame (a downlink outage) is not a frame rhythm, even after a long one", () => {
+    const { h, tap } = tapped(new NeutralInput());
+    h.runTicks(600);
+    const c = h.client;
+    const lead = h.lead();
+    // A long frame resyncs (left alone: a lone one) ...
+    h.hitch(70);
+    h.run(100);
+    expect(h.totals().hardResyncs).toBe(1);
+    // ... then snapshots are lost for 1.1 s while the frames stay short: the prediction stops at
+    // the lead cap, the server starves past it, and the first snapshot back is ahead of the
+    // prediction, within 1.5 s of the first resync. Counted as a dip it would grow the lead.
+    const until = h.now + 1100;
+    tap.receive = (d, _len, reliable) => (reliable || h.now >= until ? d : null);
+    h.run(1100);
+    h.run(500);
+    expect(h.totals().hardResyncs).toBe(2);
+    expect(c.clock.adaptiveTicks).toBe(0);
+    expect(h.lead()).toBeLessThanOrEqual(lead + 1);
+  });
+
   it("a hard resync in the same poll as a step request drops the step (it measured the old anchor)", () => {
     const h = new NetHarness({ input: new NeutralInput() });
     h.runTicks(200);
@@ -347,14 +390,15 @@ describe("ClientSim recovery paths", () => {
       encodeSnapshot(w, m);
       server.sendUnreliable(w.bytes, w.byteLength);
     };
-    // Starved snapshots for 0.45 s pull the health EWMA below the band ...
-    const start = h.now;
-    while (h.now - start < 450) {
+    // The real server's last snapshots land first.
+    h.run(50);
+    // Five starved snapshots, one frame each: a dip one snapshot short of a sustained one, so the
+    // clock does not step yet ...
+    for (let i = 0; i < 5; i++) {
       send(p.snapshotTick + 1, -5);
       h.run(1000 / 60);
     }
-    expect(c.clock.bufferHealth).toBeLessThan(c.settings.inputBuffer - 1.5);
-    h.run(400);
+    expect(c.clock.bufferLow).toBe(-5);
     expect(c.clock.fastForwards).toBe(0);
     // ... then one poll brings one more (asking for a fast-forward) and one past the prediction.
     send(p.snapshotTick + 1, -5);

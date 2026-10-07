@@ -24,8 +24,9 @@ import { decodePng, distinctColors, type Png } from "../scripts/png";
 const RUN_MS = 3000;
 /**
  * The viewport of the cases that check the prediction. SwiftShader's frame rate falls with the
- * pixel count: about 57 fps here at 320x180, 30 at 640x360 and 20 at 960x540, where the step clock
- * starves and hard-resyncs (D-028) and a correction comes down to timing luck.
+ * pixel count: about 57 fps here at 320x180, 30 at 640x360 and 18–20 at 960x540, where the clock
+ * starves and hard-resyncs while it learns the frame rhythm (D-028's adaptive input buffer) and a
+ * correction comes down to timing luck.
  */
 const VIEW = { width: 320, height: 180 } as const;
 /**
@@ -95,10 +96,10 @@ function fpsBetween(a: Sample, b: Sample): number {
  * 33 ms; the rest of the lead covers the round trip) and the hard resyncs in them (`lateResyncs`).
  * Such a gap sends cmds late, so the server repeats one (a starved cmd) and the client is either
  * corrected on that starved snapshot (`starvedCorrections`) or, past the lead, hard-resynced: by
- * design on `lan` (D-028 known limit). So every resync must be a late one (bar the one a slow
- * start may need), and starved cmds and their corrections need a long frame in between. A host
- * too slow to tell (more than MAX_LONG_SHARE of its frames long, or under MIN_FPS) is a failure
- * that says so, not a random pass or fail.
+ * design on `lan` until the clock has grown the lead for such gaps (D-028). So every resync must
+ * be a late one (bar the one a slow start may need), and starved cmds and their corrections need
+ * a long frame in between. A host too slow to tell (more than MAX_LONG_SHARE of its frames long,
+ * or under MIN_FPS) is a failure that says so, not a random pass or fail.
  */
 function expectHealthy(a: Sample, b: Sample): void {
   const fps = fpsBetween(a, b);

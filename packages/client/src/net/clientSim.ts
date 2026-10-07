@@ -63,6 +63,14 @@ export const MAX_TICKS_PER_FRAME = 5;
  * server or link stall never runs it out of the rings or past the cmds the server can queue.
  */
 export const MAX_LEAD_TICKS = 64;
+/**
+ * A frame gap longer than this is a stall (a GC, a tab switch), not the frame rhythm (design):
+ * the snapshots of the ticks it delayed are kept from the clock's buffer watch, since no buffer
+ * the adaptive cap allows would cover a long one and growing for a one-off stall only adds
+ * latency. Frames past 83 ms (MAX_TICKS_PER_FRAME ticks) cannot be sustained anyway, so 100 ms
+ * leaves room for jitter at 12 fps and still counts a 120 ms GC pause as a stall.
+ */
+export const HITCH_FRAME_MS = 100;
 /** A snapshot cvar hash that stays different this long asks the server for the block (design). */
 export const CVAR_RESEND_AFTER_MS = 1000;
 
@@ -237,6 +245,8 @@ export class ClientSim {
   private resyncTick = -1;
   /** Ticks predicted now are under a path jump (TickEvents.jumped). */
   private jumping = false;
+  /** This frame came more than HITCH_FRAME_MS after the last: a stall. */
+  private hitch = false;
   private started = false;
 
   constructor(options: ClientSimOptions) {
@@ -317,8 +327,15 @@ export class ClientSim {
     const wasActive = conn.state === CONN_ACTIVE;
     // The frame's time is owed before the poll, so a re-anchor in it (which sets the tick from
     // the snapshot, as of now) consumes it.
+    this.hitch = (t[DT] as number) > HITCH_FRAME_MS;
     if (wasActive) {
       t[ACC] = (t[ACC] as number) + (t[DT] as number);
+      if (this.hitch) {
+        // A stall: the ticks it owes go out in the next frames; their snapshots measure it alone.
+        this.clock.skipHealthThrough(
+          this.predictor.latestTick + Math.ceil((t[ACC] as number) / TICK_MS),
+        );
+      }
       this.renderBase(this.before);
       t[PATH_TICK] = this.predictor.latestTick;
       t[PATH_ACC] = t[ACC] as number;
@@ -476,6 +493,14 @@ export class ClientSim {
    */
   private anchor(tick: number, neutral: boolean): void {
     const p = this.predictor;
+    // A resync ahead of the prediction (as it stood before this poll) after a frame gap longer
+    // than the input buffer is a dip past the lead, unless the gap was a stall. After a short
+    // frame the cause was the link (snapshots missing while the lead cap held the prediction),
+    // not the frame rhythm the adaptive lead is for.
+    const dt = this.t[DT] as number;
+    if (!neutral && !this.hitch && dt > this.settings.inputBuffer * TICK_MS) {
+      this.clock.onResync(tick - (this.t[PATH_TICK] as number), this.settings.inputBuffer);
+    }
     const lead = Math.min(MAX_LEAD_TICKS, this.clock.leadTicks(this.settings.inputBuffer));
     const f = this.fill;
     if (neutral) {

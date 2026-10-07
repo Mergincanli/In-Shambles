@@ -92,10 +92,12 @@ export class Game {
   readonly pose = new Float64Array(5);
   frames = 0;
   /**
-   * Frames that came longer after the previous one than the input buffer the clock keeps
-   * (`cl_inputBuffer` ticks, 33 ms by default): the slack of the prediction's lead, whose rest
-   * covers the round trip. On `lan` such a gap can starve the server and hard-resync by design
-   * (D-028 known limit); it says nothing about the prediction.
+   * Frames that came longer after the previous one than the input buffer (`cl_inputBuffer` ticks,
+   * 33 ms by default): the slack of the prediction's lead with steady frames, whose rest covers
+   * the round trip (the clock keeps the health's low edge at it − 1 or more, lifting it to it, so
+   * steady frames keep the health at it; bursty frames grow the lead, D-028). On `lan` such a gap
+   * can starve the server and hard-resync by design until the clock has grown the lead for it; it
+   * says nothing about the prediction.
    */
   longFrames = 0;
   /** Hard resyncs that came in a long frame (the rest would be prediction faults). */

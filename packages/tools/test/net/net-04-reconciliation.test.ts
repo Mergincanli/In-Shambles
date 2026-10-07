@@ -1,7 +1,16 @@
-import { MixedInput, StrafeCircuit } from "@game/client/net";
+import { MAX_ADAPTIVE_TICKS, MixedInput, StrafeCircuit } from "@game/client/net";
 import { findNetProfile, NET_PROFILES, type NetProfile } from "@game/shared";
 import { describe, expect, it } from "vitest";
-import { type FrameLog, NetHarness } from "./harness";
+import {
+  FRAMES_144HZ,
+  FRAMES_BROWSER_HITCHES,
+  FRAMES_SLOW_HOST,
+  FRAMES_SLOWER_HOST,
+  type FrameLog,
+  type FrameModel,
+  framesSwitchingAt,
+  NetHarness,
+} from "./harness";
 
 // NET-04, the M2 basic version (docs/05 §14, M2 design §5): the automated stand-in for "smooth at
 // net_profile wan-150-loss2". The NET-03 harness drives the StrafeCircuit bot (laps of a square on
@@ -12,7 +21,12 @@ import { type FrameLog, NetHarness } from "./harness";
 //   never 8 u or more, and no frame-to-frame jump in the drawn position (each step at most
 //   speed × frame time × 1.5 + 0.5 u);
 // - bad-250-loss5: converges (no hard resync, laps go on, the buffer settles) and logs every
-//   correction.
+//   correction;
+// - browser-like frame timing (60 fps with 15% of the frames 50–80 ms, or every frame 33–83 ms or
+//   50–83 ms) on wan-50, wan-100-loss1 and wan-150-loss2, from the start or turning bad
+//   mid-circuit: the same bounds as the lossy profiles for the corrections' render offset, the
+//   clock's own steps gliding (under cl_teleportDist) and rare, and the buffer's latency bounded
+//   (D-028's adaptive input buffer).
 // On every profile the prediction converges: at each snapshot the client reconciled with, its
 // standing prediction equals the server's recorded state (`NetHarness.unreconciled`), so a
 // predictor that stopped correcting fails here, not only in its unit tests.
@@ -29,10 +43,14 @@ const SECONDS = TICKS / 60;
 const SEED = 1;
 const LOSSY_SEEDS = [1, 5, 7];
 
-/** The largest frame-to-frame step of the drawn position over its allowance (≤ 1 passes). */
-function worstStep(f: FrameLog): number {
+/**
+ * The largest frame-to-frame step of the drawn position over its allowance (≤ 1 passes), from
+ * `fromMs` (harness time) on.
+ */
+function worstStep(f: FrameLog, fromMs = 0): number {
   let worst = 0;
   for (let i = 1; i < f.time.length; i++) {
+    if ((f.time[i] as number) < fromMs) continue;
     const step = Math.hypot(
       (f.x[i] as number) - (f.x[i - 1] as number),
       (f.y[i] as number) - (f.y[i - 1] as number),
@@ -45,23 +63,46 @@ function worstStep(f: FrameLog): number {
   return worst;
 }
 
-function run(profile: NetProfile, seed = SEED): NetHarness {
+/** Server ticks that repeated a cmd once the circuit was moving. */
+function starvedMoving(h: NetHarness, idleTicks: number): number {
+  const moving = h.client.startTick + idleTicks;
+  return h.serverStarved.filter((tick) => tick > moving).length;
+}
+
+/** The mean of the clock's buffer health over the frames from `from` on, ticks. */
+function bufferMean(f: FrameLog, from = 0): number {
+  let sum = 0;
+  for (let i = from; i < f.buffer.length; i++) sum += f.buffer[i] as number;
+  return sum / Math.max(1, f.buffer.length - from);
+}
+
+function run(
+  profile: NetProfile,
+  seed = SEED,
+  frames?: { name: string; model: FrameModel },
+  idleTicks = IDLE_TICKS,
+): NetHarness {
   const h = new NetHarness({
-    input: new StrafeCircuit({ idleTicks: IDLE_TICKS }),
+    input: new StrafeCircuit({ idleTicks }),
     profile,
     seed,
+    frameIntervalMs: frames?.model,
   });
-  h.runTicks(IDLE_TICKS + TICKS);
+  h.runTicks(idleTicks + TICKS);
   const t = h.totals();
   const maxOffset = Math.max(...h.frames.offset);
   const maxSpeed = Math.max(...h.frames.speed);
+  const clock = h.client.clock;
   console.log(
-    `NET-04 ${profile.name.padEnd(13)} seed ${seed}: rtt ${h.client.clock.rttMs.toFixed(0).padStart(3)} ms, ` +
-      `buffer ${h.client.clock.bufferHealth.toFixed(2)} ticks, ` +
+    `NET-04 ${profile.name.padEnd(13)} ${frames === undefined ? "" : `${frames.name} `}seed ${seed}: ` +
+      `rtt ${clock.rttMs.toFixed(0).padStart(3)} ms, ` +
+      `buffer ${clock.bufferHealth.toFixed(2)} (mean ${bufferMean(h.frames).toFixed(2)}, ` +
+      `low ${clock.bufferLow}, +${clock.adaptiveTicks}) ticks, ` +
       `${t.corrections} corrections (${(t.corrections / SECONDS).toFixed(2)}/s, ` +
       `mean ${t.meanCorrection.toFixed(2)} u, max ${t.maxCorrection.toFixed(2)} u), ` +
       `render offset max ${maxOffset.toFixed(2)} u, worst step ${worstStep(h.frames).toFixed(2)}, ` +
-      `${t.starved} starved, ${t.clockAdjustments} clock steps, top speed ${maxSpeed.toFixed(0)} u/s`,
+      `${t.starved} starved (${starvedMoving(h, idleTicks)} moving), ` +
+      `${t.clockAdjustments} clock steps, top speed ${maxSpeed.toFixed(0)} u/s`,
   );
   return h;
 }
@@ -79,9 +120,12 @@ function expectCircuit(h: NetHarness): void {
   expect(Math.max(...h.frames.speed)).toBeGreaterThan(500);
 }
 
-/** Every snapshot the client reconciled with left its prediction equal to the server's state. */
-function expectConverged(h: NetHarness): void {
-  expect(h.snapshotTicks.length).toBeGreaterThan(TICKS / 2);
+/**
+ * Every snapshot the client reconciled with left its prediction equal to the server's state. It
+ * reconciles once a frame, so at least `minReconciles` of them (half the ticks at 144 Hz).
+ */
+function expectConverged(h: NetHarness, minReconciles = TICKS / 2): void {
+  expect(h.snapshotTicks.length).toBeGreaterThan(minReconciles);
   expect(h.unreconciled()).toEqual([]);
 }
 
@@ -107,6 +151,9 @@ describe("NET-04 (M2 basic): reconciliation on every profile", () => {
     expect(t.hardResyncs).toBe(0);
     expect(Math.max(...h.frames.offset)).toBe(0);
     expect(worstStep(h.frames)).toBeLessThanOrEqual(1);
+    // Steady frames on a clean link: the adaptive buffer adds nothing (D-028).
+    expect(t.starved).toBe(0);
+    expect(bufferMean(h.frames)).toBeLessThanOrEqual(h.client.settings.inputBuffer + 0.5);
   });
 
   it.each(
@@ -126,7 +173,9 @@ describe("NET-04 (M2 basic): reconciliation on every profile", () => {
   });
 
   it("bad-250-loss5: converges and logs its corrections", () => {
-    const h = run(profile("bad-250-loss5"));
+    // Seed 7: the adaptive buffer covers most of this link's jitter (0 to 3 corrections a minute
+    // over seeds 1–12), and this seed has some, so the correction path runs.
+    const h = run(profile("bad-250-loss5"), 7);
     expectCircuit(h);
     expectConverged(h);
     const t = h.totals();
@@ -134,8 +183,10 @@ describe("NET-04 (M2 basic): reconciliation on every profile", () => {
     expect(t.corrections).toBeGreaterThan(0);
     const c = h.client;
     expect(t.hardResyncs).toBe(0);
-    expect(c.clock.bufferHealth).toBeGreaterThan(c.settings.inputBuffer - 1.5);
-    expect(c.clock.bufferHealth).toBeLessThan(c.settings.inputBuffer + 3);
+    // The buffer settles: the low edge at the margin or above (cl_inputBuffer − 1), the mean above
+    // it by the link's spread (±40 ms of jitter, about 5 ticks), within the adaptive cap.
+    expect(c.clock.bufferLow).toBeGreaterThanOrEqual(c.settings.inputBuffer - 1);
+    expect(c.clock.bufferHealth).toBeLessThan(c.settings.inputBuffer + MAX_ADAPTIVE_TICKS);
     const log = c.predictor.corrections;
     expect(log.total).toBe(t.corrections);
     for (let i = 0; i < log.count; i++) {
@@ -207,4 +258,162 @@ describe("NET-04 (M2 basic): reconciliation on every profile", () => {
       expect(h.unreconciled()).toEqual([]);
     },
   );
+});
+
+/** Frame models of the browser-like block (the harness's seeded draws). */
+const FRAME_MODELS = [
+  { name: "browser hitches", model: FRAMES_BROWSER_HITCHES },
+  { name: "slow host", model: FRAMES_SLOW_HOST },
+  { name: "slower host", model: FRAMES_SLOWER_HOST },
+];
+/**
+ * Bounded latency: the buffer's mean health over the run stays under target + 5 ticks. The frame
+ * rhythm costs its spread (3.4 to 5.9 ticks of mean on these seeds, up to 6.4 over seeds 1–10),
+ * so a buffer grown to its cap (target + 8) or left large after a round trip fell fails.
+ */
+const BUFFER_MEAN_ABOVE_TARGET = 5;
+/** Frames turn bad this long into the onset runs (the circuit is moving by then). */
+const ONSET_MS = 15_000;
+/**
+ * The clock has learned a new frame rhythm this long after it set in: three dips in its window
+ * (with 60 fps hitches about 0.3 s, at worst about 1.4 s over seeds 1–4).
+ */
+const LEARN_MS = 2000;
+
+/**
+ * The render offset split by its cause, from `fromMs` (harness time) on: within
+ * cl_correctionSmoothMs of a clock step or a hard resync it is that step's glide (a fast-forward's
+ * skip, a hold's slowdown, a re-anchor; the offset decays linearly over that time), otherwise a
+ * correction's. Also the steps and resyncs taken while moving (over 100 u/s), and the first one.
+ */
+function offsetsByCause(
+  h: NetHarness,
+  fromMs = 0,
+): { glide: number; correction: number; stepsMoving: number; firstStepMs: number } {
+  const f = h.frames;
+  const smoothMs = h.client.settings.correctionSmoothMs;
+  let lastStep = Number.NEGATIVE_INFINITY;
+  let glide = 0;
+  let correction = 0;
+  let stepsMoving = 0;
+  let firstStepMs = Number.POSITIVE_INFINITY;
+  for (let i = 1; i < f.time.length; i++) {
+    const time = f.time[i] as number;
+    const stepped =
+      (f.clockSteps[i] as number) > (f.clockSteps[i - 1] as number) ||
+      (f.hardResyncs[i] as number) > (f.hardResyncs[i - 1] as number);
+    if (stepped) lastStep = time;
+    if (time < fromMs) continue;
+    if (stepped && firstStepMs === Number.POSITIVE_INFINITY) firstStepMs = time;
+    if (stepped && (f.speed[i] as number) > 100) stepsMoving++;
+    const o = f.offset[i] as number;
+    if (time - lastStep <= smoothMs) glide = Math.max(glide, o);
+    else correction = Math.max(correction, o);
+  }
+  return { glide, correction, stepsMoving, firstStepMs };
+}
+
+/** Bounds every browser-like run shares: the clock's steps glide, nothing rubber-bands. */
+function expectGlidesOnly(h: NetHarness, fromMs = 0): void {
+  const o = offsetsByCause(h, fromMs);
+  console.log(
+    `  offsets from ${(fromMs / 1000).toFixed(1)} s: correction max ${o.correction.toFixed(2)} u, ` +
+      `glide max ${o.glide.toFixed(2)} u, ${o.stepsMoving} steps or resyncs while moving`,
+  );
+  // A correction's offset stays under NET-04's 8 u; a step's is a forward glide over
+  // cl_correctionSmoothMs, never a snap (cl_teleportDist).
+  expect(o.correction).toBeLessThan(8);
+  expect(o.glide).toBeLessThan(h.client.settings.teleportDist);
+  expect(worstStep(h.frames, fromMs)).toBeLessThanOrEqual(1);
+}
+
+describe("NET-04 (M2 basic): browser-like frame timing", () => {
+  it.each(
+    FRAME_MODELS.flatMap((frames) =>
+      ["wan-50", "wan-100-loss1", "wan-150-loss2"].flatMap((name) =>
+        [1, 2].map((seed) => [name, frames.name, seed, frames] as const),
+      ),
+    ),
+  )("%s, %s, seed %i: no rubber-banding, bounded buffer", (name, _model, seed, frames) => {
+    // A mean-only clock (the M2 step clock before D-028's adaptive buffer) starved here on the
+    // low point of each burst: 0.6 to 8 corrections a second, up to 23 u.
+    const h = run(profile(name), seed, frames);
+    expectCircuit(h);
+    // Frames come at 12 fps or more: 10 reconciles a second at least.
+    expectConverged(h, SECONDS * 10);
+    const t = h.totals();
+    expect(t.corrections / SECONDS).toBeLessThan(1);
+    expect(t.meanCorrection).toBeLessThan(2);
+    expect(t.hardResyncs).toBe(0);
+    expect(h.client.predictor.corrections.total).toBe(t.corrections);
+    expectGlidesOnly(h);
+    // The clock learns the rhythm from its third dip, mostly while the circuit still stands; a
+    // burst deeper than any before can make it step once more later (18 runs in 90 over seeds
+    // 1–10).
+    expect(offsetsByCause(h).stepsMoving).toBeLessThanOrEqual(2);
+    // Starved cmds while the circuit runs: under one every 10 s. The clock grows on a pattern of
+    // dips, so a burst deeper than any before can still starve a tick before it does; the
+    // mean-only clock starved 1 to 9 cmds a second here.
+    expect(starvedMoving(h, IDLE_TICKS)).toBeLessThan(SECONDS / 10);
+    const target = h.client.settings.inputBuffer;
+    expect(bufferMean(h.frames)).toBeLessThan(target + BUFFER_MEAN_ABOVE_TARGET);
+    expect(h.client.clock.adaptiveTicks).toBeLessThanOrEqual(MAX_ADAPTIVE_TICKS);
+  });
+
+  it.each(
+    [FRAME_MODELS[0], FRAME_MODELS[1]].flatMap((frames) =>
+      ["lan", "wan-50", "wan-100-loss1", "wan-150-loss2"].map(
+        (name) => [name, (frames as (typeof FRAME_MODELS)[number]).name] as const,
+      ),
+    ),
+  )("%s, 144 Hz then %s mid-circuit: one learning step, prompt, then smooth", (name, model) => {
+    const frames = FRAME_MODELS.find((m) => m.name === model) as (typeof FRAME_MODELS)[number];
+    const h = run(profile(name), 1, {
+      name: `144 Hz then ${model}`,
+      model: framesSwitchingAt(ONSET_MS, FRAMES_144HZ, frames.model),
+    });
+    expectCircuit(h);
+    expectConverged(h, SECONDS * 10);
+    const t = h.totals();
+    const onset = offsetsByCause(h, ONSET_MS);
+    // Until the third dip the bursts starve (a few corrections, up to about 20 u: the learning
+    // cost, as with the mean-only clock but once), then the clock steps within LEARN_MS of the
+    // onset: one fast-forward of 2–5 ticks, a forward glide of up to about 57 u at strafe speed
+    // (on lan a resync or two, the first one alone left alone, D-028).
+    expect(onset.firstStepMs - ONSET_MS).toBeLessThan(LEARN_MS);
+    expect(onset.glide).toBeLessThan(h.client.settings.teleportDist);
+    // That glide (up to about 57 u over cl_correctionSmoothMs) speeds the drawn player up past
+    // NET-04's per-frame allowance for those frames: measured up to 1.61 of it (lan, a resync).
+    expect(worstStep(h.frames, ONSET_MS)).toBeLessThanOrEqual(2);
+    expect(t.hardResyncs).toBeLessThanOrEqual(name === "lan" ? 2 : 0);
+    expect(t.corrections / SECONDS).toBeLessThan(1);
+    // Once learned: the browser-like bounds, at most one more step.
+    const learned = ONSET_MS + LEARN_MS;
+    expectGlidesOnly(h, learned);
+    expect(offsetsByCause(h, learned).stepsMoving).toBeLessThanOrEqual(1);
+    const learnedTick = h.frames.tick[h.frames.time.findIndex((ms) => ms >= learned)] as number;
+    expect(h.serverStarved.filter((tick) => tick > learnedTick).length).toBeLessThan(SECONDS / 10);
+    expect(bufferMean(h.frames)).toBeLessThan(
+      h.client.settings.inputBuffer + BUFFER_MEAN_ABOVE_TARGET,
+    );
+  });
+
+  it("lan, browser hitches: gaps past the lead resync until the lead has learned the rhythm", () => {
+    // On lan the lead is all buffer, so a long frame overtakes the prediction and re-anchors
+    // before any snapshot could show the dip; the second resync within the window grows the lead
+    // by its depth plus cl_inputBuffer (the first alone is left alone, like a lone dip).
+    const h = run(profile("lan"), 1, FRAME_MODELS[0]);
+    expectCircuit(h);
+    expectConverged(h, SECONDS * 10);
+    const t = h.totals();
+    expect(t.hardResyncs).toBeLessThanOrEqual(2);
+    expect(t.corrections / SECONDS).toBeLessThan(1);
+    expect(h.client.clock.adaptiveTicks).toBeGreaterThan(0);
+    // The resyncs and steps glide (a re-anchor's offset at strafe speed: up to about 56 u).
+    expectGlidesOnly(h);
+    expect(offsetsByCause(h).stepsMoving).toBeLessThanOrEqual(3);
+    expect(bufferMean(h.frames)).toBeLessThan(
+      h.client.settings.inputBuffer + BUFFER_MEAN_ABOVE_TARGET,
+    );
+  });
 });

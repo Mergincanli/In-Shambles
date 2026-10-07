@@ -18,8 +18,9 @@ import {
 /**
  * The netgraph (M2 design §2 "HUD", `cl_netgraph`): the link (RTT, jitter, download loss,
  * snapshots per second), corrections (per second, mean and largest size, the render offset
- * left), the input buffer (health, starved cmds per second, clock adjustments) and traffic (bytes
- * in and out per second). Rates are over the last second (NetStats' rolling window). The readout
+ * left), the input buffer (the mean health and its low edge, which the clock steers, so a buffer
+ * grown for bursty frames shows why; starved cmds per second, clock adjustments) and traffic
+ * (bytes in and out per second). Rates are over the last second (NetStats' rolling window). The readout
  * is DOM-free; the lines are text for the HUD's ≤ 15 Hz update.
  */
 
@@ -42,7 +43,9 @@ export const NG_BYTES_OUT = 12;
 /** Since connecting: hard resyncs and pending-parameter resyncs. */
 export const NG_HARD_RESYNCS = 13;
 export const NG_PARAM_RESYNCS = 14;
-export const NG_COUNT = 15;
+/** The low edge of the input buffer health (its lowest over the last 1.5 s), ticks. */
+export const NG_BUFFER_LOW = 15;
+export const NG_COUNT = 16;
 
 export class NetgraphReadout {
   readonly values = new Float64Array(NG_COUNT);
@@ -68,6 +71,7 @@ export class NetgraphReadout {
     client.offset.sample(o);
     v[NG_OFFSET] = Math.hypot(o[0] as number, o[1] as number, o[2] as number);
     v[NG_BUFFER] = client.clock.bufferHealth;
+    v[NG_BUFFER_LOW] = client.clock.bufferLow;
     v[NG_STARVED] = s[STAT_STARVED] as number;
     v[NG_CLOCK_ADJUSTMENTS] = totals[STAT_CLOCK_ADJUSTMENTS] as number;
     v[NG_BYTES_IN] = s[STAT_BYTES_IN] as number;
@@ -93,7 +97,8 @@ export function netgraphLines(v: Float64Array, profile: string | null): string[]
       `loss ${fixed(at(NG_LOSS), 1)}%  snaps ${fixed(at(NG_SNAPSHOTS), 0)}/s`,
     `corr   ${fixed(at(NG_CORRECTIONS), 0)}/s  mean ${fixed(at(NG_CORRECTION_MEAN), 2)} u  ` +
       `max ${fixed(at(NG_CORRECTION_MAX), 2)} u  offset ${fixed(at(NG_OFFSET), 2)} u`,
-    `input  buffer ${fixed(at(NG_BUFFER), 1)} ticks  starved ${fixed(at(NG_STARVED), 0)}/s  ` +
+    `input  buffer ${fixed(at(NG_BUFFER), 1)} low ${fixed(at(NG_BUFFER_LOW), 0)} ticks  ` +
+      `starved ${fixed(at(NG_STARVED), 0)}/s  ` +
       `clock adj ${fixed(at(NG_CLOCK_ADJUSTMENTS), 0)}`,
     `bytes  in ${kb(at(NG_BYTES_IN))}  out ${kb(at(NG_BYTES_OUT))}`,
     `resync hard ${fixed(at(NG_HARD_RESYNCS), 0)}  params ${fixed(at(NG_PARAM_RESYNCS), 0)}` +
