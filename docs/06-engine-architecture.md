@@ -102,7 +102,8 @@ packages/client/src/
   app/                 boot.ts (fetch the map as a ?url asset, start the server Worker, connect over
                        PortTransport, build the scene, start the frame loop), game.ts (the frame loop,
                        the view pose, the autotest status), params.ts (the ?autotest=1, ?bot=, ?cam=
-                       URL hooks); later routing (menu ↔ match), settings persistence
+                       URL hooks), settings.ts (ARCHIVE cvars and binds saved in localStorage, §6);
+                       later routing (menu ↔ match)
   net/                 DOM-free (tsconfig.net.json), exported as @game/client/net for tests and bots:
     clientSim.ts       ClientSim: one frame = poll (reconcile) → clock step → tick accumulator
                        (sample, predict, INPUT) → pings; renderOrigin, renderTick, pathShift (the
@@ -122,7 +123,9 @@ packages/client/src/
     portTransport.ts   PortTransport over two MessagePort-like ports (the Worker link)
     scriptedInput.ts   StrafeCircuit, MixedInput (?bot= input, NET tests, M3 bots)
                        (later: remote interpolation)
-  input/               pointer lock, raw mouse, keybinds (KeyboardEvent.code), UserCmd sampling
+  input/               keyboard.ts (keys → binds, KeyboardEvent.code), mouse.ts (raw counts → view
+                       angles), pointerLock.ts (unadjustedMovement where offered), sampler.ts
+                       (+action states → UserCmd sampling)
   render/
     space.ts           Z-up inches → Y-up meters (ONLY place for conversion; guard:
                        packages/tools/test/guards/client-space.test.ts)
@@ -134,19 +137,30 @@ packages/client/src/
     players.ts         character models, animation from interpolated state
     viewmodel.ts       first-person weapon (separate scene/camera, own FOV)
     fx/                tracers, muzzle, impacts, blood, speed trail, smoke (pooled)
-    debug/             hulls, traces, hitboxes (current + rewound), brushes
+    debug/             debugDraw.ts (r_debugHull, r_debugTraces, r_debugGround); later hitboxes (current +
+                       rewound), brushes
   audio/               Web Audio graph, positional sources, footsteps, priorities
+
+  hud/                 DOM overlay. M2: overlay.ts (panels, ≤ 15 Hz), speedometer.ts, netgraph.ts,
+                       renderStats.ts (r_stats). Later: crosshair, health/stamina, ammo, wound
+                       figure, killfeed, chat, minimap
+  console/             console UI (console.ts), commands.ts (cvar and bind commands, DOM-free),
+                       binds.ts (bind table, defaults, modifier keys refused), clientCvars.ts
+                       (ARCHIVE client cvars)
+  worker/              local server entry (runs packages/server match code in a Web Worker;
+                       tsconfig.worker.json, WebWorker lib): serverWorker.ts, workerHost.ts
+                       (performance.now + setTimeout LoopHost), messages.ts (start, log, error)
+  dev/                 vectorsPage.ts: the phone vectors page (D-022), replaying every committed
+                       vector table in the browser that opens it
 
 packages/client/scripts/  Node, driving the built client in headless Chromium (Playwright):
   browser.ts           build, vite preview / dev server, SwiftShader launch, status and error readers
   screenshot.ts        PNG screenshots of fixed viewpoints in movement_lab
   png.ts               a minimal PNG decoder for pixel checks
-packages/client/e2e/   smoke.e2e.ts, the e2e smoke test (pnpm test:browser, docs/10 §2)
-  hud/                 DOM overlay: crosshair, health/stamina, ammo, wound figure, killfeed, chat, minimap
-  console/             Q3-style console UI, cvar commands, binds
-  worker/              local server entry (runs packages/server match code in a Web Worker;
-                       tsconfig.worker.json, WebWorker lib): serverWorker.ts, workerHost.ts
-                       (performance.now + setTimeout LoopHost), messages.ts (start, log, error)
+  vectorsPage.ts       builds the phone vectors page as one self-contained vectors.html (D-022)
+  singleFile.ts        inlines a Vite page's module script into one HTML file
+packages/client/e2e/   pnpm test:browser (docs/10 §2): smoke.e2e.ts (the e2e smoke test),
+                       vectors-page.e2e.ts (the one-file vectors page passes from a file URL)
 
 packages/tools/src/
   mapc/                TrenchBroom .map → cmap compiler (M5)
@@ -154,7 +168,10 @@ packages/tools/src/
                        cli.ts is pnpm greybox
   vectors/             determinism test vectors for packages/shared/test/vectors (pnpm --filter @game/tools vectors)
   code/                source scanner (code vs. strings/comments) and the D-016 banned-math list, for the guards
-  bots/                headless clients
+  scenarios/           movement scenarios (D-025): runner.ts (real pmove on a course, scripted
+                       cmds), bots.ts (hold, hop, strafe bots), course.ts (committed courses as the
+                       game loads them), metrics.ts, determinismProbe.ts and probeBuilds.ts (MV-19)
+  bots/                headless clients (M3)
   reports/             feel-report (M2, feelReport.ts; cli.ts is pnpm feel-report), balance-report
   replay/              demo inspection
   docs/                Markdown section/table parsing for doc-golden tests (BAL-01)
@@ -162,7 +179,9 @@ packages/tools/src/
   jsonc.ts             JSON-with-comments parser (tsconfig and config guards)
   paths.ts             repo-root resolution
 
-packages/tools/bench/  pnpm bench: run.ts (entry), trace.bench.ts (traceBox on movement_lab, docs/10 §4.4)
+packages/tools/bench/  pnpm bench (docs/10 §4.4): run.ts (entry), trace.bench.ts (traceBox on
+                       movement_lab), pmove.bench.ts (player-ticks), codec.bench.ts (snapshot
+                       encode + decode)
 ```
 
 ## 4. Runtime topology

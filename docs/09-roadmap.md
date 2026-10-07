@@ -76,6 +76,8 @@
 
 **Out of scope:** UrT mechanics, combat, remote players, dedicated server.
 
+**Records:** the approved plan and the design it builds on are `docs/design/M2-plan.md` and `docs/design/M2-design.md`.
+
 **Acceptance**
 - Movement tests MV-01, 03, 04, 05, 06, 07, 08, 17 (basic), 18 (basic), 19 pass.
 - NET-03 (prediction parity: 0 corrections on lossless loopback) passes.

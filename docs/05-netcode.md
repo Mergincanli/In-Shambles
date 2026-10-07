@@ -392,7 +392,7 @@ The loop is driven by a monotonic clock with an accumulator. **Never `setInterva
 - The draws come from a seeded Mulberry32 and the time from an injected monotonic clock, so a seed and a send/poll schedule give one delivery schedule. `net_profile <name>` calls `setProfile`: packets in flight keep their due times.
 - **`wake(at)`** reports each new earliest outbound due time once; `pump()` is the host's answer and re-reports a front still pending, so a timer that fires early (browsers truncate fractional delays) re-arms instead of stranding the packet.
 
-**Netgraph overlay** (toggle `cl_netgraph 1`): RTT, jitter, loss %, snapshots/s, interp delay, input buffer health, corrections/s and average size, bytes in/out per second, server tick time (from server stats), starved cmds.
+**Netgraph overlay** (toggle `cl_netgraph 1`): RTT, jitter, loss %, snapshots/s, interp delay, input buffer health, corrections/s and average size, bytes in/out per second, server tick time (from server stats), starved cmds. M2's netgraph shows all but interp delay and server tick time, which arrive in M3 with remote players and server stats (`docs/06` §7).
 
 **Headless bots** (`packages/tools/bots`): Node clients over the real transport, with scripted behaviors (strafe-jump circuits, wall-jump routes, firing at visible targets). They are used for load tests and NET tests.
 

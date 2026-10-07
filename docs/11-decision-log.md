@@ -3,6 +3,7 @@
 > Append-only. Format: `D-### — Title (date, status)`, then Context / Decision / Consequences. Superseded decisions stay, marked `superseded by D-###`.
 > Open decisions owned by Mustafa are tracked in `docs/01` (O-#). When one is decided, add a D-entry here.
 > "M1 plan" (its increments, open questions and risks) and "M1 design" (sections A–J, also cited bare as "A.4" or "design G") refer to the records in `docs/design/M1-plan.md` and `docs/design/M1-design.md`.
+> "M2 plan" (its increments, spec decisions Q#, new tunables and risks) and "M2 design" (sections 0–7, also cited as "M2 design §4") refer to `docs/design/M2-plan.md` and `docs/design/M2-design.md`.
 
 ---
 
@@ -237,7 +238,7 @@
   - `angleVectors` gets sine and cosine from `sinCosU16` (same bits as `sinU16`/`cosU16`) through an out-array;
   - the slide move keeps its remaining time in a typed array.
 
-  The native-ESM `pmove` workload allocates nothing. Rarely run code (a landing, a step) still boxes about 16 B per event until V8 optimizes it.
+  The native-ESM `pmove` workload allocates nothing. Rarely run code (a landing, a step) still boxes about 16 B per event until V8 optimizes it. Worse, a branch first reached after V8 has optimized its function (M2 review: the slide move's second clip on the first stairs, the first ladder) deoptimizes it, and every tick then boxes doubles, measured at 16–275 B per tick for 2e4–8e4 ticks, until V8 optimizes it again: a one-off transient per process, not a steady state, and invisible to guards that warm up and measure the same mix (`docs/10` §4, known limit). The mitigation, a deterministic pmove primer at match and prediction start that reaches the late branches before the warm-up, with a late-branch allocation workload to guard it, is deferred.
 - **Bench:** `pnpm bench` times pmove on `movement_lab` against the `docs/10` §4.4 budget, at about 1.6–1.75 µs per player-tick with 0 GCs (`docs/10` §4.4).
 - **Tests** for the landing, settle and step rules sweep their phases: drops onto flat ground from 8–120 u in 1/8 u steps never exceed the run cap; 300-tick walks up and down 0.71–0.99 slopes at run and walk speed have no air tick and no LAND; stair climbs from 192 start offsets in 1/32 u steps never drop below 90% of the cap.
 
