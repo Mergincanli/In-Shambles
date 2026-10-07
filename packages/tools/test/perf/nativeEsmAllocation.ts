@@ -8,7 +8,15 @@ import {
   STAT_HARD_RESYNCS,
   StrafeCircuit,
 } from "@game/client/net";
-import { Match } from "@game/server";
+import { LoopStats, Match, TickHistogram } from "@game/server";
+import {
+  type PassClock,
+  type ServerMatch,
+  TimedPass,
+  WsLimits,
+  type WsSocket,
+  WsTransport,
+} from "@game/server/node";
 import {
   ACCEL_AIR,
   ACCEL_GROUND,
@@ -54,6 +62,7 @@ import {
   MAX_RELIABLE_BYTES,
   MAX_UNRELIABLE_BYTES,
   type MessageHandler,
+  MSG_CMD,
   MSG_INPUT,
   MSG_PING,
   MSG_PONG,
@@ -934,6 +943,63 @@ function runPredict(n: number): void {
   outcomes[2] = totals[STAT_HARD_RESYNCS] as number;
 }
 
+// The Node server's per-tick wrapper (D-029): TimedPass over two matches, both histograms and the
+// 1 s windows it closes every 60 passes. Small-integer clocks stand in for performance.now and
+// process.cpuUsage, whose boxed results are the host's own cost, not the pass's.
+let passClockMs = 0;
+const passClock: PassClock = {
+  now: () => {
+    passClockMs += 3;
+    return passClockMs;
+  },
+  cpuMicros: () => passClockMs >> 1,
+};
+const idleMatch = { tick: () => {} } as unknown as Match;
+const timedMatches: ServerMatch[] = [
+  { name: "a", match: idleMatch, ticks: new TickHistogram() },
+  { name: "b", match: idleMatch, ticks: new TickHistogram() },
+];
+const timedPass = new TimedPass(timedMatches, () => {}, passClock);
+timedPass.loopStats = new LoopStats();
+
+function runTimedPass(n: number): void {
+  for (let i = 0; i < n; i++) timedPass.tick();
+  outcomes[0] = timedPass.passes;
+  outcomes[1] = (timedMatches[0] as ServerMatch).ticks.lastP99Us;
+  outcomes[2] = timedPass.ticks.lastMaxUs;
+}
+
+// The server end of a WebSocket per packet (D-030): arrivals copied into the pooled inbox (both
+// channels, the zero-length marker for an oversized unreliable message, drop-oldest past 256),
+// then a poll per 320 arrivals, which also reads the socket's buffered amount. Sends allocate one
+// Buffer each by design (D-030's boundary allocation) and are left out.
+const wsSocket: WsSocket = { bufferedAmount: 0, send: () => {}, close: () => {} };
+const wsTransport = new WsTransport(wsSocket, new WsLimits());
+const wsCounts = new Int32Array(2);
+wsTransport.onMessage((_d, len, reliable) => {
+  if (reliable) wsCounts[0] = (wsCounts[0] as number) + 1;
+  else if (len === 0) wsCounts[1] = (wsCounts[1] as number) + 1;
+});
+const wsReliable = Buffer.alloc(40);
+wsReliable[0] = MSG_CMD;
+const wsUnreliable = Buffer.alloc(55);
+wsUnreliable[0] = MSG_INPUT;
+const wsOversized = Buffer.alloc(MAX_UNRELIABLE_BYTES + 100);
+wsOversized[0] = MSG_INPUT;
+
+function runWsTransport(n: number): void {
+  for (let i = 0; i < n; i++) {
+    const k = i % 320;
+    if ((k & 15) === 0) wsTransport.receive(wsReliable, true);
+    else if (k % 50 === 7) wsTransport.receive(wsOversized, true);
+    else wsTransport.receive(wsUnreliable, true);
+    if (k === 319) wsTransport.poll();
+  }
+  outcomes[0] = wsCounts[0] as number;
+  outcomes[1] = wsCounts[1] as number;
+  outcomes[2] = wsTransport.stats().lost;
+}
+
 const WORKLOADS: Record<string, (n: number) => void> = {
   codec: runCodec,
   match: runMatch,
@@ -946,8 +1012,10 @@ const WORKLOADS: Record<string, (n: number) => void> = {
   snap: runSnap,
   strafeBot: runStrafeBot,
   state: runState,
+  timedPass: runTimedPass,
   trace: runTrace,
   transport: runTransport,
+  wsTransport: runWsTransport,
 };
 const workload = process.argv[2];
 const run = workload === undefined ? undefined : WORKLOADS[workload];

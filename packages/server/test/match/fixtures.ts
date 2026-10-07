@@ -22,7 +22,6 @@ import {
   HelloMsg,
   InputMsg,
   KickMsg,
-  type LoopbackEndpoint,
   MAX_RELIABLE_BYTES,
   MSG_CVARS,
   MSG_KICK,
@@ -35,6 +34,7 @@ import {
   PrintMsg,
   peekMessageType,
   SnapshotMsg,
+  type Transport,
   type UserCmd,
   WelcomeMsg,
 } from "@game/shared";
@@ -48,8 +48,9 @@ export function loadMap(name: string): Cmap {
 export const TEST_BUILD = "test-build";
 
 /**
- * A scripted client on one end of a loopback pair: encodes what a test sends and decodes, into
- * fresh copies, everything the match sends back.
+ * A scripted client on any transport (one end of a loopback pair, or a real WebSocket in the Node
+ * server tests): encodes what a test sends and decodes, into fresh copies, everything the match
+ * sends back.
  */
 export class TestClient {
   readonly welcomes: WelcomeMsg[] = [];
@@ -65,7 +66,7 @@ export class TestClient {
   private readonly r = new BitReader();
   private packetSeq = 0;
 
-  constructor(readonly transport: LoopbackEndpoint) {
+  constructor(readonly transport: Transport) {
     transport.onMessage((d, len) => this.receive(d, len));
     transport.onClose((reason) => {
       this.closed = reason;

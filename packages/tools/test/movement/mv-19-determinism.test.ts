@@ -17,6 +17,10 @@ import {
   runProbeBundle,
 } from "../../src/scenarios/probeBuilds";
 
+/** The first line `packages/server/build.mjs` writes into every bundle (its esbuild banner). */
+const SERVER_BUILD_BANNER =
+  /^import \{ createRequire as __createRequire \} from "node:module"; const require = __createRequire\(import\.meta\.url\);\n/;
+
 // docs/03 §8 MV-19, M2 design §5: the same inputs give bit-identical states over 10k ticks, run
 // twice and across the client and server builds. A seeded sticky cmd stream on movement_lab, with
 // a teleport to the next anchor every 1000 ticks, is digested every tick. The browser leg is the
@@ -82,7 +86,9 @@ describe("MV-19: determinism across runs and builds", () => {
       "%s gives the same digests",
       async (_name, bundle) => {
         const file = await bundle();
-        const source = readFileSync(file, "utf8");
+        // The server build starts every bundle with a `require` for its CommonJS dependencies
+        // (ws; packages/server/build.mjs): build preamble, not part of the sim.
+        const source = readFileSync(file, "utf8").replace(SERVER_BUILD_BANNER, "");
         // The sim is inside the bundle, and it needs nothing from Node.
         expect(source).not.toMatch(/@game\/shared|["']node:/);
         expect(runProbeBundle(file, cmapPath)).toEqual(reference);

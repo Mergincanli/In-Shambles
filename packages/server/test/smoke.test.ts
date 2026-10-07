@@ -4,10 +4,14 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, onTestFinished } from "vitest";
+import { computeBuildHash } from "../../../scripts/build-hash.mjs";
+import { TestClient } from "./match/fixtures";
+import { httpJson, NodeWsClient, until } from "./node/wsClient";
 
 const serverDir = fileURLToPath(new URL("..", import.meta.url));
 const repoRoot = fileURLToPath(new URL("../../..", import.meta.url));
-const READY = /server ok t=(\d+\.\d{3})ms/;
+/** The JSON line the server logs once its port is bound (D-029). */
+const READY = /"ev":"listening"/;
 const POSIX = process.platform !== "win32";
 
 interface Exit {
@@ -102,29 +106,67 @@ function pnpm(args: string[]): [string, string[]] {
   return /\.[cm]?js$/.test(execPath) ? [process.execPath, [execPath, ...args]] : [execPath, args];
 }
 
+/** The JSON log lines in `output` with event `ev`. */
+function events(output: string, ev: string): Record<string, unknown>[] {
+  return output
+    .split("\n")
+    .filter((l) => l.startsWith("{"))
+    .map((l) => JSON.parse(l) as Record<string, unknown>)
+    .filter((l) => l.ev === ev);
+}
+
+function listening(run: Run): { port: number; buildHash: string } {
+  const line = events(run.output(), "listening")[0];
+  return { port: line?.port as number, buildHash: line?.buildHash as string };
+}
+
 describe("server smoke test", () => {
   it.each(["SIGTERM", "SIGINT"] as const)(
-    "starts, logs server ok, and stops cleanly on %s",
+    "starts, logs JSON lines, answers /status, and stops cleanly on %s",
     async (signal) => {
-      const run = start(process.execPath, ["--import", "tsx", "src/main.ts"], serverDir);
+      const run = start(
+        process.execPath,
+        ["--import", "tsx", "src/node/main.ts", "--port", "0"],
+        serverDir,
+      );
       await waitFor(run, READY, 10_000, true);
       // Monotonic time since process start, not a wall-clock epoch timestamp.
-      expect(Number(READY.exec(run.output())?.[1])).toBeLessThan(60_000);
+      expect(events(run.output(), "server_ok")[0]?.startupMs).toBeLessThan(60_000);
+      const { port, buildHash } = listening(run);
+      expect((await httpJson(port, "/status")).body).toMatchObject({ buildHash });
+      // stdin is the admin console.
+      run.child.stdin?.write("set pm_gravity 400\n");
+      await waitFor(run, /"ev":"console"/, 5_000, true);
+      expect(events(run.output(), "console")[0]).toMatchObject({ text: "pm_gravity = 400" });
       run.kill(signal);
       const exit = await within(run.exited, 5_000, `no exit after ${signal}`);
       // Windows can't deliver signals to a handler; there the process is just terminated.
       if (POSIX) {
         expect(exit).toEqual({ code: 0, signal: null });
-        expect(run.output()).toContain(`server stopped (${signal})`);
+        expect(events(run.output(), "shutdown")).toEqual([
+          expect.objectContaining({ lvl: "info", signal }),
+        ]);
       }
     },
     15_000,
   );
 
-  it("the production bundle runs with plain node", async () => {
+  it("exits 1 with an error line on a bad setting", async () => {
+    const run = start(
+      process.execPath,
+      ["--import", "tsx", "src/node/main.ts", "--port", "0", "--set", "sv_nope=1"],
+      serverDir,
+    );
+    const exit = await within(run.exited, 10_000, "no exit on a bad setting");
+    expect(exit).toEqual({ code: 1, signal: null });
+    expect(events(run.output(), "error")[0]?.msg).toBe("--set: unknown cvar sv_nope");
+  }, 15_000);
+
+  it("the production bundle runs with plain node and serves a WebSocket client", async () => {
     const outDir = mkdtempSync(join(tmpdir(), "server-bundle-"));
     onTestFinished(() => rmSync(outDir, { recursive: true, force: true, maxRetries: 5 }));
-    // Run the bundle under the same module type as packages/server/dist/main.js.
+    // Run the bundle under the same module type as packages/server/dist/main.js, outside the
+    // workspace, so it can't lean on node_modules: ws must be inside it.
     const { type } = JSON.parse(readFileSync(join(serverDir, "package.json"), "utf8"));
     writeFileSync(join(outDir, "package.json"), JSON.stringify({ type }));
     const outfile = join(outDir, "main.js");
@@ -133,23 +175,49 @@ describe("server smoke test", () => {
       encoding: "utf8",
     });
     expect(build.status, build.stderr).toBe(0);
+    // ws's MIT notice travels with the bundle (content/LICENSES.md).
+    expect(readFileSync(join(outDir, "third-party-licenses.md"), "utf8")).toContain("## ws (MIT)");
 
-    const run = start(process.execPath, [outfile], serverDir);
+    const run = start(process.execPath, [outfile, "--port", "0"], serverDir);
     await waitFor(run, READY, 10_000, true);
+    const { port, buildHash } = listening(run);
+    // The hash of the checkout it was built from, baked in: run from a temp dir, the bundle could
+    // not compute it.
+    expect(buildHash).toBe(computeBuildHash());
+    const ws = await NodeWsClient.connect(`ws://127.0.0.1:${port}/`);
+    onTestFinished(() => ws.ws.close());
+    const client = new TestClient(ws);
+    client.hello(buildHash);
+    await until(() => {
+      client.poll();
+      return client.welcomes.length === 1;
+    }, "WELCOME");
+    expect(client.welcomes[0]?.mapName).toBe("arena_greybox");
+
     run.kill("SIGTERM");
     const exit = await within(run.exited, 5_000, "no exit after SIGTERM");
-    if (POSIX) expect(exit).toEqual({ code: 0, signal: null });
+    if (POSIX) {
+      expect(exit).toEqual({ code: 0, signal: null });
+      expect(events(run.output(), "shutdown")).toHaveLength(1);
+      await until(() => {
+        client.poll();
+        return client.closed !== null;
+      }, "the client's close");
+      expect(client.kicks.map((k) => k.reason)).toEqual(["server shutting down"]);
+    }
   }, 30_000);
 
   // The acceptance command itself, run the way a terminal's Ctrl+C or a process manager stops it.
   it.skipIf(!POSIX)(
     "`pnpm dev:server` from the repo root starts the server and stops with its process group",
     async () => {
-      const [command, args] = pnpm(["dev:server"]);
+      const [command, args] = pnpm(["dev:server", "--port", "0"]);
       const run = start(command, args, repoRoot, true);
       await waitFor(run, READY, 20_000, true);
+      // pnpm hands the flags on to the server: it took a free port, not the default 28700.
+      expect(listening(run).port).not.toBe(28700);
       run.kill("SIGTERM");
-      await waitFor(run, /server stopped \(SIGTERM\)/, 5_000, false);
+      await waitFor(run, /"ev":"shutdown"/, 5_000, false);
     },
     30_000,
   );

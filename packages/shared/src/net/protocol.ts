@@ -20,6 +20,25 @@ export const MSG_PRINT = 10;
 export const MSG_KICK = 11;
 export const MSG_TYPE_MAX = MSG_KICK;
 
+/** `MSG_CHANNEL` values: which channel a message type travels on (docs/05 §3.3). */
+export const CHANNEL_UNKNOWN = -1;
+export const CHANNEL_UNRELIABLE = 0;
+export const CHANNEL_RELIABLE = 1;
+
+/**
+ * Message type → channel, for every u8 type byte (`CHANNEL_UNKNOWN` for types that are no
+ * message). A WebSocket carries both channels on one socket with no extra bytes (D-030), so its
+ * receiver learns the channel from the type byte; a receiver still strikes a message on the wrong
+ * channel, so this table only labels what arrived. Read-only by convention.
+ */
+export const MSG_CHANNEL: Int8Array = new Int8Array(256).fill(CHANNEL_UNKNOWN);
+for (const type of [MSG_HELLO, MSG_WELCOME, MSG_READY, MSG_CVARS, MSG_CMD, MSG_PRINT, MSG_KICK]) {
+  MSG_CHANNEL[type] = CHANNEL_RELIABLE;
+}
+for (const type of [MSG_INPUT, MSG_SNAPSHOT, MSG_PING, MSG_PONG]) {
+  MSG_CHANNEL[type] = CHANNEL_UNRELIABLE;
+}
+
 /**
  * Largest unreliable packet (INPUT, SNAPSHOT, PING, PONG): datagram-safe under a 1280 B IPv6 MTU
  * with room for headers, and above the 1100 B snapshot budget (docs/05 §4.3).
@@ -28,6 +47,12 @@ export const MAX_UNRELIABLE_BYTES = 1200;
 
 /** Largest reliable message (WELCOME and CVARS carry the cvar block; CMD, PRINT, KICK text). */
 export const MAX_RELIABLE_BYTES = 16384;
+
+/**
+ * Largest message a client may send (D-030; design value): the WebSocket server's frame cap, above
+ * the largest client message (a CMD of TEXT_MAX chars, 1026 B), so a bigger frame is an attack.
+ */
+export const MAX_CLIENT_MESSAGE_BYTES = 2048;
 
 /** Short ASCII strings (build hash, map name, cvar names): a u6 length, 7 bits per char. */
 export const SHORT_TEXT_MAX = 63;

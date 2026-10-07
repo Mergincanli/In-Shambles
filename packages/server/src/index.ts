@@ -9,3 +9,4 @@ export * from "./match/inputQueue";
 export * from "./match/loop";
 export * from "./match/match";
 export * from "./match/session";
+export * from "./match/tickStats";

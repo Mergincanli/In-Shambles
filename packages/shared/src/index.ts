@@ -10,6 +10,7 @@ export * from "./net/bitstream";
 export * from "./net/cvarBlock";
 export * from "./net/messages";
 export * from "./net/netsim";
+export * from "./net/packetQueue";
 export * from "./net/playerStateCodec";
 export * from "./net/profiles";
 export * from "./net/protocol";

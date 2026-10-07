@@ -4,18 +4,21 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./node": "./src/node/index.ts"
   },
   "scripts": {
-    "start": "tsx src/main.ts",
+    "start": "tsx src/node/main.ts",
     "build": "node build.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.match.json"
   },
   "devDependencies": {
+    "@types/ws": "^8.18.2",
     "esbuild": "^0.28.2",
     "tsx": "^4.23.15"
   },
   "dependencies": {
-    "@game/shared": "workspace:*"
+    "@game/shared": "workspace:*",
+    "ws": "^8.22.0"
   }
 }

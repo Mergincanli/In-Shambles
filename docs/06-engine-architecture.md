@@ -20,7 +20,7 @@
 | Tests | Vitest | headless sim tests run in Node |
 | Lint/format | Biome | one tool, fast |
 | Rendering | Three.js | `WebGLRenderer` first (broadest support; matches the FORGE look-dev sandbox); keep render code isolated so `WebGPURenderer` can be adopted later |
-| Transport | `ws` (Node) + browser WebSocket | WebTransport later (M9) |
+| Transport | `ws` 8.x (MIT; Node server only) + the native WebSocket in browsers and Node clients (bots) | D-030; WebTransport later (M9) |
 | Validation | zod (content loading only, never in hot paths) | |
 | Audio | Web Audio API | HRTF panning |
 
@@ -74,18 +74,19 @@ packages/shared/src/
     rules/             mode plug-ins: ffa, tdm, survivor, ctf, trials (interfaces only in shared)
   net/
     bitstream.ts       BitWriter/BitReader: LSB-first, explicit widths, sticky error flag (D-026)
-    protocol.ts        PROTOCOL_VERSION, MSG_* type ids, packet and text size limits
+    protocol.ts        PROTOCOL_VERSION, MSG_* type ids, MSG_CHANNEL (type → channel), packet,
+                       client-message and text size limits
     messages.ts        protocol v1 message structs + encodeX/decodeX (docs/05 §3.6)
     playerStateCodec.ts  the PlayerState bit layout and its decode-time range checks
     cvarBlock.ts       replicated cvar block: canonical encoding, hash, all-or-nothing apply (D-027)
     delta.ts           field masks, baseline diff/apply (M3)
     transport.ts       Transport interface, TransportStats, createLoopbackPair (pooled; D-026)
-    packetQueue.ts     pooled packet copies ordered by due time (loopback and NetSim)
+    packetQueue.ts     pooled packet copies ordered by due time (loopback, NetSim and the
+                       WebSocket inbox)
     netsim.ts          NetSimTransport: delay, jitter, loss, duplication, reorder (D-028)
     profiles.ts        NET_PROFILES, the docs/10 §3 table
 
 packages/server/src/
-  main.ts              process entry, config, match manager
   index.ts             package entry: the match code only (the Worker and tools import it)
   match/               environment-agnostic (tsconfig.match.json: ES2023, no DOM/Node types; D-027)
     host.ts            LoopHost: now, schedule, log (the Worker or Node adapter)
@@ -94,9 +95,23 @@ packages/server/src/
     session.ts         per-client state, player, input queue, counters, admin flag
     inputQueue.ts      cmds by tick (64 slots), duplicate/late/early counters
     commands.ts        CMD: set/reset/toggle on replicated cvars, cvars resend
+    tickStats.ts       TickHistogram: 2048 × 10 µs buckets + overflow + exact max; 1 s and run
+                       windows; p50/p95/p99 without allocating (the host records whole µs)
                        (later: relevance, lag-comp history, rules host)
-  transport/           ws adapter (M3), webtransport adapter (M9)
-  admin/               rcon commands, logs, metrics endpoint
+  node/                the Node host (D-029), exported as @game/server/node for in-process tests:
+    main.ts            process entry (pnpm dev:server; bundled to dist/main.js): signals, exit codes
+    server.ts          startServer: config → cvars → map → match `main` → listener → loop; /status,
+                       /metrics; graceful shutdown
+    config.ts          server.cfg (`set` lines; `//` and `#` comment lines) and CLI flags
+    serverCvars.ts     SERVER cvars (sv_*, §8)
+    host.ts            Node LoopHost (performance.now + setTimeout) and TimedPass (per-match and
+                       per-pass tick times, CPU per second, tick_drop)
+    log.ts             JSON-lines logger
+    maps.ts            content/maps/<name>.cmap (or --maps)
+    buildHash.ts       the bundle's baked-in hash, else scripts/build-hash.mjs
+    console.ts         admin console on stdin
+  transport/           wsListener.ts (http.Server + ws noServer, one upgrade handler, /status and
+                       /metrics), wsTransport.ts (WsTransport, D-030); webtransport adapter (M9)
 
 packages/client/src/
   app/                 boot.ts (fetch the map as a ?url asset, start the server Worker, connect over
@@ -308,11 +323,22 @@ DEV / OFFLINE                                  ONLINE
 
 ## 8. Server specifics
 
-- One process can host several matches (one tick loop each). Each match is isolated (no shared mutable state).
-- Config: `server.cfg` (cvars), map rotation, rcon password (env var).
-- Structured logs (JSON lines): connects, kicks, kills, errors, tick-time warnings.
-- **Metrics:** tick time p50/p95/p99, players, bytes in/out, starved cmds, corrections requested (full snapshots), GC pauses.
-- Graceful shutdown: finish the tick, notify clients, close.
+- One process can host several matches (one tick loop each). Each match is isolated (no shared mutable state). Until D-047 the Node server runs one match, `main`.
+- **Config (D-029):** `server.cfg` (`packages/server/server.cfg`; by default the one in the working directory, or `--cfg <file>`): one `set <cvar> <value>` per line, tokenized like the console; lines starting with `//` or `#` are comments (a comment after a value is refused, not read into it). Then the command line, in this order: `--port <n>` and `--map <name>` (shorthands for `sv_port` and `sv_map`), then each `--set <cvar>=<value>`; `--maps <dir>` points at the compiled maps (default: the repository's `content/maps`). A `set` reaches the server's own cvars (below) or the match's replicated ones (`pm_*`, sent to clients). An unknown cvar, a bad value, one out of range, or `sv_sendBufferClose` not above `sv_sendBufferDrop` stops the server with a ConfigError (exit 1) rather than starting with another setting. Later: map rotation, rcon password (env var).
+- **Structured logs (JSON lines, D-029):** one object per line on stdout, `{"t":<ISO time>,"lvl":"info"|"warn"|"error","ev":…, …}`: `server_ok` (`startupMs`, monotonic since process start) and then `listening` (`port`, `buildHash`, `matches`) once the match exists and the port is bound, `connect` (`match`, `client`, `ip`), `log` (the match's own text lines, with `match`), `loop` (the loop's own lines other than drops), `tick_drop` (ticks dropped after a stall: one line per drop, naming every match), `console` (admin console replies), `shutdown` (`signal`), `error`. Later: `welcome`, `ready`, `leave` and `kick` (reason, strikes) as their own events with D-041 (increment 13; until then they are the match's `log` lines), kills, metrics lines.
+- **Admin console:** stdin lines run as admin on the match: `set`/`reset`/`toggle` on replicated cvars (the CVARS broadcast follows on the next tick).
+- **Metrics:** tick time p50/p95/p99, players, bytes in/out, starved cmds, corrections requested (full snapshots), GC pauses. `GET /metrics` (D-029) serves `{process:{…}, matches:{<name>:{…}}}`: the loop pass and each match's tick times (`TickHistogram`: run window and the last closed 1 s window, in µs), dropped ticks, CPU ms per wall second, memory (heapUsed, external, RSS) and connections; per match its map, players, server tick, starved player-ticks, strikes, snapshots and kicks. `GET /status` serves `{buildHash, protocol, matches:[{name, map, players, maxClients}]}` (`maxClients` is `MATCH_MAX_CLIENTS` until `sv_maxClients` arrives). Later: bytes, GC pauses, the metrics log line and a metrics file.
+- **Graceful shutdown (SIGINT/SIGTERM):** between ticks, stop accepting, KICK every client "server shutting down" and close its socket 1001, stop the loop, wait up to 1 s (design value) for the closing handshakes, then terminate the rest, exit 0.
+
+| Cvar | Default | Label / note |
+|---|---|---|
+| `sv_port` | 28700 | design (D-029); 0 picks a free port |
+| `sv_host` | 0.0.0.0 | design; bind address |
+| `sv_map` | arena_greybox | design; `content/maps/<name>.cmap` |
+| `sv_sendBufferDrop` | 32768 | ESTIMATE (D-030): bytes waiting in a client's socket past which unreliable sends drop |
+| `sv_sendBufferClose` | 1048576 | ESTIMATE (D-030): past this the socket closes 1008 "too slow" (checked every tick); must be above `sv_sendBufferDrop` |
+
+These are SERVER cvars, read at startup and never replicated.
 
 ## 9. Performance rules (enforced by `perf-auditor`)
 

@@ -24,7 +24,7 @@ pnpm typecheck && pnpm lint && pnpm test
 | Command | What it does |
 |---|---|
 | `pnpm dev` | The game on http://localhost:5173: the client with the server in a Web Worker (offline loopback) |
-| `pnpm dev:server` | Dedicated server from source (stop with Ctrl+C) |
+| `pnpm dev:server` | Dedicated server from source on port 28700 (stop with Ctrl+C); JSON log lines on stdout |
 | `pnpm build` | Production client build and server bundle (`packages/server/dist/main.js`) |
 | `pnpm test` | All tests |
 | `pnpm test:movement` | Movement tests (MV-xx) on the greybox courses, each printing measured vs. target |
@@ -38,7 +38,7 @@ pnpm typecheck && pnpm lint && pnpm test
 | `pnpm bench` | Sim microbenchmarks against the `docs/10` §4.4 budgets (`--strict` exits 1 on a miss) |
 | `pnpm feel-report` | Base movement metrics vs. their targets on `movement_lab`; also writes `reports/feel.md` (git-ignored) |
 
-`pnpm dev:server` runs under pnpm, which doesn't forward signals to the server. To stop it from a script or process manager, signal its process group (Ctrl+C does this), or run the bundle directly with `node packages/server/dist/main.js`.
+`pnpm dev:server` reads `packages/server/server.cfg` and takes flags such as `--port 0` (any free port), `--map movement_lab` and `--set <cvar>=<value>` (`docs/06` §8). It answers `GET /status` and `GET /metrics` with JSON on its port, and runs console commands typed on stdin (`set pm_gravity 400`). It runs under pnpm, which doesn't forward signals to the server. To stop it from a script or process manager, signal its process group (Ctrl+C does this), or run the bundle directly with `node packages/server/dist/main.js`.
 
 `pnpm test:browser` uses the Playwright browsers already on the machine. `pnpm exec playwright install chromium firefox webkit` downloads them (CI does this), and `CHROMIUM_PATH` points the Chromium run at another build.
 

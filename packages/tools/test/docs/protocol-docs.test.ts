@@ -2,6 +2,9 @@ import { readFileSync } from "node:fs";
 import * as shared from "@game/shared";
 import {
   BitWriter,
+  CHANNEL_RELIABLE,
+  CHANNEL_UNKNOWN,
+  CHANNEL_UNRELIABLE,
   CmdMsg,
   CVAR_HASH_SEED,
   encodeCmd,
@@ -16,8 +19,10 @@ import {
   HelloMsg,
   InputMsg,
   KickMsg,
+  MAX_CLIENT_MESSAGE_BYTES,
   MAX_RELIABLE_BYTES,
   MAX_UNRELIABLE_BYTES,
+  MSG_CHANNEL,
   PingMsg,
   PLAYER_STATE_BITS,
   PongMsg,
@@ -122,5 +127,37 @@ describe("docs/05 §3.6 protocol v1 layout", () => {
     const section = mdSection(doc, "3.5 Replicated cvars");
     const seed = /seed `(0x[0-9a-f]+)`/.exec(section)?.[1];
     expect(Number(seed)).toBe(CVAR_HASH_SEED);
+  });
+});
+
+// D-030: a WebSocket carries both channels and the receiver takes a message's channel from its
+// type (MSG_CHANNEL), so the §3.3 channel column is wire behaviour too.
+describe("docs/05 §3.3 message channels", () => {
+  const types = mdSection(doc, "3.3 Message types");
+
+  it("give every message type the channel MSG_CHANNEL assigns it, and no other type one", () => {
+    const documented = new Map<number, number>();
+    for (const row of firstTable(types).rows) {
+      if (!/^v\d/.test(row[4] ?? "")) continue;
+      const channel = row[2] === "reliable" ? CHANNEL_RELIABLE : CHANNEL_UNRELIABLE;
+      expect(["reliable", "unreliable"], row[1]).toContain(row[2]);
+      for (const m of (row[1] ?? "").matchAll(/`([A-Z]+)`/g)) {
+        const id = messageIds().get(m[1] ?? "");
+        expect(id, m[1]).toBeDefined();
+        documented.set(id as number, channel);
+      }
+    }
+    expect([...documented.keys()].sort((a, b) => a - b)).toEqual(
+      [...messageIds().values()].sort((a, b) => a - b),
+    );
+    for (let type = 0; type < 256; type++) {
+      expect(MSG_CHANNEL[type], `type ${type}`).toBe(documented.get(type) ?? CHANNEL_UNKNOWN);
+    }
+  });
+
+  it("states the server's WebSocket frame cap (§3.2)", () => {
+    expect(mdSection(doc, "3.2 Framing and versioning")).toContain(
+      `\`MAX_CLIENT_MESSAGE_BYTES\` = ${MAX_CLIENT_MESSAGE_BYTES} B`,
+    );
   });
 });

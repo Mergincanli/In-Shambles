@@ -42,6 +42,7 @@
 ## 2. Topology and sessions
 
 - **Dedicated server:** Node process (`packages/server`) running 1..N matches; one match = one tick loop.
+- **M3 Node server** (`packages/server/src/node`, `src/transport`; D-029, D-030): one process, one port (`sv_port`, default 28700) and, until several matches per process arrive (D-047), one match named `main` on `sv_map`. Settings come from `server.cfg`, then the command line (`docs/06` §8). Clients connect with a WebSocket to `ws://<host>:<port>/`; any other path, or a query string, gets HTTP 404 before a socket opens. The same port answers `GET /status` (`{buildHash, protocol, matches:[{name, map, players, maxClients}]}`) and `GET /metrics` (JSON). Shutdown (SIGINT/SIGTERM) KICKs every client "server shutting down", closes its socket with 1001 and exits 0. The match code is the Worker's, unchanged (D-027).
 - **Local/offline:** the *same* server code runs in a **Web Worker** in the browser. The transport is `PortTransport` (postMessage with transferable ArrayBuffers, §3.1), and the net simulator can inject latency and loss even locally.
 - **Connection lifecycle:**
   1. `HELLO`: protocol version, build hash, client nonce.
@@ -83,8 +84,17 @@ interface Transport {
 |---|---|---|
 | `createLoopbackPair()` | M2 | In-memory, both channels interleaved in send order. In-process tests, NET-03/04 and bots. |
 | `PortTransport` (`client/src/net/portTransport.ts`) | M2 | The Worker server: one `MessageChannel` per channel, a transferred copy per packet. |
-| `WebSocketTransport` | M3 | Both channels over one socket. Still uses acks/baselines as if unreliable. |
+| `WsTransport` (`server/src/transport/wsTransport.ts`) | M3 | The server end of a WebSocket (`ws`, D-030): both channels over one socket, described below. |
+| `WebSocketTransport` | M3 | The client end (browser and Node's built-in WebSocket). Still uses acks/baselines as if unreliable. |
 | `WebTransportTransport` | M9 | Datagrams for unreliable traffic, one reliable stream. WebTransport is supported in all major browsers since Safari 26.4 (March 2026); server-side HTTP/3 tooling is less mature. |
+
+**WebSocket (D-030).** One socket per client carries both channels, binary frames only, one message per frame and no extra bytes: a message's channel is its type's (`MSG_CHANNEL`, from the §3.3 table); a type that is no message arrives as unreliable and is struck. TCP still delivers in order, but the protocol keeps treating the unreliable channel as datagrams (§0). On the server (`WsTransport`, over a `ws` listener):
+- **Listener:** `ws` in `noServer` mode behind one HTTP `upgrade` handler, so the path (and, later, origin and connection limits) is checked before a socket opens; no compression; no automatic pongs (the protocol has its own PING/PONG); TCP noDelay. ws closes a frame past `MAX_CLIENT_MESSAGE_BYTES` (2048 B) with 1009; a text frame closes the socket with 1003.
+- **Receive:** arrivals are copied into a pooled queue until `poll()`: at most 256 unreliable messages (the oldest dropped as lost, like every receiver) and 64 reliable ones between polls (past that the socket closes 1008). An unreliable message over 1200 B is queued as a zero-length message, which no decoder accepts, so it is struck without being parsed.
+- **Send:** one copy per packet into a Buffer that ws keeps until it is flushed. A socket that doesn't drain loses unreliable sends while more than `sv_sendBufferDrop` (32 KiB) waits in it, and is closed 1008 "too slow" past `sv_sendBufferClose` (1 MiB), checked on every send and every tick; reliable sends never drop.
+- **Close:** the match's KICK goes first, then the socket closes with 1000 (1001 at shutdown) and the reason cut to 123 B. A close from the client, or one the server forces, reaches the match from `poll()` behind what arrived before it.
+- **Allocation:** ws's received Buffers and the one copy per send are this boundary's allocation (D-030 extends D-026's postMessage exception); the match tick and the codecs stay allocation-free.
+- **Scheme:** `ws://` in M3; `wss://` comes with deployment (M9).
 
 Every transport can be wrapped by `NetSimTransport` (`shared/src/net/netsim.ts`: latency, jitter, loss, duplication, reorder; §13, D-028). A bandwidth cap is not simulated yet.
 
@@ -94,6 +104,7 @@ Every transport can be wrapped by `NetSimTransport` (`shared/src/net/netsim.ts`:
 - **Bit-packed** writer/reader (`BitWriter`/`BitReader`, `shared/src/net/bitstream.ts`) with explicit widths (1–32 bits), LSB-first: stream bit *i* is bit *i* & 7 of byte *i* >> 3, a value's low bit first. Both work over a preallocated `Uint8Array` and never throw: an overflow, a value its width can't carry or a short read sets a sticky error flag (D-026).
 - **Decoders are bounds-checked** and return false on a short read, a wrong type byte, any value the encoder never writes, or bits left after the message (beyond the zero padding of its last byte). The receiver drops the packet and counts a strike. Encoders refuse fields out of their layout's range the same way, so a bad message is never sent.
 - **One message per packet.** Unreliable packets are at most `MAX_UNRELIABLE_BYTES` = 1200 B (datagram-safe), reliable messages at most `MAX_RELIABLE_BYTES` = 16384 B (`shared/src/net/protocol.ts`).
+- **On a WebSocket** a packet is one binary frame, and the receiver takes the channel from the type byte (`MSG_CHANNEL`, §3.1). The server accepts frames up to `MAX_CLIENT_MESSAGE_BYTES` = 2048 B, above the largest message a client sends (a CMD of 1026 B), and closes the socket on a larger one (D-030).
 
 ### 3.3 Message types
 

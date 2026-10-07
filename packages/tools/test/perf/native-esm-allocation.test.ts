@@ -6,7 +6,8 @@ import { fromRoot } from "../../src/paths";
 // The per-tick paths (quantizePlayerState, snapOrigin, the state ring, copy/equals,
 // sanitizeUserCmd, the pmove params refresh and basics, whole pmove ticks in every M2 move mode,
 // the scenario runner and bots, the per-tick message codecs, the transports, the server's match
-// tick, the client's prediction and reconciliation, and the BVH queries)
+// tick and the Node server's timing wrapper, the server's WebSocket inbox, the client's prediction
+// and reconciliation, and the BVH queries)
 // must not allocate under native ES modules either, where V8 boxes a double returned by a call it
 // doesn't inline or joined with a module constant in a ternary. Vitest's module runner hides
 // that, so this runs a child process.
@@ -118,6 +119,24 @@ describe.concurrent("per-tick paths under native ES modules", () => {
   }) => {
     const r = await runChild("transport");
     // Raw loopback deliveries, NetSim unreliable deliveries, NetSim reliable deliveries.
+    for (const n of r.outcomes) expect(n).toBeGreaterThan(0);
+    expect(r.clean, r.attempts.join("; ")).toBe(true);
+  }, 30_000);
+
+  it("the Node server's TimedPass and its tick histograms allocate nothing per pass (D-029)", async ({
+    expect,
+  }) => {
+    const r = await runChild("timedPass");
+    // Passes run; a match's and the pass's last 1 s window were closed with real values.
+    for (const n of r.outcomes) expect(n).toBeGreaterThan(0);
+    expect(r.clean, r.attempts.join("; ")).toBe(true);
+  }, 30_000);
+
+  it("the server's WebSocket transport allocates nothing per arrival or poll (D-030)", async ({
+    expect,
+  }) => {
+    const r = await runChild("wsTransport");
+    // Reliable deliveries, zero-length markers for oversized messages, drop-oldest losses.
     for (const n of r.outcomes) expect(n).toBeGreaterThan(0);
     expect(r.clean, r.attempts.join("; ")).toBe(true);
   }, 30_000);
