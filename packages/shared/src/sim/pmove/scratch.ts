@@ -20,7 +20,7 @@ export const moveAxes: Vec3 = vec3();
 export const wishVel: Vec3 = vec3();
 
 /** Contact planes the slide move clips against (docs/03 §4.8 tracks up to 5). */
-export const MAX_CLIP_PLANES = 5;
+export const SLIDE_MAX_PLANES = 5;
 export const clipPlanes: readonly Vec3[] = [vec3(), vec3(), vec3(), vec3(), vec3()];
 
 /** Two traces, so a step-slide can keep one result while it probes with the other. */

@@ -62,9 +62,10 @@ export function checkWaterLevel(ps: PlayerState, world: CollisionWorld): void {
  * on ground. cmdScale without the crouch factor (crouch means "down" here), times pm_swimScale;
  * the summed wish is capped at that speed, since world z and the pitched forward are not orthogonal.
  * With no move or vertical input the wish is straight down at pm_waterSinkSpeed: a slow sink.
- * pm_waterAccelerate, then a step-slide without gravity, against the floor plane when grounded:
- * the step lets a swimmer at the surface climb out over an edge up to pm_stepSize high. No sprint
- * and no water-jump (M4).
+ * pm_waterAccelerate, then a step-slide without gravity, against the floor plane when grounded.
+ * The step reaches pm_stepSize above the feet, and only at the top of the bob (a rising move with
+ * no ground below never steps), so a bobbing swimmer climbs out only onto an edge about 6 u or
+ * more below the surface; a flush rim needs the water-jump (M4). No sprint.
  */
 export function waterMove(
   ps: PlayerState,

@@ -211,7 +211,7 @@ The 0.99 and 0.1 u/s thresholds are design constants (`SLIDE_SAME_PLANE`, `SLIDE
 
 ### 4.10 Ground trace and slopes
 - Sweep the hull `groundTraceDist` (0.25 u) straight down. No hit → airborne.
-- If moving upward (vz > 0) and `dot(v, groundNormal) > 10` → treat as airborne. This covers jumping and being launched; without it you would immediately "re-ground".
+- If moving upward (vz > 0) and `dot(v, groundNormal) > 10` → treat as airborne. This covers jumping and being launched; without it you would immediately "re-ground". The 10 u/s threshold is a design constant (`GROUND_LEAVE_SPEED`), not a feel knob or an ESTIMATE of the original game.
 - If `normal.z < minWalkNormal` → **steep**: not walkable. Apply air physics and clip against the plane, so you slide down slopes.
 - Otherwise grounded. Record the ground entity and surface flags. The ground is **slick** or **nodamage** when the hit plane has the `SURF_SLICK`/`SURF_NODAMAGE` face flag **or** the hit brush has `CONTENTS_SLICK`/`CONTENTS_NODAMAGE` (D-023). Bevel planes carry no face flags, but the trace keeps the brush's contents whichever plane it hits, so a ramp crest standing on the top bevel is still slick.
 - If the player was airborne and is now grounded, **clip the velocity against the ground plane** (§4.7) and emit a `land` event; its value is the downward speed at the start of the tick (D-023). A fall can end within `groundTraceDist` of the floor without the slide sweep touching it; without the clip the next walk move (§4.4 step 5) would lay the whole fall speed onto the ground as horizontal speed.
@@ -243,7 +243,8 @@ The 0.99 and 0.1 u/s thresholds are design constants (`SLIDE_SAME_PLANE`, `SLIDE
   - Speed scaled by `swimScale`.
   - With no input, sink slowly (wish z = −`pm_waterSinkSpeed`, 60 u/s, ESTIMATE).
     - "No input" means the forward, right and vertical axes are all 0; jump and crouch held together cancel, so they sink too. The sink wish is not scaled by `swimScale`.
-  - No gravity. Friction is the water term only (§4.2), acceleration `pm_waterAccelerate`, then a step-slide without gravity (§4.9; against the floor plane when grounded), so a swimmer at the surface can climb out over an edge up to `pm_stepSize` high. Jump in the swim move swims; it never starts a ground jump.
+  - No gravity. Friction is the water term only (§4.2), acceleration `pm_waterAccelerate`, then a step-slide without gravity (§4.9; against the floor plane when grounded). Jump in the swim move swims; it never starts a ground jump.
+  - **Climbing out** (D-024): the step lifts a swimmer onto an edge up to `pm_stepSize` above its **feet**, not above the water. A swimmer rising with no ground below does not step (§4.9 step 3), so the step happens at the top of the bob, where the feet are about 24.5 u under the surface: the edge must be about 6 u or more below the water surface. A swimmer coming up from depth at full speed overshoots the bob and reaches an edge up to about 7 u above the surface at pitch 0 (a little more looking up). An edge flush with the surface traps a bobbing swimmer until the water-jump (M4): every deep pool needs a shallow exit or a rim at least 6 u below the surface (the water unit tests pin the envelope).
   - Rising to the surface: once the waist sample leaves the water (level 1) the player is in air or walk moves again, falls back and swims up again, bobbing with the waist at the surface. **Water-jump** (climbing out of deep water onto a high edge) is M4.
 - Friction per §4.2; acceleration `waterAccelerate`. **No sprint. No stamina regen.**
 - **Breath** (FACT): 16 s of air while submerged (level 3), refilled instantly on surfacing. After it runs out, drowning kills in 8 s (≈12.5 HP/s).

@@ -18,7 +18,7 @@ import { ground, traceB } from "./scratch";
 /**
  * Leaving speed along the ground normal, in u/s, above which a rising player is airborne even
  * with ground under the probe (docs/03 §4.10): the tick a jump or a launch starts must not
- * re-ground the player.
+ * re-ground the player. A design constant, not a feel knob or an ESTIMATE.
  */
 export const GROUND_LEAVE_SPEED = 10;
 

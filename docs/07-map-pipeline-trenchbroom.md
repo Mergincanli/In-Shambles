@@ -199,6 +199,7 @@ Whatever is chosen: static lighting is baked or stylized. **Collision always sta
 | Standing hull | 30 × 30 × 56 u |
 | Crouch / slide height | 40 u |
 | Step height | 18 u (anything taller needs a jump) |
+| Pool exits | a rim about 6 u or more below the water surface, or a shallow section to wade out; until the M4 water-jump a swimmer cannot climb onto a rim flush with the surface (`docs/03` §4.13, D-024) |
 | Jump apex | ≈ 45 u (plain jump) |
 | Ledge-grab reach | per `pm_ledge*` (ESTIMATE: ledge top up to ~76 u above feet at grab time) |
 | Doors | ≥ 48 u wide × 96 u tall (comfortable); slide gaps 41–44 u high (a crouched player rests 1/32 u above the floor, so 40 u blocks; D-017) |

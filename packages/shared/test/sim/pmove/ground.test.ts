@@ -106,6 +106,26 @@ describe("groundTrace (docs/03 §4.10)", () => {
     }
   });
 
+  it("walks a slope whose normal z is exactly pm_minWalkNormal, not one just under it", () => {
+    const world = worldOf(floorBrush(), slope(0.75));
+    const ps = dropped(world, 0, 128);
+    ps.flags = PMF_GROUNDED;
+    trace(ps, world);
+    const nz = ground.normal[2] as number;
+    for (const [min, walkable] of [
+      [nz, true],
+      [nz + Number.EPSILON, false],
+    ] as const) {
+      const at = new PmoveParams();
+      at.minWalkNormal = min;
+      ps.flags = PMF_GROUNDED;
+      groundTrace(ps, world, at, HULL_MINS, HULL_STANDING_MAXS, false, null);
+      expect(ground.normal[2]).toBe(nz);
+      expect(ground.walkable, `min ${min}`).toBe(walkable);
+      expect((ps.flags & PMF_GROUNDED) !== 0, `min ${min}`).toBe(walkable);
+    }
+  });
+
   it("treats a rising player as airborne once v·n exceeds 10 u/s", () => {
     for (const [vz, grounded] of [
       [GROUND_LEAVE_SPEED, true],

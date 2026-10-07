@@ -9,8 +9,8 @@ import { checkWaterLevel } from "../../../src/sim/pmove/water";
 import { BUTTON_CROUCH, BUTTON_JUMP } from "../../../src/sim/usercmd";
 import { TICK_DT } from "../../../src/time";
 import { CONTENTS_WATER } from "../../../src/world/contents";
-import { boxPlanes } from "../../../src/world/shapes";
-import { cmd, floorBrush, horizontalSpeed, player, run } from "../../helpers/pmoveWorld";
+import { boxPlanes, wedgePlanes } from "../../../src/world/shapes";
+import { box, cmd, floorBrush, horizontalSpeed, player, run } from "../../helpers/pmoveWorld";
 import { brush, worldOf } from "../../helpers/traceWorld";
 
 // Water level and the swim move (docs/03 §4.13, D-024).
@@ -211,6 +211,67 @@ describe("waterMove", () => {
     expect(events.filter(([, type]) => type === PMEV_JUMP)).toHaveLength(0);
     expect(ps.velocity[2]).toBeGreaterThan(0);
     expect(ps.velocity[2]).toBeLessThan(270);
+  });
+
+  it("step-slides against the floor plane when grounded", () => {
+    // Under 512 u of water, a 0.8 slope rising toward +y, and a swimmer resting on it, sinking at
+    // 60 u/s. The floor is a slide plane while grounded (docs/03 §4.13), so the sweep that starts
+    // in its ε skin and hits it again is nudged off the same plane (§4.8 step 3): the swimmer
+    // holds its place that tick. Clipped against the slope as a new plane, it would slide down.
+    const nz = 0.8;
+    const rise = (256 * Math.sqrt(1 - nz * nz)) / nz;
+    const world = worldOf(
+      floorBrush(),
+      brush(wedgePlanes([-128, 0, 0], [128, 256, rise], "+y")),
+      brush(boxPlanes([-1024, -1024, 0], [1024, 1024, 512]), CONTENTS_WATER),
+    );
+    const ps = player(0, 128);
+    // Just above the slope under the hull's uphill (+y) edge, the first part to touch it.
+    ps.origin[2] = 24 + ((128 + 15) * rise) / 256 + 0.1;
+    ps.flags = 0;
+    run(ps, world, () => cmd(), 3);
+    expect(ps.flags & PMF_GROUNDED).toBe(PMF_GROUNDED);
+    expect(ps.waterLevel).toBe(3);
+    const start = [...ps.origin];
+    ps.velocity.set([0, 0, -60]);
+    pmove(ps, cmd(), world, new PmoveParams(), TICK_DT, null, null);
+    expect([...ps.origin]).toEqual(start);
+    expect(ps.velocity[2]).toBeLessThan(-50);
+    expect(ps.flags & PMF_GROUNDED).toBe(PMF_GROUNDED);
+  });
+
+  it("climbs out onto an edge pm_stepSize above the feet at the top of the bob, not a flush rim", () => {
+    // Deep water up to z = 0 and a solid edge east of x = 64 whose top is `h`. Forward + jump,
+    // level: the step is refused while rising with no ground below (§4.9 step 3), so a bobbing
+    // swimmer steps only at the top of the bob, feet about 24.5 u under the surface; one coming
+    // up from depth at full speed overshoots and reaches a little higher (docs/03 §4.13, D-024).
+    function exitTick(startZ: number, h: number): number {
+      const world = worldOf(
+        box([-1024, -1024, -1024], [1024, 1024, -512]),
+        brush(boxPlanes([-1024, -1024, -512], [64, 1024, 0]), CONTENTS_WATER),
+        box([64, -1024, -512], [1024, 1024, h]),
+      );
+      const ps = player(0, 0);
+      ps.origin[2] = startZ;
+      ps.flags = 0;
+      let out = -1;
+      run(ps, world, () => cmd({ forward: 127, buttons: BUTTON_JUMP }), 600, {
+        each: (t) => {
+          if (out < 0 && (ps.origin[0] as number) > 64 && (ps.flags & PMF_GROUNDED) !== 0) out = t;
+        },
+      });
+      return out;
+    }
+    // Bobbing at the surface (feet 44 u down at the start).
+    expect(exitTick(-20, -8)).toBeGreaterThan(0);
+    expect(exitTick(-20, -6)).toBeGreaterThan(0);
+    expect(exitTick(-20, -5)).toBe(-1);
+    // A rim flush with the surface needs the water-jump (M4).
+    expect(exitTick(-20, 0)).toBe(-1);
+    // Up from 174 u down at full speed: about 7 u above the surface.
+    expect(exitTick(-150, 0)).toBeGreaterThan(0);
+    expect(exitTick(-150, 7)).toBeGreaterThan(0);
+    expect(exitTick(-150, 8)).toBe(-1);
   });
 
   it("walks (with gravity and a normal jump) at level 1", () => {

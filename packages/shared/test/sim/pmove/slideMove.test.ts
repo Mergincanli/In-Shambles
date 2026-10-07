@@ -115,13 +115,35 @@ describe("slideMove (docs/03 §4.8)", () => {
     expect(ps.origin[2]).toBe(restZ(0));
   });
 
-  it("stops when a clip turns the move against the entering velocity", () => {
-    // Straight down onto a floor: the clipped velocity points (barely) up, against the fall.
+  it("stops dead falling straight onto a floor", () => {
+    // The floor clip leaves the overclip's push up, which still moves into the fall-direction
+    // pseudo-plane; clipping against that turns it back into the floor, and the two opposite
+    // normals have no crease, so nothing is left.
     const world = worldOf(floorBrush());
     const ps = at(0, 0, restZ(0) + 1, 0, 0, -600);
     expect(slide(ps, world, TICK_DT, false, null)).toBe(true);
     expect([...ps.velocity]).toEqual([0, 0, 0]);
     expect(ps.origin[2]).toBeCloseTo(restZ(0), 9);
+  });
+
+  it("stops when a clip turns the move against the entering velocity", () => {
+    // Falling into a square corner: the floor, then the y wall, then the x wall. After the x-wall
+    // clip and the clips against the stored planes it still moves into, only an overclip residue
+    // is left, pointing back along −x against the entering velocity (step 5). Without the stop the
+    // player would creep back out of the corner.
+    const world = worldOf(
+      floorBrush(),
+      box([64, -512, 0], [200, 512, 128]),
+      box([-512, 64, 0], [200, 200, 128]),
+    );
+    const ps = at(32, 40, 25, 300, 200, -10);
+    expect(slide(ps, world, 0.125, true, null)).toBe(true);
+    expect([...ps.velocity]).toEqual([0, 0, 0]);
+    // Wedged in the corner, ε off both walls and resting on the floor.
+    expect(ps.origin[0]).toBeCloseTo(64 - 15 - TRACE_EPSILON, 9);
+    expect(ps.origin[1]).toBeGreaterThan(48.9);
+    expect(ps.origin[2]).toBeGreaterThanOrEqual(restZ(0));
+    expect(ps.origin[2]).toBeLessThan(restZ(0) + 0.01);
   });
 
   it("nudges off a stored plane it hits again instead of clipping against it twice", () => {

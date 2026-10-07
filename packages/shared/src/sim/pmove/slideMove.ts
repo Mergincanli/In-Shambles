@@ -7,7 +7,7 @@ import type { PlayerState } from "../playerState";
 import { clipVelocity } from "./basics";
 import type { PmoveTraceLog } from "./debug";
 import type { PmoveParams } from "./params";
-import { clipPlanes, MAX_CLIP_PLANES, traceA } from "./scratch";
+import { clipPlanes, SLIDE_MAX_PLANES, traceA } from "./scratch";
 
 /** Sweeps per slide move (docs/03 §4.8). */
 export const SLIDE_MAX_BUMPS = 4;
@@ -29,7 +29,7 @@ export const SLIDE_LEAVE_SPEED = 0.1;
 export const SLIDE_SAME_PLANE = 0.99;
 
 /** Module scratch (D-016). */
-const primal: Vec3 = vec3();
+const entryVel: Vec3 = vec3();
 const endVel: Vec3 = vec3();
 const clipped: Vec3 = vec3();
 const endClipped: Vec3 = vec3();
@@ -45,7 +45,7 @@ const timeLeft = new Float64Array(1);
  * Multi-plane collide-and-slide (docs/03 §4.8) of `ps.origin` by `ps.velocity` over `dt`, in
  * place. Returns whether any sweep hit something (step-slide uses it).
  *
- * Contact planes, up to MAX_CLIP_PLANES: the ground normal when `groundNormal` is given (a
+ * Contact planes, up to SLIDE_MAX_PLANES: the ground normal when `groundNormal` is given (a
  * grounded move), the direction of the velocity as it enters (a pseudo-plane, so a clip never
  * turns the move backwards), then each plane a sweep hits. Up to SLIDE_MAX_BUMPS sweeps; after a
  * hit the remaining time continues along the velocity clipped against every plane it still moves
@@ -81,9 +81,9 @@ export function slideMove(
     endVel[2] = v[2] - p.gravity * dt;
     v[2] = (v[2] + endVel[2]) * 0.5;
   }
-  primal[0] = v[0];
-  primal[1] = v[1];
-  primal[2] = v[2];
+  entryVel[0] = v[0];
+  entryVel[1] = v[1];
+  entryVel[2] = v[2];
   let numPlanes = 0;
   if (groundNormal !== null) {
     const g = planes[0] as Vec3;
@@ -122,7 +122,7 @@ export function slideMove(
     if (tr.fraction === 1) break;
     hit = true;
     timeLeft[0] = t - t * tr.fraction;
-    if (numPlanes >= MAX_CLIP_PLANES) {
+    if (numPlanes >= SLIDE_MAX_PLANES) {
       v[0] = 0;
       v[1] = 0;
       v[2] = 0;
@@ -142,7 +142,7 @@ export function slideMove(
       return true;
     }
     // docs/03 §4.8 step 5: turned against the entering velocity, as in a sloping corner.
-    if (v[0] * primal[0] + v[1] * primal[1] + v[2] * primal[2] < 0) {
+    if (v[0] * entryVel[0] + v[1] * entryVel[1] + v[2] * entryVel[2] < 0) {
       v[0] = 0;
       v[1] = 0;
       v[2] = 0;

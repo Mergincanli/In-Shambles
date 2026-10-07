@@ -137,6 +137,25 @@ describe("checkLadder", () => {
     expect(contact(atBase(), ladder, YAW_NORTH, -127)).toBe(false);
     expect(contact(atBase(), ladder, YAW_NORTH, 1)).toBe(true);
   });
+
+  it("catches a standing jump at its foot with no move input (open item, D-024)", () => {
+    // The forward rule applies on the ground only, and a vertical jump leaves the face at
+    // v·n = 0: the next tick attaches and the player hangs on the ladder with no input. This pins
+    // today's behavior until the open feel decision in D-024 is made; back held jumps normally.
+    const idle = atBase();
+    run(idle, ladder, (t) => cmd({ yaw: YAW_NORTH, buttons: t === 0 ? BUTTON_JUMP : 0 }), 80);
+    expect(idle.flags & PMF_ON_LADDER).toBe(PMF_ON_LADDER);
+    expect(idle.flags & PMF_GROUNDED).toBe(0);
+    expect(idle.origin[2]).toBeGreaterThan(50);
+    const back = atBase();
+    run(
+      back,
+      ladder,
+      (t) => cmd({ forward: -127, yaw: YAW_NORTH, buttons: t === 0 ? BUTTON_JUMP : 0 }),
+      80,
+    );
+    expect(back.flags & PMF_GROUNDED).toBe(PMF_GROUNDED);
+  });
 });
 
 describe("ladderMove", () => {
