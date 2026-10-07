@@ -5,7 +5,9 @@ import { defineConfig } from "vitest/config";
 // - vectors (D-022): the shared determinism, trace and pmove vectors, replayed unchanged in real
 //   browser engines. WebKit runs JavaScriptCore, Safari's engine.
 // - e2e (M2 design §5): the built client in headless Chromium, driven from Node by Playwright.
-//   It runs whenever chromium is among the engines.
+//   It runs whenever chromium is among the engines, after the vectors (`sequence.groupOrder`):
+//   its prediction checks are judged against frame timing, and SwiftShader sharing a 4-vCPU CI
+//   runner with two other browser engines dropped it to 27 fps.
 export const ENGINES = ["chromium", "firefox", "webkit"] as const;
 export type Engine = (typeof ENGINES)[number];
 
@@ -44,6 +46,7 @@ export default defineConfig({
         test: {
           name: "vectors",
           include: [VECTORS_GLOB],
+          sequence: { groupOrder: 0 },
           browser: {
             enabled: true,
             headless: true,
@@ -65,6 +68,7 @@ export default defineConfig({
               test: {
                 name: "e2e",
                 include: [E2E_GLOB],
+                sequence: { groupOrder: 1 },
                 environment: "node",
                 testTimeout: 60_000,
                 hookTimeout: 120_000,

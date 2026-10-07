@@ -30,16 +30,13 @@ const RUN_MS = 3000;
  */
 const VIEW = { width: 320, height: 180 } as const;
 /**
- * Below this the prediction counters say more about the host than the client: fail plainly. Low,
- * since late resyncs are judged per frame (MAX_LONG_SHARE): at 30 fps the mean frame reaches the
- * 33 ms input buffer, where an on-time and a late frame can no longer be told apart.
- */
-const MIN_FPS = 30;
-/**
  * Above this share of frames longer than the input buffer, the host cannot keep its frames
- * inside the prediction's slack and a resync says little either way: fail plainly too. Half, the
- * share where the mean frame reaches the buffer (30 fps); mispredictions are told apart from
- * starved snapshots by the server's flag, so only the resync check leans on it.
+ * inside the prediction's slack and a resync says little either way: fail plainly. Half, the
+ * share where the mean frame reaches the buffer (about 30 fps); mispredictions are told apart
+ * from starved snapshots by the server's flag, so only the resync check leans on it. This is the
+ * only host gate: each frame is judged by its own gap, so a slow host with most frames on time
+ * (27 fps and 41 % long on a GitHub runner) still gives a meaningful check; a separate fps floor
+ * failed that run with the prediction healthy.
  */
 const MAX_LONG_SHARE = 0.5;
 /** Where the console-and-HUD run saves its screenshot, when set (`E2E_SCREENSHOT_DIR`). */
@@ -98,8 +95,8 @@ function fpsBetween(a: Sample, b: Sample): number {
  * corrected on that starved snapshot (`starvedCorrections`) or, past the lead, hard-resynced: by
  * design on `lan` until the clock has grown the lead for such gaps (D-028). So every resync must
  * be a late one (bar the one a slow start may need), and starved cmds and their corrections need
- * a long frame in between. A host too slow to tell (more than MAX_LONG_SHARE of its frames long,
- * or under MIN_FPS) is a failure that says so, not a random pass or fail.
+ * a long frame in between. A host too slow to tell (more than MAX_LONG_SHARE of its frames long)
+ * is a failure that says so, not a random pass or fail; the fps goes into every message.
  */
 function expectHealthy(a: Sample, b: Sample): void {
   const fps = fpsBetween(a, b);
@@ -110,9 +107,6 @@ function expectHealthy(a: Sample, b: Sample): void {
     long,
     `host too slow for the e2e checks (${long} of ${frames} frames over the input buffer): ${detail}`,
   ).toBeLessThanOrEqual(frames * MAX_LONG_SHARE);
-  expect(fps, `host too slow for the e2e checks (need ${MIN_FPS} fps): ${detail}`).toBeGreaterThan(
-    MIN_FPS,
-  );
   const mispredicted = Number(b.s.corrections) - Number(b.s.starvedCorrections);
   expect(mispredicted, `corrections on on-time snapshots: ${detail}`).toBe(0);
   const onTime = (x: Sample) => Number(x.s.hardResyncs) - Number(x.s.lateResyncs);
