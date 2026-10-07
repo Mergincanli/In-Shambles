@@ -7,7 +7,11 @@ import {
   NET_PROFILES,
   type NetProfile,
 } from "../../src/net/profiles";
-import { createLoopbackPair, type LoopbackEndpoint } from "../../src/net/transport";
+import {
+  createLoopbackPair,
+  type LoopbackEndpoint,
+  MAX_QUEUED_UNRELIABLE,
+} from "../../src/net/transport";
 
 const TICK_MS = 1000 / 60;
 
@@ -404,7 +408,52 @@ describe("NetSimTransport", () => {
     expect(h.up.map((a) => [a.id, a.at])).toEqual([[1, at]]);
   });
 
+  it("holds at most MAX_QUEUED_UNRELIABLE unreliable arrivals, dropping the oldest as lost", () => {
+    // A link far longer than any profile: arrivals pile up here faster than they come due (F01).
+    const h = new Harness(custom({ delayMs: 5000 }), 8);
+    const n = 2000;
+    for (let i = 0; i < n; i++) {
+      h.runTo(i, 1);
+      h.sendDown(i);
+      if (i % 400 === 0) h.sendDown(i, true);
+    }
+    h.runTo(n, 1);
+    expect(h.sim.inFlight()).toBe(MAX_QUEUED_UNRELIABLE + 5);
+    h.runTo(n + 6000, 1);
+    expect(h.down.filter((a) => a.reliable).map((a) => a.id)).toEqual([0, 400, 800, 1200, 1600]);
+    expect(h.down.filter((a) => !a.reliable).map((a) => a.id)).toEqual(
+      Array.from({ length: MAX_QUEUED_UNRELIABLE }, (_, k) => n - MAX_QUEUED_UNRELIABLE + k),
+    );
+    expect(h.sim.stats().lost).toBe(n - MAX_QUEUED_UNRELIABLE);
+  });
+
   describe("close", () => {
+    it("a close in either direction queues behind the unreliable packets sent before it", () => {
+      // Jitter without reordering: only the close's ordering keeps it behind them (D-028).
+      const p = { ...named("wan-150-loss2"), loss: 0, reorder: 0 };
+      for (let seed = 1; seed < 50; seed++) {
+        const up = new Harness(p, seed);
+        const upCloses: number[] = [];
+        up.server.onClose(() => upCloses.push(up.now));
+        for (let i = 0; i < 5; i++) up.sendUp(i);
+        up.sim.close("quit");
+        up.runTo(400);
+        expect(up.up.map((a) => a.id)).toEqual([0, 1, 2, 3, 4]);
+        expect(upCloses).toHaveLength(1);
+        for (const a of up.up) expect(upCloses[0]).toBeGreaterThanOrEqual(a.at);
+
+        const down = new Harness(p, seed);
+        const downCloses: number[] = [];
+        down.sim.onClose(() => downCloses.push(down.now));
+        for (let i = 0; i < 5; i++) down.sendDown(i);
+        down.server.close("kicked");
+        down.runTo(400);
+        expect(down.down.map((a) => a.id)).toEqual([0, 1, 2, 3, 4]);
+        expect(downCloses).toHaveLength(1);
+        for (const a of down.down) expect(downCloses[0]).toBeGreaterThanOrEqual(a.at);
+      }
+    });
+
     it("closing the simulator still sends what it holds, then closes the inner transport", () => {
       for (const p of [NET_PROFILE_LAN, named("wan-50"), named("bad-250-loss5")]) {
         const h = new Harness(p, 2);

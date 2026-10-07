@@ -1,4 +1,4 @@
-import { DevAssertError } from "@game/shared";
+import { DevAssertError, MAX_QUEUED_UNRELIABLE } from "@game/shared";
 import { describe, expect, it } from "vitest";
 import { type PortLike, type PortMessageHandler, PortTransport } from "../../src/net/portTransport";
 
@@ -127,6 +127,34 @@ describe("PortTransport (docs/05 §3.1, D-026)", () => {
     }
     expect(inboxOf(b)).toBe(slots);
     expect(got.length).toBe(next + 50);
+  });
+
+  it("caps waiting unreliable packets, dropping the oldest as lost; reliable ones all stay", () => {
+    // A hidden tab stops polling while the Worker sends a snapshot every tick (F01).
+    const { a, b, flush } = pair();
+    const inboxOf = (t: PortTransport) => (t as unknown as { inbox: unknown[] }).inbox;
+    const got: [number, boolean][] = [];
+    b.onMessage((d, _len, reliable) =>
+      got.push([(d[0] as number) | ((d[1] as number) << 8), reliable]),
+    );
+    const n = 60 * 60;
+    const buf = new Uint8Array(2);
+    for (let i = 0; i < n; i++) {
+      buf[0] = i & 0xff;
+      buf[1] = i >> 8;
+      a.sendUnreliable(buf, 2);
+      if (i % 600 === 0) a.sendReliable(buf, 2);
+      flush();
+    }
+    expect(inboxOf(b).length).toBeLessThanOrEqual(2 * (MAX_QUEUED_UNRELIABLE + 8));
+    b.poll();
+    const unreliable = got.filter((g) => !g[1]).map((g) => g[0]);
+    expect(unreliable).toEqual(
+      Array.from({ length: MAX_QUEUED_UNRELIABLE }, (_, k) => n - MAX_QUEUED_UNRELIABLE + k),
+    );
+    expect(got.filter((g) => g[1]).map((g) => g[0])).toEqual([0, 600, 1200, 1800, 2400, 3000]);
+    expect(b.stats().lost).toBe(n - MAX_QUEUED_UNRELIABLE);
+    expect(b.stats().delivered).toBe(MAX_QUEUED_UNRELIABLE + 6);
   });
 });
 

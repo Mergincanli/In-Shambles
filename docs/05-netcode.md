@@ -77,6 +77,7 @@ interface Transport {
 - **Reliable** messages arrive in order and are never lost. **Unreliable** ones may be lost, duplicated or reordered, so the protocol never relies on their order (§0).
 - **Close:** after `close(reason)` sends are dropped and nothing more is delivered on that side. The other side still receives what was sent before, then its `onClose(reason)` fires from its `poll()`.
 - **No steady-state allocation:** the in-memory transports copy into pooled slots. Only the `postMessage` boundary allocates: one transferred `ArrayBuffer` per packet, and the receiver's view of it. `PortTransport` queues arrivals in a ring of reused slots, so an empty poll allocates nothing (the native-ESM `transport` workload).
+- **Bounded receive queues** (D-026): a receiver holds at most `MAX_QUEUED_UNRELIABLE` (256, two state rings, about 4 s of snapshots) unreliable packets for its next `poll()`. Past it the oldest waiting one is dropped and counted in `lost`; reliable messages and the close are never dropped. A page that stops polling (a hidden tab, while the Worker keeps sending a snapshot every tick) so keeps bounded memory, and a backlog older than the ring would only end in a hard resync from the newest anyway (§8). `createLoopbackPair`, `PortTransport` and the net simulator's inbound queue all apply it.
 
 | Implementation | Milestone | Notes |
 |---|---|---|

@@ -1,5 +1,6 @@
 import {
   type CloseHandler,
+  MAX_QUEUED_UNRELIABLE,
   type MessageHandler,
   type Transport,
   TransportStats,
@@ -41,13 +42,17 @@ function ignoreClose(_reason: string): void {}
  * `poll()` hands them to the callback, as on every transport. A port delivers in
  * order and never drops, so the reliable port keeps the reliable channel's contract; the close
  * travels on it as a string, behind every reliable message sent before it. Unreliable packets
- * travel on their own port and may overtake reliable ones, which datagrams allow.
+ * travel on their own port and may overtake reliable ones, which datagrams allow. Past
+ * MAX_QUEUED_UNRELIABLE waiting unreliable packets the oldest is dropped as lost: the page stops
+ * polling in a hidden tab while the Worker keeps sending.
  */
 export class PortTransport implements Transport {
   /** Ring of arrival slots: `count` waiting from `head`, the length a power of two. */
   private inbox: Arrival[] = [];
   private head = 0;
   private count = 0;
+  /** Unreliable packets waiting, capped at MAX_QUEUED_UNRELIABLE (a hidden tab stops polling). */
+  private unreliableCount = 0;
   private messageCb: MessageHandler = ignoreMessage;
   private closeCb: CloseHandler = ignoreClose;
   private readonly counters = new TransportStats();
@@ -95,6 +100,7 @@ export class PortTransport implements Transport {
         this.closeCb(reason);
         break;
       }
+      if (!a.reliable) this.unreliableCount--;
       this.counters.delivered++;
       this.counters.deliveredBytes += bytes.length;
       this.messageCb(bytes, bytes.length, a.reliable);
@@ -120,6 +126,7 @@ export class PortTransport implements Transport {
     for (let i = 0; i < this.inbox.length; i++) (this.inbox[i] as Arrival).bytes = null;
     this.head = 0;
     this.count = 0;
+    this.unreliableCount = 0;
     this.unreliable.onmessage = null;
     this.reliable.onmessage = null;
   }
@@ -135,10 +142,34 @@ export class PortTransport implements Transport {
   private arrive(data: unknown, reliable: boolean): void {
     if (!this.open) return;
     if (data instanceof ArrayBuffer) {
+      if (!reliable) {
+        if (this.unreliableCount >= MAX_QUEUED_UNRELIABLE) this.dropOldestUnreliable();
+        this.unreliableCount++;
+      }
       this.slot(reliable, "").bytes = new Uint8Array(data);
     } else if (reliable && typeof data === "string") {
       this.slot(reliable, data);
     }
+  }
+
+  /**
+   * Drops the first waiting unreliable packet as lost, keeping the order of the reliable arrivals
+   * ahead of it, so a backlog keeps its newest packets and the ring stops growing.
+   */
+  private dropOldestUnreliable(): void {
+    const inbox = this.inbox;
+    const mask = inbox.length - 1;
+    let i = 0;
+    while (i < this.count && (inbox[(this.head + i) & mask] as Arrival).reliable) i++;
+    if (i === this.count) return;
+    const dropped = inbox[(this.head + i) & mask] as Arrival;
+    dropped.bytes = null;
+    for (; i > 0; i--) inbox[(this.head + i) & mask] = inbox[(this.head + i - 1) & mask] as Arrival;
+    inbox[this.head] = dropped;
+    this.head = (this.head + 1) & mask;
+    this.count--;
+    this.unreliableCount--;
+    this.counters.lost++;
   }
 
   /** The next free inbox slot, filled with `reliable` and `reason` (`bytes` null). */

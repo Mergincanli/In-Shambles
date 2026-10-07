@@ -6,6 +6,8 @@ import { MAX_UNRELIABLE_BYTES } from "./protocol";
  * (docs/05 §3.1, D-026). Each slot owns a byte buffer that is reused for every packet it holds,
  * so once the pool has grown to the most packets in flight at once, pushing and taking allocate
  * nothing (only a reliable message larger than any its slot held before still grows that slot).
+ * Receivers cap the unreliable packets they hold (`MAX_QUEUED_UNRELIABLE`), so a receiver that
+ * stops polling (a hidden tab) does not grow its pool for the rest of the session.
  *
  * Packets come out in due order; equal due times keep push order, so a queue whose dues never
  * fall (loopback: all 0; a FIFO channel) is plain FIFO.
@@ -23,6 +25,10 @@ export const PACKET_RELIABLE = 1;
 /** Slot flag: not a packet but the peer's close, ordered behind what it sent before (netsim). */
 export const PACKET_CLOSE = 2;
 
+function isUnreliable(flags: number): boolean {
+  return (flags & (PACKET_RELIABLE | PACKET_CLOSE)) === 0;
+}
+
 export class PacketQueue {
   private bufs: Uint8Array[] = [];
   private lens = new Int32Array(INITIAL_SLOTS);
@@ -35,6 +41,8 @@ export class PacketQueue {
   private order = new Int32Array(INITIAL_SLOTS);
   private head = 0;
   private count = 0;
+  /** Queued packets that are neither reliable nor a close. */
+  private unreliable = 0;
 
   constructor() {
     for (let i = 0; i < INITIAL_SLOTS; i++) {
@@ -45,6 +53,11 @@ export class PacketQueue {
 
   get length(): number {
     return this.count;
+  }
+
+  /** Queued unreliable packets (receivers cap them, `MAX_QUEUED_UNRELIABLE`). */
+  get unreliableLength(): number {
+    return this.unreliable;
   }
 
   /** Slots owned, queued or free: constant once the queue is warm (the pooling tests read it). */
@@ -64,6 +77,7 @@ export class PacketQueue {
     this.lens[id] = len;
     this.flags[id] = flags;
     this.dues[id] = times[at] as number;
+    if (isUnreliable(flags)) this.unreliable++;
     this.insert(id);
   }
 
@@ -90,7 +104,30 @@ export class PacketQueue {
     this.head++;
     this.count--;
     if (this.count === 0) this.head = 0;
+    if (isUnreliable(this.flags[id] as number)) this.unreliable--;
     return id;
+  }
+
+  /**
+   * Drops the first queued unreliable packet (false when there is none); reliable packets and a
+   * close keep their places. A receiver that fell behind keeps the newest packets this way.
+   */
+  dropOldestUnreliable(): boolean {
+    const order = this.order;
+    const head = this.head;
+    const end = head + this.count;
+    let i = head;
+    while (i < end && !isUnreliable(this.flags[order[i] as number] as number)) i++;
+    if (i === end) return false;
+    const id = order[i] as number;
+    // Shift the reliable packets ahead of it back one place, keeping their order.
+    for (; i > head; i--) order[i] = order[i - 1] as number;
+    this.head++;
+    this.count--;
+    if (this.count === 0) this.head = 0;
+    this.unreliable--;
+    this.release(id);
+    return true;
   }
 
   bytesOf(id: number): Uint8Array {
@@ -114,6 +151,7 @@ export class PacketQueue {
     for (let i = 0; i < this.count; i++) this.release(this.order[this.head + i] as number);
     this.head = 0;
     this.count = 0;
+    this.unreliable = 0;
   }
 
   private acquire(len: number): number {

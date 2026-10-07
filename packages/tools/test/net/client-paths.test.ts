@@ -15,11 +15,15 @@ import {
   decodeCmd,
   decodeSnapshot,
   encodeSnapshot,
+  findNetProfile,
+  MAX_QUEUED_UNRELIABLE,
   MAX_UNRELIABLE_BYTES,
   type MessageHandler,
   MSG_CMD,
   MSG_CVARS,
   MSG_SNAPSHOT,
+  type NetProfile,
+  type NetSimTransport,
   type PlayerState,
   SNAP_FLAG_TELEPORT,
   SnapshotMsg,
@@ -217,6 +221,28 @@ describe("ClientSim recovery paths", () => {
     const after = h.totals();
     expect(after.hardResyncs).toBe(1);
     expect(after.corrections - before.corrections).toBe(0);
+    expect(h.unreconciled()).toEqual([]);
+  });
+
+  it("a 30 s hidden tab keeps bounded receive queues and recovers with one hard resync", () => {
+    // The Worker keeps sending a snapshot every tick while the page does not poll (F01). No
+    // jitter, so the backlog comes due in one poll: one hard resync (one per poll, docs/05 §8).
+    const wan50 = findNetProfile("wan-50") as NetProfile;
+    const h = new NetHarness({ input: new NeutralInput(), profile: { ...wan50, jitterMs: 0 } });
+    h.runTicks(120);
+    const sim = h.sim as NetSimTransport;
+    h.hitch(30_000);
+    let maxInFlight = 0;
+    for (let ms = 0; ms < 31_000; ms += 10) {
+      h.run(10);
+      maxInFlight = Math.max(maxInFlight, sim.inFlight());
+    }
+    // The loopback end under it drops the older ~1500 snapshots before they reach the simulator.
+    expect(maxInFlight).toBeLessThanOrEqual(MAX_QUEUED_UNRELIABLE + 8);
+    expect(h.totals().hardResyncs).toBe(1);
+    const before = h.totals();
+    h.run(2000);
+    expect(h.totals().corrections - before.corrections).toBe(0);
     expect(h.unreconciled()).toEqual([]);
   });
 

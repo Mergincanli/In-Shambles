@@ -5,6 +5,7 @@ import { PACKET_CLOSE, PACKET_RELIABLE, PacketQueue } from "./packetQueue";
 import { NET_PROFILE_LAN, type NetProfile } from "./profiles";
 import {
   type CloseHandler,
+  MAX_QUEUED_UNRELIABLE,
   type MessageHandler,
   type Transport,
   TransportStats,
@@ -27,6 +28,9 @@ import {
  * - Sends go out through `pump()`, which every send and `poll()` run; `wake(at)` asks the host to
  *   call `pump()` at `at` (a browser arms a timer), so a packet leaves when it is due even between
  *   polls. Arrivals are taken from the inner transport by `poll()` and delivered by it once due.
+ *
+ * Arrivals held past `MAX_QUEUED_UNRELIABLE` unreliable packets drop the oldest, as every
+ * receiver does.
  *
  * Times are milliseconds from the injected monotonic `clock`; the draws come from Mulberry32 with
  * a fixed count per packet, so one seed and one send/poll schedule give one delivery schedule.
@@ -249,8 +253,17 @@ export class NetSimTransport implements Transport {
   /** An arrival from the inner transport, during `poll()` (so `t[NOW]` is current). */
   private arrive(d: Uint8Array, len: number, reliable: boolean): void {
     if (!this.open) return;
-    if (reliable) this.schedule(this.inbound, d, len, LAST_IN_RELIABLE, PACKET_RELIABLE);
-    else this.scheduleUnreliable(this.inbound, d, len, LAST_IN_UNRELIABLE);
+    const q = this.inbound;
+    if (reliable) {
+      this.schedule(q, d, len, LAST_IN_RELIABLE, PACKET_RELIABLE);
+      return;
+    }
+    this.scheduleUnreliable(q, d, len, LAST_IN_UNRELIABLE);
+    // A backlog after the host stopped polling arrives at once: keep its newest packets only.
+    while (q.unreliableLength > MAX_QUEUED_UNRELIABLE) {
+      q.dropOldestUnreliable();
+      this.counters.lost++;
+    }
   }
 
   /** The peer closed: its close arrives like a reliable packet, behind what it sent first. */

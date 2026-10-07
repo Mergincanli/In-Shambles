@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { DevAssertError } from "../../src/debug/assert";
 import { MAX_RELIABLE_BYTES, MAX_UNRELIABLE_BYTES } from "../../src/net/protocol";
-import { createLoopbackPair, type LoopbackEndpoint } from "../../src/net/transport";
+import {
+  createLoopbackPair,
+  type LoopbackEndpoint,
+  MAX_QUEUED_UNRELIABLE,
+} from "../../src/net/transport";
 
 interface Received {
   bytes: number[];
@@ -152,6 +156,32 @@ describe("createLoopbackPair", () => {
     expect(b.poolSize()).toBe(pool);
     expect(seen.size).toBeGreaterThan(buffers);
     expect(seen.size).toBeLessThanOrEqual(2 * pool);
+  });
+
+  it("caps the unreliable packets an unpolled end holds: the oldest go as lost, reliable stay", () => {
+    // A receiver that stops polling (a hidden tab) must not grow its pool for the session (F01).
+    const [a, b] = createLoopbackPair();
+    const got = collect(b);
+    const n = 10 * MAX_QUEUED_UNRELIABLE;
+    a.sendReliable(packet(0, 0), 2);
+    for (let i = 0; i < n; i++) {
+      a.sendUnreliable(packet(i & 0xff, i >> 8), 2);
+      if (i % 500 === 499) a.sendReliable(packet(i & 0xff, i >> 8), 2);
+    }
+    expect(b.poolSize()).toBeLessThanOrEqual(2 * (MAX_QUEUED_UNRELIABLE + 8));
+    b.poll();
+    const id = (m: Received) => (m.bytes[0] as number) | ((m.bytes[1] as number) << 8);
+    const reliable = got.filter((m) => m.reliable).map(id);
+    expect(reliable).toEqual([0, 499, 999, 1499, 1999, 2499]);
+    const unreliable = got.filter((m) => !m.reliable).map(id);
+    expect(unreliable).toEqual(
+      Array.from({ length: MAX_QUEUED_UNRELIABLE }, (_, k) => n - MAX_QUEUED_UNRELIABLE + k),
+    );
+    // Order within the poll is still send order: each reliable message follows its packet.
+    const last = got.findIndex((m) => m.reliable && id(m) === 2499);
+    expect(id(got[last - 1] as Received)).toBe(2499);
+    expect(b.stats().lost).toBe(n - MAX_QUEUED_UNRELIABLE);
+    expect(a.stats().lost).toBe(0);
   });
 
   describe("close", () => {

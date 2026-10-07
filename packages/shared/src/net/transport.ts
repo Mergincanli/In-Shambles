@@ -1,4 +1,5 @@
 import { DEV_ASSERT } from "../debug/assert";
+import { PLAYER_STATE_RING_CAPACITY } from "../sim/playerState";
 import { PACKET_RELIABLE, PacketQueue } from "./packetQueue";
 import { MAX_RELIABLE_BYTES, MAX_UNRELIABLE_BYTES } from "./protocol";
 
@@ -35,8 +36,18 @@ export interface Transport {
 }
 
 /**
+ * The most unreliable packets a receiver holds for its next `poll()` (docs/05 §3.1). Past it the
+ * oldest is dropped as lost, so a receiver that stops polling (a hidden tab, while the Worker
+ * keeps sending a snapshot every tick) keeps bounded memory. Two state rings' worth, about 4 s of
+ * snapshots: a backlog older than the ring only ends in a hard resync from the newest anyway
+ * (§8). Reliable messages are never dropped.
+ */
+export const MAX_QUEUED_UNRELIABLE = 2 * PLAYER_STATE_RING_CAPACITY;
+
+/**
  * Packet counters as seen by the transport's user: what it sent and what reached its callback.
- * The impairment counts are NetSim's (both directions) and stay 0 elsewhere.
+ * The impairment counts are NetSim's (both directions) and stay 0 elsewhere, except `lost`, which
+ * also counts the unreliable packets a receiver dropped past `MAX_QUEUED_UNRELIABLE`.
  */
 export class TransportStats {
   sent = 0;
@@ -163,7 +174,12 @@ export class LoopbackEndpoint implements Transport {
     if (!validPacketLength(d, len, reliable)) return;
     this.counters.sent++;
     this.counters.sentBytes += len;
-    peer.inbox.push(d, len, reliable ? PACKET_RELIABLE : 0, NOW, 0);
+    const inbox = peer.inbox;
+    if (!reliable && inbox.unreliableLength >= MAX_QUEUED_UNRELIABLE) {
+      inbox.dropOldestUnreliable();
+      peer.counters.lost++;
+    }
+    inbox.push(d, len, reliable ? PACKET_RELIABLE : 0, NOW, 0);
   }
 }
 
