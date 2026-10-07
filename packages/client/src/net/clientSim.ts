@@ -337,7 +337,7 @@ export class ClientSim {
       const p = this.predictor;
       let n = 0;
       while ((t[ACC] as number) >= TICK_MS && n < MAX_TICKS_PER_FRAME) {
-        if (p.latestTick - p.snapshotTick > MAX_LEAD_TICKS) {
+        if (p.latestTick - p.snapshotTick >= MAX_LEAD_TICKS) {
           // No snapshot for that long: hold the prediction instead of owing the time.
           t[ACC] = TICK_MS;
           break;

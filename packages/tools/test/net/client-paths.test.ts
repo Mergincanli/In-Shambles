@@ -294,6 +294,9 @@ describe("ClientSim recovery paths", () => {
     match.tick = () => {
       if (!serverStalled) realTick();
     };
+    const queue = match.session(0)?.queue;
+    expect(queue).toBeDefined();
+    const early = queue?.early ?? -1;
     let latest = p.latestTick;
     let maxPerFrame = 0;
     for (let i = 0; i < 300; i++) {
@@ -302,8 +305,8 @@ describe("ClientSim recovery paths", () => {
       latest = p.latestTick;
     }
     expect(maxPerFrame).toBeLessThanOrEqual(MAX_TICKS_PER_FRAME);
-    expect(p.latestTick - p.snapshotTick).toBeGreaterThanOrEqual(MAX_LEAD_TICKS);
-    expect(p.latestTick - p.snapshotTick).toBeLessThanOrEqual(MAX_LEAD_TICKS + 1);
+    // Exactly the server's input horizon: the newest cmd is the last one its queue accepts.
+    expect(p.latestTick - p.snapshotTick).toBe(MAX_LEAD_TICKS);
     expect(c.alpha).toBe(1);
     // The server resumes: the cmds it queued are the ones the client predicted, so the client
     // reconciles without a hard resync or a correction, and holds its clock back to the normal
@@ -315,6 +318,7 @@ describe("ClientSim recovery paths", () => {
     const after = h.totals();
     expect(after.hardResyncs).toBe(0);
     expect(after.corrections - before.corrections).toBe(0);
+    expect(queue?.early).toBe(early);
     expect(c.clock.holds).toBeGreaterThanOrEqual(2);
     expect(c.clock.fastForwards).toBe(0);
     expect(h.lead()).toBeLessThanOrEqual(c.settings.inputBuffer + 3);

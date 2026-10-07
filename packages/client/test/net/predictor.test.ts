@@ -226,6 +226,21 @@ describe("Predictor (docs/05 §5)", () => {
     expect(p.latestTick).toBe(150);
     expect(p.corrections.total).toBe(0);
   });
+
+  it("hard-resyncs on a snapshot out of the rings even when its cvar hash differs", () => {
+    // A params resync would re-simulate from cmds the ring no longer holds and leave the state
+    // at the old tick while latestTick stays ahead.
+    const reg = registry();
+    const hash = registryCvarHash(reg) & 0xffff;
+    const p = predictor(reg);
+    const s = spawnState();
+    expect(p.onSnapshot(140, s, hash)).toBe(SNAPSHOT_HARD_RESYNC);
+    for (let t = 141; t <= 141 + CMD_RING_CAPACITY + 10; t++) p.predict(cmdFor(t));
+    s.origin[0] = 256;
+    expect(p.onSnapshot(150, s, hash ^ 1)).toBe(SNAPSHOT_HARD_RESYNC);
+    expect([p.latestTick, p.snapshotTick]).toEqual([150, 150]);
+    expect(playerStateEquals(p.state, s)).toBe(true);
+  });
 });
 
 describe("CmdRing and CorrectionLog", () => {

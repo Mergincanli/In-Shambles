@@ -357,7 +357,7 @@ The loop is driven by a monotonic clock with an accumulator. **Never `setInterva
 
 **Decoding**
 - Strict bounds-checked decoding and max message sizes.
-- Rate limit: ≤ 2 × `INPUT_RATE` packets/s. Excess is dropped and counted as strikes.
+- Rate limit: ≤ 2 × `INPUT_RATE` packets/s. Excess is dropped and counted as strikes. The limit allows a burst of at least 64 packets: a client's anchor fill at spawn or after a hard resync sends one INPUT per filled tick in one frame (D-028).
 
 **Input validation**
 - Clamp move axes and angles.
