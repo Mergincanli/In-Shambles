@@ -114,6 +114,8 @@
 
 **Out of scope:** combat, relevance culling (send everything in M3), WebTransport.
 
+**Records:** the approved plan and the design it builds on are `docs/design/M3-plan.md` and `docs/design/M3-design.md`.
+
 **Acceptance**
 - NET-01, 02, 04, 05, 07, 08 (bandwidth measured, even if relevance comes later), 09, 10, 12 pass.
 - 16 bots + 1 human on `arena_greybox` at `wan-100-loss1`: smooth remote motion, server tick p99 ≤ 4 ms.
