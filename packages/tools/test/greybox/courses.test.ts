@@ -5,7 +5,6 @@ import { join } from "node:path";
 import {
   boxContents,
   buildBrush,
-  buildCollisionWorld,
   CMAP_PREAMBLE_BYTES,
   CMAP_SECTION_ENTRY_BYTES,
   CMAP_TAG_VERTICES,
@@ -35,57 +34,33 @@ import { describe, expect, it } from "vitest";
 import { encodeCmap } from "../../src/greybox/cmapEncode";
 import { COURSE_MAP_DIR, COURSES, courseFileName } from "../../src/greybox/courses";
 import { MATERIAL_FLOOR_ALT } from "../../src/greybox/courses/common";
-import { MATERIAL_FLOOR } from "../../src/greybox/MapBuilder";
+import { MATERIAL_FLOOR, MATERIAL_LADDER_FACE } from "../../src/greybox/MapBuilder";
 import { fromRoot } from "../../src/paths";
+import { courseAnchors, coursePath, loadCourse, type P3 } from "../../src/scenarios/course";
 
 // docs/07 §3 and §6, M1 design I: the courses compile byte-identically, the committed
 // content/maps files are current, and each course holds the fixtures it promises, checked
 // through the loader (decodeCmap + buildCollisionWorld) and traces, with places named by anchors.
 
-type P3 = readonly [number, number, number];
-
 const SPAWN_CLASSES = ["info_player_start", "info_spawn_red", "info_spawn_blue"] as const;
-
-function committedPath(name: string): string {
-  return fromRoot(...COURSE_MAP_DIR, courseFileName(name));
-}
 
 function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
   return a.length === b.length && a.every((x, i) => x === b[i]);
 }
 
-interface Loaded {
-  readonly cmap: Cmap;
-  readonly world: CollisionWorld;
-}
-
-const loaded = new Map<string, Loaded>();
-
-/** The committed file, decoded with hash verification, as the game loads it. */
-function load(name: string): Loaded {
-  let l = loaded.get(name);
-  if (l === undefined) {
-    const cmap = decodeCmap(new Uint8Array(readFileSync(committedPath(name))));
-    l = { cmap, world: buildCollisionWorld(cmap) };
-    loaded.set(name, l);
-  }
-  return l;
-}
-
 function anchors(cmap: Cmap): Map<string, P3[]> {
   const out = new Map<string, P3[]>();
-  for (const e of cmap.entities) {
-    if (e.classname !== "info_target") continue;
-    const name = e.props.targetname ?? "";
-    const list = out.get(name) ?? [];
-    if (e.origin !== undefined) list.push(e.origin);
-    out.set(name, list);
+  for (const [name, list] of courseAnchors(cmap)) {
+    out.set(
+      name,
+      list.map((a) => a.origin),
+    );
   }
   return out;
 }
 
 function anchor(name: string, course: string): P3 {
-  const list = anchors(load(course).cmap).get(name) ?? [];
+  const list = anchors(loadCourse(course).cmap).get(name) ?? [];
   expect(list.length, `${course} anchor ${name}`).toBe(1);
   return list[0] as P3;
 }
@@ -126,7 +101,7 @@ function groundZ(world: CollisionWorld, p: P3, dx = 0, dy = 0): number {
 }
 
 function groundMaterial(course: string, p: P3, dx = 0, dy = 0): string {
-  const { cmap, world } = load(course);
+  const { cmap, world } = loadCourse(course);
   const tr = groundBelow(world, p, dx, dy);
   return cmap.materials[cmap.planeMaterial[tr.plane] ?? -1] ?? "?";
 }
@@ -156,6 +131,8 @@ const EXPECTED_ANCHORS: Record<string, readonly string[]> = {
   movement_lab: [
     "runway_start",
     "runway_end",
+    "open_sw",
+    "open_center",
     ...[16, 18, 19].flatMap((h) => [`step_${h}_base`, `step_${h}_top`]),
     "stairs_base",
     "stairs_top",
@@ -244,7 +221,7 @@ describe("greybox courses: compiled files", () => {
       expect(sameBytes(bytes, encodeCmap(course.build()))).toBe(true);
       expect(decodeCmap(bytes).contentHash).toBe(first.contentHash);
       const stale = `content/maps/${courseFileName(name)} is stale: run pnpm greybox and commit`;
-      const path = committedPath(name);
+      const path = coursePath(name);
       expect(existsSync(path), stale).toBe(true);
       expect(sameBytes(bytes, new Uint8Array(readFileSync(path))), stale).toBe(true);
     },
@@ -263,10 +240,9 @@ describe("greybox courses: compiled files", () => {
       expect(readdirSync(out).sort()).toEqual([...names].sort());
       for (const c of COURSES) {
         const written = new Uint8Array(readFileSync(join(out, courseFileName(c.name))));
-        expect(
-          sameBytes(written, new Uint8Array(readFileSync(committedPath(c.name)))),
-          c.name,
-        ).toBe(true);
+        expect(sameBytes(written, new Uint8Array(readFileSync(coursePath(c.name)))), c.name).toBe(
+          true,
+        );
       }
     } finally {
       rmSync(out, { recursive: true, force: true });
@@ -279,7 +255,7 @@ describe("greybox courses: compiled files", () => {
   });
 
   it.each(COURSES.map((c) => c.name))("%s decodes with its hash verified", (name) => {
-    const bytes = new Uint8Array(readFileSync(committedPath(name)));
+    const bytes = new Uint8Array(readFileSync(coursePath(name)));
     expect(() => decodeCmap(bytes, { verifyHash: true })).not.toThrow();
     // One ulp off the first vertex's u: still a valid file, so only the hash can tell.
     const broken = bytes.slice();
@@ -299,7 +275,7 @@ describe("greybox courses: compiled files", () => {
 
 describe.each(COURSES.map((c) => c.name))("greybox course %s: sanity", (name) => {
   it("every brush rebuilds from its faces to exactly the stored planes and bounds", () => {
-    const { cmap, world } = load(name);
+    const { cmap, world } = loadCourse(name);
     const b = cmap.brushes;
     expect(world.brushCount).toBe(b.firstPlane.length);
     for (let i = 0; i < b.firstPlane.length; i++) {
@@ -316,7 +292,7 @@ describe.each(COURSES.map((c) => c.name))("greybox course %s: sanity", (name) =>
   });
 
   it("bounds, brush bounds and entity origins are finite and within ±16384", () => {
-    const { cmap } = load(name);
+    const { cmap } = loadCourse(name);
     const values = [
       ...cmap.bounds.mins,
       ...cmap.bounds.maxs,
@@ -330,7 +306,7 @@ describe.each(COURSES.map((c) => c.name))("greybox course %s: sanity", (name) =>
   });
 
   it("spawns and anchors are standing spots: hull clear, ground within 1 u", () => {
-    const { cmap, world } = load(name);
+    const { cmap, world } = loadCourse(name);
     const spots = cmap.entities.filter(
       (e) =>
         e.classname === "info_target" || (SPAWN_CLASSES as readonly string[]).includes(e.classname),
@@ -352,7 +328,7 @@ describe.each(COURSES.map((c) => c.name))("greybox course %s: sanity", (name) =>
   });
 
   it("spawns of each class are at least 64 u apart", () => {
-    const { cmap } = load(name);
+    const { cmap } = loadCourse(name);
     for (const cls of SPAWN_CLASSES) {
       const list = cmap.entities.filter((e) => e.classname === cls).map((e) => e.origin as P3);
       for (let i = 0; i < list.length; i++) {
@@ -367,7 +343,7 @@ describe.each(COURSES.map((c) => c.name))("greybox course %s: sanity", (name) =>
   });
 
   it("every anchor the course promises exists exactly once, and no name repeats", () => {
-    const found = anchors(load(name).cmap);
+    const found = anchors(loadCourse(name).cmap);
     for (const [anchorName, list] of found) expect(list.length, anchorName).toBe(1);
     expect([...found.keys()].sort()).toEqual([...(EXPECTED_ANCHORS[name] ?? [])].sort());
   });
@@ -377,7 +353,7 @@ describe("movement_lab fixtures", () => {
   const course = "movement_lab";
 
   it("has a clear 6144 × 6144 u floor with the runway on it", () => {
-    const { world } = load(course);
+    const { world } = loadCourse(course);
     for (const [x, y] of [
       [-3056, -3056],
       [3056, 3056],
@@ -407,6 +383,23 @@ describe("movement_lab fixtures", () => {
     expect(sweep(world, rest(start), rest(end), HULL_STANDING_MAXS).fraction).toBe(1);
   });
 
+  it("has open-floor starts: open_sw faces 7900 u of clear floor up the diagonal", () => {
+    const { cmap, world } = loadCourse(course);
+    const sw = anchor("open_sw", course);
+    const center = anchor("open_center", course);
+    const yaw = (a: string) => courseAnchors(cmap).get(a)?.[0]?.yawDegrees;
+    expect(yaw("open_sw")).toBe(45);
+    expect(yaw("open_center")).toBe(0);
+    expect([center[0], center[1]]).toEqual([0, 0]);
+    const far = 7900 * Math.SQRT1_2;
+    const tr = sweep(world, rest(sw), rest(sw, far, far), HULL_STANDING_MAXS);
+    expect(tr.startSolid).toBe(false);
+    expect(tr.fraction).toBe(1);
+    expect(groundZ(world, sw, far, far)).toBe(0);
+    // The centre is the T-junction of the floor's seams, where a ray finds no brush to enter.
+    expect(groundZ(world, center, 8, 8)).toBe(0);
+  });
+
   it("tiles the north half of the open floor in alternating 128 u strips along y", () => {
     for (let i = 0; i < 23; i++) {
       const a = groundMaterial(course, [0, 64 + 128 * i, 24]);
@@ -427,7 +420,7 @@ describe("movement_lab fixtures", () => {
   });
 
   it("times the runway with triggers 2048 u apart that a run between the anchors crosses", () => {
-    const { cmap, world } = load(course);
+    const { cmap, world } = loadCourse(course);
     const start = anchor("runway_start", course);
     const end = anchor("runway_end", course);
     const bounds = (cls: string): number[] => {
@@ -465,7 +458,7 @@ describe("movement_lab fixtures", () => {
   });
 
   it("has single steps of 16, 18 and 19 u", () => {
-    const { world } = load(course);
+    const { world } = loadCourse(course);
     for (const h of [16, 18, 19]) {
       expect(groundZ(world, anchor(`step_${h}_top`, course))).toBe(h);
       expect(groundZ(world, anchor(`step_${h}_base`, course))).toBe(0);
@@ -473,7 +466,7 @@ describe("movement_lab fixtures", () => {
   });
 
   it("D-017: a step-up trace clears 16 and 18 u, not 19 u", () => {
-    const { world } = load(course);
+    const { world } = loadCourse(course);
     for (const h of [16, 18, 19]) {
       const base = anchor(`step_${h}_base`, course);
       const up = sweep(world, rest(base), rest(base, 0, 0, 18), HULL_STANDING_MAXS);
@@ -493,7 +486,7 @@ describe("movement_lab fixtures", () => {
   });
 
   it("has stairs up to a landing", () => {
-    const { world } = load(course);
+    const { world } = loadCourse(course);
     expect(groundZ(world, anchor("stairs_top", course))).toBe(128);
   });
 
@@ -502,7 +495,7 @@ describe("movement_lab fixtures", () => {
     ["071", 0.71, true],
     ["080", 0.8, true],
   ] as const)("slope %s has normal z exactly fround(%d) (walkable: %s)", (tag, nz, walkable) => {
-    const { world } = load(course);
+    const { world } = loadCourse(course);
     const base = anchor(`slope_${tag}_base`, course);
     const top = anchor(`slope_${tag}_top`, course);
     const mid: P3 = [base[0], (base[1] + top[1]) / 2, top[2]];
@@ -517,7 +510,7 @@ describe("movement_lab fixtures", () => {
   });
 
   it("has water levels 1, 2 and 3 in the wading, waist-deep and deep sections", () => {
-    const { world } = load(course);
+    const { world } = loadCourse(course);
     expect(waterLevel(world, rest(anchor("water_wade", course)))).toBe(1);
     expect(waterLevel(world, rest(anchor("water_waist", course)))).toBe(2);
     expect(waterLevel(world, rest(anchor("water_deep", course)))).toBe(3);
@@ -526,23 +519,29 @@ describe("movement_lab fixtures", () => {
     expect(groundZ(world, anchor("water_deep", course))).toBe(-128);
   });
 
-  it("has a ladder: a LADDER volume in front of a SURF_LADDER wall face", () => {
-    const { world } = load(course);
+  it("has a ladder: a SURF_LADDER wall face with the rung texture, and no LADDER volume (D-024)", () => {
+    const { world, cmap } = loadCourse(course);
     const base = anchor("ladder_base", course);
     const o = rest(base);
     const mins = vec3(o[0] - 15, o[1] - 15, o[2] - 24);
     const maxs = vec3(o[0] + 15, o[1] + 15, o[2] + 32);
-    expect(boxContents(world, mins, maxs) & CONTENTS_LADDER).toBe(CONTENTS_LADDER);
+    expect(boxContents(world, mins, maxs) & CONTENTS_LADDER).toBe(0);
+    expect([...cmap.brushes.contents].some((c) => (c & CONTENTS_LADDER) !== 0)).toBe(false);
     const tr = ray(world, o, rest(base, 0, 64));
     expect(tr.fraction).toBeLessThan(1);
     expect([...tr.normal]).toEqual([0, -1, 0]);
     expect(tr.surfaceFlags & SURF_LADDER).toBe(SURF_LADDER);
     expect(tr.contents).toBe(CONTENTS_SOLID);
+    expect(cmap.materials[cmap.planeMaterial[tr.plane] as number]).toBe(MATERIAL_LADDER_FACE);
+    // The standing hull at the base is 1 u from the face: within pm_ladderReach (2 u, D-024).
+    const reach = sweep(world, o, rest(base, 0, 2), HULL_STANDING_MAXS);
+    expect(reach.fraction).toBeLessThan(1);
+    expect(reach.surfaceFlags & SURF_LADDER).toBe(SURF_LADDER);
     expect(groundZ(world, anchor("ladder_top", course))).toBeGreaterThanOrEqual(256);
   });
 
   it("D-017: the 48 u tunnel passes a crouched hull at floor + 1/32 and blocks a standing one", () => {
-    const { world } = load(course);
+    const { world } = loadCourse(course);
     const entry = anchor("tunnel_entry", course);
     const exit = anchor("tunnel_exit", course);
     const crouched = sweep(world, rest(entry), rest(exit), HULL_CROUCHED_MAXS);
@@ -562,7 +561,7 @@ describe("jump_lab fixtures", () => {
   const course = "jump_lab";
 
   it.each(range(64, 320, 32))("gap %d u: deck edge to landing edge, floor below", (gap) => {
-    const { world } = load(course);
+    const { world } = loadCourse(course);
     const takeoff = anchor(`gap_${gap}_takeoff`, course);
     const landing = anchor(`gap_${gap}_landing`, course);
     const edge = takeoff[0] + 16;
@@ -575,13 +574,13 @@ describe("jump_lab fixtures", () => {
   });
 
   it.each(range(24, 120, 8))("ledge %d u", (h) => {
-    const { world } = load(course);
+    const { world } = loadCourse(course);
     expect(groundZ(world, anchor(`ledge_${h}_top`, course))).toBe(h);
     expect(groundZ(world, anchor(`ledge_${h}_base`, course))).toBe(0);
   });
 
   it("has a chimney: walls 64 u apart and 512 u tall", () => {
-    const { world } = load(course);
+    const { world } = loadCourse(course);
     const base = anchor("chimney_base", course);
     // Both walls stand 64 u apart from the floor to just under 512 u, and neither goes higher.
     for (const dz of [0, 480]) {
@@ -603,7 +602,7 @@ describe("jump_lab fixtures", () => {
     [45, Math.SQRT1_2, Math.SQRT1_2],
     [60, 0.5, Math.sqrt(3) / 2],
   ])("kick lane %d°: a free-standing wall facing the take-off, at least 64 u tall", (deg, c, s) => {
-    const { world } = load(course);
+    const { world } = loadCourse(course);
     const takeoff = anchor(`kick_${deg}_takeoff`, course);
     for (const dz of [-16, 40]) {
       const tr = ray(world, at(takeoff, 0, 0, dz), at(takeoff, 128 * s, -128 * c, dz));
@@ -613,7 +612,7 @@ describe("jump_lab fixtures", () => {
       expect(tr.normal[2]).toBe(0);
     }
     // The wall's brush runs from 16 u under the floor top to 240 u above it.
-    const { cmap } = load(course);
+    const { cmap } = loadCourse(course);
     const cx = takeoff[0] + 64 * s;
     const cy = takeoff[1] - 64 * c;
     const walls: number[] = [];
@@ -637,7 +636,7 @@ describe("jump_lab fixtures", () => {
   });
 
   it("has a 24 u curb, too low to kick off", () => {
-    const { world } = load(course);
+    const { world } = loadCourse(course);
     expect(groundZ(world, anchor("curb_top", course))).toBe(24);
     const base = anchor("curb_base", course);
     expect(ray(world, at(base, 0, 0, -23), at(base, 0, 128, -23)).fraction).toBeLessThan(1);
@@ -654,7 +653,7 @@ describe("slide_lab fixtures", () => {
     ["44", true],
     ["40_blocked", false],
   ] as const)("D-017: slide gap %s passes a crouched hull at floor + 1/32: %s", (gap, passes) => {
-    const { world } = load(course);
+    const { world } = loadCourse(course);
     const entry = anchor(`slide_gap_${gap}_entry`, course);
     const exit = anchor(`slide_gap_${gap}_exit`, course);
     const height = Number.parseInt(gap, 10);
@@ -672,7 +671,7 @@ describe("slide_lab fixtures", () => {
   });
 
   it("has door frames 48 u wide and 96 u tall that a standing hull walks through", () => {
-    const { world } = load(course);
+    const { world } = loadCourse(course);
     const entry = anchor("door_entry", course);
     const exit = anchor("door_exit", course);
     expect(sweep(world, rest(entry), rest(exit), HULL_STANDING_MAXS).fraction).toBe(1);
@@ -686,7 +685,7 @@ describe("slide_lab fixtures", () => {
   });
 
   it("has a ramp into a long lane with alternating 128 u marker tiles", () => {
-    const { world } = load(course);
+    const { world } = loadCourse(course);
     const top = anchor("ramp_top", course);
     const start = anchor("lane_start", course);
     const end = anchor("lane_end", course);
@@ -708,7 +707,7 @@ describe("fall_tower fixtures", () => {
   const course = "fall_tower";
 
   it.each([128, 256, 384, 512, 640, 768, 1024])("platform %d u above the floor", (h) => {
-    const { world } = load(course);
+    const { world } = loadCourse(course);
     const top = anchor(`platform_${h}_top`, course);
     expect(groundZ(world, top)).toBe(h);
     expect(groundZ(world, anchor(`platform_${h}_landing`, course))).toBe(0);
@@ -720,7 +719,7 @@ describe("fall_tower fixtures", () => {
   });
 
   it("has a 128 u deep water landing pool beside the 1024 u platform", () => {
-    const { world } = load(course);
+    const { world } = loadCourse(course);
     const landing = anchor("pool_landing", course);
     expect(groundZ(world, landing)).toBe(-128);
     expect(waterLevel(world, rest(landing))).toBe(3);
@@ -734,7 +733,7 @@ describe("fall_tower fixtures", () => {
   it.each([256, 512, 768])(
     "has a catch rail at %d u under a clear drop, with a face a chest probe cannot skip",
     (h) => {
-      const { world } = load(course);
+      const { world } = loadCourse(course);
       const rail = anchor(`rail_${h}_top`, course);
       const drop = anchor(`rail_${h}_drop`, course);
       expect(groundZ(world, rail)).toBe(h);
@@ -764,7 +763,7 @@ describe("arena_greybox fixtures", () => {
   const course = "arena_greybox";
 
   it("has 16 info_player_start, 8 info_spawn_red and 8 info_spawn_blue", () => {
-    const { cmap } = load(course);
+    const { cmap } = loadCourse(course);
     const count = (cls: string) => cmap.entities.filter((e) => e.classname === cls).length;
     expect(count("info_player_start")).toBe(16);
     expect(count("info_spawn_red")).toBe(8);
@@ -772,7 +771,7 @@ describe("arena_greybox fixtures", () => {
   });
 
   it.each(["red", "blue"])("the %s base door is at least 48 × 96 u and walkable", (team) => {
-    const { world } = load(course);
+    const { world } = loadCourse(course);
     const inside = anchor(`${team}_door_inside`, course);
     const outside = anchor(`${team}_door_outside`, course);
     expect(sweep(world, rest(inside), rest(outside), HULL_STANDING_MAXS).fraction).toBe(1);
@@ -786,7 +785,7 @@ describe("arena_greybox fixtures", () => {
   });
 
   it("has a covered corridor at least 64 u wide", () => {
-    const { world } = load(course);
+    const { world } = loadCourse(course);
     const west = anchor("corridor_west", course);
     const east = anchor("corridor_east", course);
     expect(sweep(world, rest(west), rest(east), HULL_STANDING_MAXS).fraction).toBe(1);
@@ -797,7 +796,7 @@ describe("arena_greybox fixtures", () => {
   });
 
   it("puts each team's spawns inside its own base", () => {
-    const { cmap } = load(course);
+    const { cmap } = loadCourse(course);
     const redDoor = anchor("red_door_inside", course);
     const blueDoor = anchor("blue_door_inside", course);
     expect(redDoor[0]).toBeLessThan(blueDoor[0]);
@@ -812,7 +811,7 @@ describe("arena_greybox fixtures", () => {
     ["ramp_north_base", 1],
     ["ramp_south_base", -1],
   ] as const)("leaves at least 64 u clear in front of %s", (name, dir) => {
-    const { world } = load(course);
+    const { world } = loadCourse(course);
     const base = anchor(name, course);
     // The anchor stands 24 u past the foot; 64 u past the foot plus a hull half-width is clear.
     const tr = sweep(world, rest(base), rest(base, 0, dir * (64 - 24 + 16)), HULL_STANDING_MAXS);
@@ -828,7 +827,7 @@ describe("arena_greybox fixtures", () => {
     [-384, -384, 0, -1, 320],
     [384, -384, 0, -1, 320],
   ] as const)("has low cover in front of the spawn at (%d, %d)", (x, y, dx, dy, reach) => {
-    const { world } = load(course);
+    const { world } = loadCourse(course);
     const o: P3 = [x, y, 24];
     // Blocked at the standing origin's height, open 48 u higher: cover to crouch behind.
     const low = ray(world, at(o), at(o, reach * dx, reach * dy));
@@ -838,7 +837,7 @@ describe("arena_greybox fixtures", () => {
   });
 
   it("has verticality: a 128 u centre platform and a 96 u ledge", () => {
-    const { world } = load(course);
+    const { world } = loadCourse(course);
     expect(groundZ(world, anchor("center_top", course))).toBe(128);
     expect(groundZ(world, anchor("ledge_south_top", course))).toBe(96);
     expect(groundZ(world, anchor("ramp_north_base", course))).toBe(0);

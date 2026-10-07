@@ -70,16 +70,35 @@
 
 Stamina cvars are in §5.2.
 
+### 2.3 M2 base additions
+
+New ESTIMATEs for the base ladder and water moves (M2 plan, "New tunables"; M2 design §4). Like every ESTIMATE they are replicated cvars, tuned by feel or by reference captures.
+
+| Cvar | Default | Label | Meaning |
+|---|---|---|---|
+| `pm_ladderScale` | 0.5 | ESTIMATE | Ladder speed = `pm_runSpeed` × this (§4.14). |
+| `pm_ladderFacing` | 0.5 | ESTIMATE | Stay attached only while dot(forward, −ladder normal) exceeds this (§4.14). |
+| `pm_ladderReach` | 2 | ESTIMATE | u; length of the forward probe that finds the ladder face. |
+| `pm_ladderJumpPush` | 150 | ESTIMATE | u/s; jumping off adds this along the ladder normal. |
+| `pm_waterSinkSpeed` | 60 | ESTIMATE | u/s; the swim wish speed downward with no move or vertical input (§4.13). |
+
 ## 3. Tick pipeline (per player, per tick)
 
 Inputs: the previous `PlayerState` and the `UserCmd` for this tick (`docs/05` §3: `forwardmove`/`rightmove` in −127..127, buttons, view angles). Output: the next `PlayerState` plus events.
 
+**Contract** (D-023): `pmove(ps, cmd, world, params, dt, events, debugLog)` updates `ps` in place.
+- `cmd` is already sanitized (`sanitizeUserCmd`, `docs/05` §3.4).
+- `dt` is a parameter: `TICK_DT` in play, other tick lengths only in tests (MV-04 checks 1/120 s).
+- `params` holds the replicated movement cvars as plain fields, refreshed outside the tick when the cvar registry's version changes.
+- `events` (step, jump, land; may be null) and `debugLog` (the traces run; may be null) are output only. They never feed the next tick and are not part of `PlayerState`; remote players get events through the entity state in M3.
+- The hull changes only in the pre-checks, at the tick's start origin.
+
 1. **Copy view angles** from the cmd and compute forward/right/up vectors.
-2. **Pre-checks:**
-   - water level (0 = dry, 1 = feet, 2 = waist, 3 = submerged) from content samples at feet, waist and eyes
-   - ladder contact
-   - crouch transitions (try to stand if crouch released; stay crouched if the standing hull doesn't fit)
-   - limp state
+2. **Pre-checks**, in this order, at the tick's start origin (D-024):
+   - crouch transitions (try to stand if crouch released; stay crouched if the standing hull doesn't fit), which pick the tick's hull
+   - water level (0 = dry, 1 = feet, 2 = waist, 3 = submerged) from content samples at feet, waist and eyes (§4.13), the eyes for the stance just picked
+   - ladder contact (§4.14), probed with that hull
+   - limp state (M4)
 3. **Ground trace** (§4.10). If the player was airborne last tick and is grounded now, run **landing** (§5.6/§5.7): fall damage, goomba, slide entry check.
 4. **Mode dispatch** (first match wins):
    1. `climbing` → ledge climb (§5.5)
@@ -92,7 +111,7 @@ Inputs: the previous `PlayerState` and the `UserCmd` for this tick (`docs/05` §
    - reset the wall-jump counter if on walkable ground
    - update stamina (§5.2), timers, breath/drowning
    - emit events: footstep, jump, land, wallkick, grab, slide start/end, fall damage
-6. **Quantize** origin and velocity (§6).
+6. **Snap and quantize** (§6): the origin goes to the nearest clear 1/32 u grid point for the tick's hull (`snapOrigin`, D-017; last tick's origin is the fallback), then the whole state is quantized.
 
 The **order matters**: on a grounded tick the jump check happens **before** friction. A jump pressed on the landing tick therefore skips ground friction entirely. This is what makes chained hops keep their speed.
 
@@ -106,6 +125,7 @@ Let `f`, `r`, `u` = forwardmove, rightmove, upmove (−127..127).
 - Otherwise: `scale = speed × max(|f|,|r|,|u|) / (127 × sqrt(f² + r² + u²))`.
 
 `speed` is the current speed cap: run, sprint, walk (`runSpeed × walkScale`), times `duckScale` when crouched and `limpScale` when limping.
+- **Known limit (open, D-024):** the crouch factor applies in the air too, so a crouch in the air cuts the air wish speed (§4.5) to `runSpeed × duckScale`, weakening air strafing on a crouch-jump and on every M4 power-slide approach. The Q3 lineage applies it on the ground only.
 
 The wish velocity is built from `f` and `r` along the movement basis, so diagonal input never exceeds the cap.
 
@@ -114,6 +134,7 @@ The wish velocity is built from `f` and `r` along the movement basis, so diagona
   - If `s < 1`, zero the horizontal velocity.
   - Otherwise: `control = max(s, stopSpeed)`, `drop = control × friction × dt`, `newSpeed = max(s − drop, 0)`, and scale the velocity by `newSpeed / s`.
 - Water adds `drop += s × waterFriction × waterLevel × dt` (use full 3D speed in water).
+  - In M2 (D-024) the walk move measures `s` as the horizontal speed for both terms, so wading (level 1) only adds the water term to its ground friction; the run, walk and crouch caps are unchanged, because at each cap the two terms together remove less than one tick of `pm_accelerate`. The swim move (§4.13) uses the water term alone on the 3D speed, and the ladder move (§4.14) uses the ground term on the 3D speed; below 1 u/s of 3D speed they zero the whole velocity.
 - Sliding uses `slideFriction` instead of `friction` and **no** `stopSpeed` floor.
 
 ### 4.3 Accelerate (identical for ground and air; only the coefficient differs)
@@ -159,17 +180,20 @@ Up to 4 iterations, tracking up to 5 contact planes (always include the ground p
 
 Each iteration:
 1. Sweep the hull from origin by `v × timeLeft`.
-   - If the sweep starts in solid: zero vertical velocity and stop (stuck).
+   - If the sweep is **allSolid** (the box is inside one brush for the whole move): zero vertical velocity and stop (stuck). The end-of-tick snap keeps every tick's start clear, so this is a bug and asserts in dev builds. A sweep that only *starts* in solid can move out of the brush and is accepted (D-023).
    - Otherwise advance to the hit point.
    - Done if the sweep completed without hitting anything.
 2. Subtract the used fraction from `timeLeft`.
-3. If the new plane is (nearly) the same as a stored one, nudge the velocity by the normal and continue.
+3. If the new plane is (nearly) the same as a stored one (normals' dot > 0.99), nudge the velocity by the normal and continue.
 4. Clip the velocity against the new plane (§4.7). If the result still moves into another stored plane, clip against that too.
    - If moving into **two** planes, slide along their crease (cross product of the normals, keeping the velocity component along it).
    - If moving into **three**, stop.
+   - Here a stored plane counts as cleared only when the velocity leaves it at more than 0.1 u/s; slower is "moving into" it, so it is clipped and the overclip makes the velocity leave it.
 5. If the velocity now opposes the *original* velocity (dot < 0), stop. This prevents jitter in corners.
 
-Return whether any plane was hit (used by step-slide).
+With half-step gravity (§4.6) the end-of-tick velocity is clipped against the same planes as the move velocity, and is what the move leaves behind. Return whether any plane was hit (used by step-slide).
+
+The 0.99 and 0.1 u/s thresholds are design constants (`SLIDE_SAME_PLANE`, `SLIDE_LEAVE_SPEED`), not feel knobs or ESTIMATEs of the original game.
 
 ### 4.9 Step-slide move (auto stairs)
 1. Save the start origin/velocity and run slide move.
@@ -178,44 +202,72 @@ Return whether any plane was hit (used by step-slide).
 4. **Try the stepped path:**
    - Trace the hull up by `stepSize` from the start origin; if blocked at the start, give up.
    - From the raised position, with the start velocity, run slide move.
-   - Trace back down by the amount actually raised.
+   - Trace back down by the amount actually raised plus `groundTraceDist` (D-023). A player rests ε above the floor (D-017), so a trace of exactly the raise ends at the start height without reaching the floor, and a stepped path that has not yet cleared a riser would never count as landed.
+   - In the walk move (no gravity) the trace also goes down by whatever the stepped slide itself rose, so it always reaches `groundTraceDist` below the start height (D-023). Walking up a slope moves along it; at a crest the hull, riding the slope inside its ε skin, meets the platform's riser a few hundredths of a unit below its top, and a trace of only the raise would stop above the platform and leave the walk dead on that lip (MV-06). Where the plain slide clears that lip instead, the walk keeps the slope's vz onto the platform and may kick off the crest (§4.10).
    - If that lands on walkable ground, accept the stepped result; otherwise keep the unstepped one.
 5. **Compare** horizontal distance and keep whichever path got farther. Clip the velocity against the final ground plane.
-6. Emit a `step` event with the height delta. The client uses it to smooth the view height (no visual pops).
+   - The stepped path must get at least 1/16 u farther (`STEP_MIN_GAIN`). Along a wall, slope or rotated plane both paths cover the same ground to within the same-plane nudge, and without the margin rounding would pick the stepped path and report spurious steps.
+   - Within 1/16 u either way the paths **tie**: keep the unstepped origin, with the velocity of whichever path kept more horizontal speed (D-023). A plain slide that touches a riser at the end of the tick is clipped to a stop, while the stepped one, still short of the riser, kept its speed; taking the plain velocity there made stairs snag to 0 u/s.
+6. Emit a `step` event with the height delta (at least 1/32 u, one origin grid step). The client uses it to smooth the view height (no visual pops).
 
 ### 4.10 Ground trace and slopes
 - Sweep the hull `groundTraceDist` (0.25 u) straight down. No hit → airborne.
-- If moving upward (vz > 0) and `dot(v, groundNormal) > 10` → treat as airborne. This covers jumping and being launched; without it you would immediately "re-ground".
+- If moving upward (vz > 0) and `dot(v, groundNormal) > 10` → treat as airborne. This covers jumping and being launched; without it you would immediately "re-ground". The 10 u/s threshold is a design constant (`GROUND_LEAVE_SPEED`), not a feel knob or an ESTIMATE of the original game.
 - If `normal.z < minWalkNormal` → **steep**: not walkable. Apply air physics and clip against the plane, so you slide down slopes.
-- Otherwise grounded. Record ground entity and surface flags (slick, ladder, nodamage, etc. from content).
+- Otherwise grounded. Record the ground entity and surface flags. The ground is **slick** or **nodamage** when the hit plane has the `SURF_SLICK`/`SURF_NODAMAGE` face flag **or** the hit brush has `CONTENTS_SLICK`/`CONTENTS_NODAMAGE` (D-023). Bevel planes carry no face flags, but the trace keeps the brush's contents whichever plane it hits, so a ramp crest standing on the top bevel is still slick.
+- If the player was airborne and is now grounded, **clip the velocity against the ground plane** (§4.7) and emit a `land` event; its value is the downward speed at the start of the tick (D-023). A fall can end within `groundTraceDist` of the floor without the slide sweep touching it; without the clip the next walk move (§4.4 step 5) would lay the whole fall speed onto the ground as horizontal speed.
+- After the move, a player the ground trace finds grounded is **settled** onto the ground (moved to the trace's end point) before the end-of-tick snap (D-023). A walk along a slope moves by the same step every tick, so the snap rounds it by the same error every tick; without the settle that drift adds up past `groundTraceDist`, and the player would drop into an air tick (and a spurious `land`) every few ticks.
+- **Crest kick-off:** walking up a slope onto a flat crest, the velocity still carries the slope's vz on the tick the ground trace first finds the flat ground, so the rule above can make the walk airborne for one short hop (up to about 35 u from a 0.71 slope at the run cap), depending on where the tick ends at the crest. It follows from the kick-off rule as specified and is accepted (D-023, MV-06).
+- Known limit: feet exactly on the floor (an anchor start; a walk on flat ground never lifts them; the match spawns players one ε up, D-027) meet the toe of a steep wedge on its axial bevel and stop there as at a wall; feet one ε up (any player that has landed) are clipped onto the slope and jitter at the toe while forward is held (D-023, "Steep toes"; MV-06 pins both).
+- Known limit: a crevice between steep (non-walkable) planes, such as two steep slopes or a steep slope against a wall, can hold the player with zero velocity and no walkable ground, so they can neither slide out nor jump. This is accepted base-movement behaviour; maps must not build such crevices where players can reach them (a map-validation check is planned with the map pipeline, `docs/07`).
 
 ### 4.11 Jump rules
 - Requires the jump button **newly pressed** since the last jump (unless `pm_autoHop = 1`), grounded, not crouch-blocked, and not in a climb.
+  - **Crouch-blocked** means crouched with the standing hull blocked at the current origin, i.e. under a ceiling: no jump there. Crouch-jumping in the open is allowed (D-023).
 - Set `vz = jumpVelocity` (set, not add), clear grounded, set the `jumpHeld` flag, charge stamina (§5.2), emit `jump`.
 - `jumpHeld` clears when the button is released.
 
 ### 4.12 Crouch
 - Holding crouch switches to the crouched hull immediately (shrinks from the top).
 - Releasing tries to stand: sweep-test the standing hull at the current origin; stay crouched if blocked.
+  - In M2 both happen only in the pre-check at the tick's start origin (D-023, D-024): the stand test is a position test of the standing hull there, so a player walking out of a low tunnel stands on the first tick whose start origin is clear. `PMF_CROUCHED` holds the stance.
 - **Crouch-down costs stamina** (§5.2); standing up is free.
 - Crouch speed = `runSpeed × duckScale`.
 - Crouch gives **no** weapon accuracy bonus (`docs/04`).
 
 ### 4.13 Water
+- **Water level** (D-024): `pointContents` samples on the origin's vertical, counted from the feet (the hull bottom, origin z − 24): feet + 1 u, feet + 28 u (the middle of the standing hull) and the eye, feet + 50 u standing or feet + 36 u crouched (origin + 26 / + 12, §2). Each level needs the samples below it: 1 = feet, 2 = waist, 3 = eyes under water. `PMF_IN_WATER` is set at level ≥ 1. The sample heights are design constants (`WATER_SAMPLE_FEET`, `WATER_SAMPLE_WAIST`), not ESTIMATEs. It is computed in the pre-check and again after the move.
 - **Water level ≥ 2 → swim:**
   - Wish velocity uses the full 3D view vectors. **Jump = up, crouch = down** (UrT), so the player can strafe and aim like on ground.
+    - Forward and right go along the 3D view forward and right; the vertical axis is world z: jump adds +127 and crouch −127 to the cmd's up axis (clamped to ±127), and the three axes go through command scale (§4.1) together, without the crouch factor.
+    - World z is not orthogonal to a pitched view forward, so the summed wish is capped at the speed command scale picked (never stretched): forward + jump looking straight up swims at 160 u/s, not √2 × 160.
   - Speed scaled by `swimScale`.
-  - With no input, sink slowly (wish z ≈ −60 u/s).
+  - With no input, sink slowly (wish z = −`pm_waterSinkSpeed`, 60 u/s, ESTIMATE).
+    - "No input" means the forward, right and vertical axes are all 0; jump and crouch held together cancel, so they sink too. The sink wish is not scaled by `swimScale`.
+  - No gravity. Friction is the water term only (§4.2), acceleration `pm_waterAccelerate`, then a step-slide without gravity (§4.9; against the floor plane when grounded). Jump in the swim move swims; it never starts a ground jump.
+  - **Climbing out** (D-024): the step lifts a swimmer onto an edge up to `pm_stepSize` above its **feet**, not above the water. A swimmer rising with no ground below does not step (§4.9 step 3), so the step happens at the top of the bob, where the feet are about 24.5 u under the surface: the edge must be about 6 u or more below the water surface. A swimmer coming up from depth at full speed overshoots the bob and reaches an edge up to about 7 u above the surface at pitch 0 (a little more looking up). An edge flush with the surface traps a bobbing swimmer until the water-jump (M4): every deep pool needs a shallow exit or a rim at least 6 u below the surface (the water unit tests pin the envelope).
+  - Rising to the surface: once the waist sample leaves the water (level 1) the player is in air or walk moves again, falls back and swims up again, bobbing with the waist at the surface. **Water-jump** (climbing out of deep water onto a high edge) is M4.
 - Friction per §4.2; acceleration `waterAccelerate`. **No sprint. No stamina regen.**
 - **Breath** (FACT): 16 s of air while submerged (level 3), refilled instantly on surfacing. After it runs out, drowning kills in 8 s (≈12.5 HP/s).
 
 ### 4.14 Ladders
-- **Ladder contact:** the hull touches a ladder-flagged surface **and** the player faces it (dot(forward, −normal) > 0.5, ESTIMATE). Turning away too far detaches.
+- **Ladder contact:** the hull touches a ladder-flagged surface **and** the player faces it (dot(forward, −normal) > `pm_ladderFacing`, 0.5, ESTIMATE). Turning away too far detaches.
+  - **Detection** (D-024): the pre-check sweeps the tick's hull horizontally `pm_ladderReach` (2 u, ESTIMATE) along the yaw-only forward (pitch is ignored). Contact means the sweep hits a plane with the `SURF_LADDER` face flag and dot(forward, −n) > `pm_ladderFacing`. Only the face flag counts; `CONTENTS_LADDER` volumes stay reserved and are ignored by movement.
+  - **No attach while moving away:** a player whose velocity leaves the face faster than 16 u/s (v·n > `LADDER_DETACH_SPEED`, a design constant) does not attach, so a jump-off never re-attaches on the next tick.
+  - **On the ground** the ladder engages only while forward is held (forward > 0); standing at its foot or walking back from it is walking.
+  - `PMF_ON_LADDER` holds the contact for the tick.
 - On the ladder:
   - **forward = up, back = down**, regardless of pitch (FACT); strafe moves sideways along it.
-  - No gravity while attached; ladder speed ≈ `runSpeed × 0.5` (ESTIMATE).
-  - Jumping off pushes away from the ladder normal.
+    - The wish is the cmd's forward axis on world z plus its right axis along the view right projected onto the face plane, through command scale (§4.1, without the crouch factor), times `pm_ladderScale`.
+  - No gravity while attached; ladder speed = `runSpeed × pm_ladderScale` (0.5, ESTIMATE).
+    - Friction is the ground term on the 3D speed (§4.2), without the water term even where the ladder reaches into water, and acceleration `pm_accelerate`, so the climb converges to exactly the ladder speed and stops within about 0.4 s of letting go; then a slide move without gravity or ground plane.
+  - Jumping off pushes away along the ladder normal (`pm_ladderJumpPush`, 150 u/s, ESTIMATE).
+    - It takes a fresh jump press (the `jumpHeld` edge, §4.11, or `pm_autoHop`), adds n × `pm_ladderJumpPush` to the velocity, detaches at once and emits `jump`.
   - No slide-down.
+  - **At the top** the hull rises past the face, the next probe misses, and the climb ends in an air move that carries the player over the edge onto the top (MV-18: `ladder_base` to `ladder_top`, 384 u, in about 3.1 s).
+  - Ladder faces are vertical walls in M2; climbing is straight up world z whatever the face's tilt.
+  - **Known limit (open, D-024):** a jump at a ladder's foot with forward held pushes off the ladder (the ladder move is dispatched first) rather than jumping. A standing jump at the foot with no move input, facing the face, is caught by the ladder on the next tick (the forward rule applies on the ground only, and a vertical jump has v·n = 0), and the player hangs about 35 u up until back or jump is pressed.
+  - **Known limit (open, D-024):** a ladder cannot be mounted from its top. Walking backward off the top edge toward the face leaves it faster than `LADDER_DETACH_SPEED`, so contact is refused and the player falls.
 - Climbing is free (no stamina).
 
 ## 5. UrT mechanics layer
@@ -389,7 +441,7 @@ This makes the client's predicted state **bit-identical** to the server's state 
 - `flags` bits 0–9 are the ten flags above, in the order listed; new flags take the next bit.
 - Every scalar field holds an integer. Quantize clamps `origin` to ±16384 u and `velocity` to ±(2^19 − 1)/16 u/s (the i20 range) per axis, wraps the view angles to u16, clamps `groundEntity` to −1…32767 (32767 is the world) and `waterLevel` to 0–3, truncating toward zero.
 - A non-finite value is a bug (a dev assert). With asserts off it falls back to 0, except `groundEntity`, which falls back to −1 (none) because 0 is a real entity.
-- Rounding biases: stamina rounds to 0.01 every tick, so a per-second rate moves in steps of 0.6/s at 60 Hz (an 11/s drain runs at 10.8/s, 5/s regen at 4.8/s); M2 tunes the `st_*` cvars with this in mind. Origin rounding to 1/32 u each tick can add about 0.2% distance at 320 u/s, so feel tests measure velocity, not distance travelled.
+- Rounding biases: stamina rounds to 0.01 every tick, so a per-second rate moves in steps of 0.6/s at 60 Hz (an 11/s drain runs at 10.8/s, 5/s regen at 4.8/s); M2 tunes the `st_*` cvars with this in mind. Origin rounding to 1/32 u each tick can add about 0.2% distance at 320 u/s, so feel tests measure velocity, not distance travelled. Velocity rounding to 1/16 u/s biases gravity: an airborne vz on the 1/16 grid loses 800·dt rounded to 1/16 every tick, 13.3125 u/s at 60 Hz (an effective 798.75 u/s², about −0.16%) and 6.6875 u/s at 120 Hz (802.5 u/s²). The standing-jump apex is 45.625 u at 60 Hz and 45.406 u at 120 Hz against 45.556 unrounded, so all of MV-04's 60-vs-120 Hz gap is this rounding, not the integration. M4 calibrates fall-damage heights and airtimes against the simulated arc, not the closed-form one.
 
 ## 7. Measurements log (fill from reference captures, `docs/02` §13)
 
@@ -415,7 +467,7 @@ Every test runs headless at 60 Hz on code-built test courses (`docs/07` §3). Ea
 | MV-01 | Run cap | Holding forward on flat ground converges to 320 ± 0.5 within 0.6 s. |
 | MV-02 | Sprint cap | Converges to `sprintSpeed` ± 0.5. Drains stamina at the configured rate. |
 | MV-03 | Walk / crouch caps | 160 ± 1 / 80 ± 1. |
-| MV-04 | Jump apex | 45.56 ± 0.5 u from flat ground. Identical at TICK_RATE 60 and 120 within 0.5 u (integration check). |
+| MV-04 | Jump apex | 45.56 ± 0.5 u from flat ground. Identical at TICK_RATE 60 and 120 within 0.5 u (integration check; the remaining ~0.22 u gap is velocity rounding, §6). |
 | MV-05 | Step-up | 18 u step climbed without jumping; 19 u step blocks. Smooth `step` events. |
 | MV-06 | Slopes | Walkable at normal.z = 0.71; slides on 0.69. |
 | MV-07 | No straight-hop gain | 20 consecutive forward-only hops (no turning, no strafe) never exceed the cap + 2%. |
@@ -448,3 +500,6 @@ Every test runs headless at 60 Hz on code-built test courses (`docs/07` §3). Ea
 3. Does crouch-landing reduce fall damage (Q3 doubled it while ducked)? Default: no effect.
 4. Ledge reach heights and whether you can grab while moving upward.
 5. Stamina rates and whether low stamina weakens jumps.
+6. Ladder foot and top (D-024, design): should a jump at the foot jump rather than push off or attach, and should a ladder be mountable from its top? (§4.14)
+7. Crouched air move (D-024, design): should the crouch factor cut the air wish speed? (§4.1)
+8. Flush pool rims (D-024, design): bring the water-jump forward or relax the rising-step refusal if maps need rims flush with the surface. (§4.13)

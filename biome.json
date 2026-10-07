@@ -35,7 +35,11 @@
   },
   "overrides": [
     {
-      "includes": ["packages/shared/**"],
+      "includes": [
+        "packages/shared/**",
+        "packages/server/src/match/**",
+        "packages/client/src/net/**"
+      ],
       "linter": {
         "rules": {
           "suspicious": {

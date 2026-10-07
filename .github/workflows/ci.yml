@@ -31,3 +31,21 @@ jobs:
       - run: pnpm lint
       - run: pnpm test
       - run: pnpm build
+
+  # D-022: the shared determinism, trace and pmove vectors replayed in all three browser engines.
+  # WebKit runs JavaScriptCore, Safari's engine.
+  browsers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install --with-deps chromium firefox webkit
+      - run: pnpm test:browser
+        env:
+          BROWSERS: chromium,firefox,webkit

@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // The client's net code runs in the browser, in Node tests and in the M3 bots (M2 design §1):
+    // no DOM, no Node APIs, like shared and the server's match code.
+    "lib": ["ES2023"],
+    "types": [],
+    "noUncheckedIndexedAccess": true
+  },
+  "include": ["src/net"]
+}

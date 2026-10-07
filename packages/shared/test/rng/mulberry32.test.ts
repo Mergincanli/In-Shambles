@@ -53,6 +53,19 @@ describe("Mulberry32", () => {
     expect(sum / 20000).toBeCloseTo(0.5, 1);
   });
 
+  it("fillFloats writes the same values as nextFloat, at the given offset", () => {
+    const a = new Mulberry32(0xf111);
+    const b = new Mulberry32(0xf111);
+    const out = new Float64Array(9);
+    for (let round = 0; round < 50; round++) {
+      out.fill(-1);
+      a.fillFloats(out, 2, 5);
+      expect([out[0], out[1], out[7], out[8]]).toEqual([-1, -1, -1, -1]);
+      for (let i = 2; i < 7; i++) expect(out[i]).toBe(b.nextFloat());
+    }
+    expect(a.state).toBe(b.state);
+  });
+
   it("maps the extreme u32 values exactly", () => {
     const rng = new Mulberry32(0);
     rng.nextU32 = () => 0xffffffff;

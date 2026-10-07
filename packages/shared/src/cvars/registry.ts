@@ -1,3 +1,4 @@
+import { CVAR_STRING_MAX, SHORT_TEXT_MAX } from "../net/protocol";
 import { CvarFlag } from "./flags";
 
 export type CvarType = "int" | "float" | "bool" | "string";
@@ -59,6 +60,17 @@ export class CvarRegistry {
   /** Keyed by the registered spelling: code reads cvars without allocating a lowercased key. */
   private readonly exact = new Map<string, CvarEntry>();
   private allowCheats = false;
+  private changes = 0;
+
+  /**
+   * Bumped whenever a stored value changes (set, setFromString, reset, applyLatched, the cheat
+   * reset) or a cvar is registered. Readers such as `refreshPmoveParams` compare it with the
+   * version they last copied, so the hot path never looks a cvar up. A set to the current value,
+   * and a LATCH set that only records a pending value, leave it unchanged.
+   */
+  get version(): number {
+    return this.changes;
+  }
 
   register<T extends CvarType>(def: CvarDef<T>): void {
     if (!NAME.test(def.name)) throw new Error(`invalid cvar name "${def.name}"`);
@@ -82,13 +94,21 @@ export class CvarRegistry {
     if (def.min !== undefined && def.max !== undefined && def.min > def.max) {
       throw new Error(`cvar "${def.name}": min ${def.min} > max ${def.max}`);
     }
+    if (isReplicatedDef(def) && def.name.length > SHORT_TEXT_MAX) {
+      throw new Error(`replicated cvar "${def.name}": name longer than ${SHORT_TEXT_MAX} chars`);
+    }
     const value: CvarValue = def.default;
-    if (!matchesType(def.type, value) || clampToRange(def, value) !== value) {
+    if (
+      !matchesType(def.type, value) ||
+      clampToRange(def, value) !== value ||
+      !fitsWire(def, value)
+    ) {
       throw new Error(`cvar "${def.name}": default ${String(value)} is not a valid ${def.type}`);
     }
     const entry: CvarEntry = { def: { ...def }, value: normalize(value), latched: undefined };
     this.entries.set(key, entry);
     this.exact.set(def.name, entry);
+    this.changes++;
   }
 
   /** Exact spelling first (no allocation); other spellings from consoles fall back to lowercase. */
@@ -102,6 +122,18 @@ export class CvarRegistry {
 
   get(name: string): CvarValue | undefined {
     return this.lookup(name)?.value;
+  }
+
+  /**
+   * A numeric cvar's value, or `fallback` when it is missing or not a number. For hot readers:
+   * unlike `get`'s `number | … | undefined`, the result stays a raw double, so native ESM doesn't
+   * box it (no undefined to merge with).
+   */
+  getNumber(name: string, fallback: number): number {
+    const entry = this.lookup(name);
+    if (entry === undefined) return fallback;
+    const value = entry.value;
+    return typeof value === "number" ? value : fallback;
   }
 
   info(name: string): CvarInfo | undefined {
@@ -118,7 +150,9 @@ export class CvarRegistry {
     if (on) return;
     for (const entry of this.entries.values()) {
       if (!isCheat(entry)) continue;
-      entry.value = normalize(entry.def.default);
+      const next = normalize(entry.def.default);
+      if (next !== entry.value) this.changes++;
+      entry.value = next;
       entry.latched = undefined;
     }
   }
@@ -127,7 +161,7 @@ export class CvarRegistry {
     const entry = this.lookup(name);
     if (!entry) return { ok: false, error: "unknown" };
     if (isCheat(entry) && !this.allowCheats) return { ok: false, error: "cheat" };
-    return assign(entry, value);
+    return this.assign(entry, value);
   }
 
   setFromString(name: string, text: string): SetResult {
@@ -142,7 +176,27 @@ export class CvarRegistry {
   reset(name: string): SetResult {
     const entry = this.lookup(name);
     if (!entry) return { ok: false, error: "unknown" };
-    return assign(entry, entry.def.default);
+    return this.assign(entry, entry.def.default);
+  }
+
+  /**
+   * Stores a server-sent value of a REPLICATED cvar on a client's mirror (`applyCvarBlock`). The
+   * server already applied its CHEAT and LATCH rules to it, so neither applies here: prediction
+   * must use the server's value. The value is stored as sent, never clamped; false, changing
+   * nothing, for an unknown or non-replicated cvar or a value of the wrong type, outside min/max
+   * or not encodable. Drops any pending latched value.
+   */
+  setReplicated(name: string, value: CvarValue): boolean {
+    const entry = this.lookup(name);
+    if (entry === undefined || !isReplicatedDef(entry.def)) return false;
+    const def = entry.def;
+    if (!matchesType(def.type, value) || clampToRange(def, value) !== value) return false;
+    if (!fitsWire(def, value)) return false;
+    const next = normalize(value);
+    entry.latched = undefined;
+    if (next !== entry.value) this.changes++;
+    entry.value = next;
+    return true;
   }
 
   /** Apply pending LATCH values (on map restart). Returns the names that changed, sorted. */
@@ -150,7 +204,10 @@ export class CvarRegistry {
     const applied: string[] = [];
     for (const entry of this.entries.values()) {
       if (entry.latched === undefined) continue;
-      if (entry.latched !== entry.value) applied.push(entry.def.name);
+      if (entry.latched !== entry.value) {
+        applied.push(entry.def.name);
+        this.changes++;
+      }
       entry.value = entry.latched;
       entry.latched = undefined;
     }
@@ -170,6 +227,41 @@ export class CvarRegistry {
   replicated(): CvarInfo[] {
     return this.list().filter((entry) => (entry.def.flags ?? 0) & CvarFlag.REPLICATED);
   }
+
+  private assign(entry: CvarEntry, value: CvarValue): SetResult {
+    if (!matchesType(entry.def.type, value) || !fitsWire(entry.def, value)) {
+      return { ok: false, error: "type" };
+    }
+    const next = normalize(clampToRange(entry.def, value));
+    const clamped = next !== value;
+    if ((entry.def.flags ?? 0) & CvarFlag.LATCH) {
+      // Setting a LATCH cvar back to its current value cancels any pending change.
+      entry.latched = next === entry.value ? undefined : next;
+      return { ok: true, value: next, clamped, latched: entry.latched !== undefined };
+    }
+    if (next !== entry.value) this.changes++;
+    entry.value = next;
+    return { ok: true, value: next, clamped, latched: false };
+  }
+}
+
+function isReplicatedDef(def: CvarDef): boolean {
+  return ((def.flags ?? 0) & CvarFlag.REPLICATED) !== 0;
+}
+
+/**
+ * A REPLICATED string must fit the cvar block's string encoding (net/cvarBlock.ts): printable
+ * 7-bit ASCII, at most CVAR_STRING_MAX chars. Refusing it here, where it is set, keeps the block
+ * always encodable, so WELCOME, CVARS and the snapshot hash never fail on a console value.
+ */
+function fitsWire(def: CvarDef, value: CvarValue): boolean {
+  if (typeof value !== "string" || !isReplicatedDef(def)) return true;
+  if (value.length > CVAR_STRING_MAX) return false;
+  for (let i = 0; i < value.length; i++) {
+    const c = value.charCodeAt(i);
+    if (c < 0x20 || c > 0x7e) return false;
+  }
+  return true;
 }
 
 function isCheat(entry: CvarEntry): boolean {
@@ -180,19 +272,6 @@ function byName(a: string, b: string): number {
   const x = a.toLowerCase();
   const y = b.toLowerCase();
   return x < y ? -1 : x > y ? 1 : 0;
-}
-
-function assign(entry: CvarEntry, value: CvarValue): SetResult {
-  if (!matchesType(entry.def.type, value)) return { ok: false, error: "type" };
-  const next = normalize(clampToRange(entry.def, value));
-  const clamped = next !== value;
-  if ((entry.def.flags ?? 0) & CvarFlag.LATCH) {
-    // Setting a LATCH cvar back to its current value cancels any pending change.
-    entry.latched = next === entry.value ? undefined : next;
-    return { ok: true, value: next, clamped, latched: entry.latched !== undefined };
-  }
-  entry.value = next;
-  return { ok: true, value: next, clamped, latched: false };
 }
 
 function matchesType(type: CvarType, value: CvarValue): boolean {

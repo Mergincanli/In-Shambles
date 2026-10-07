@@ -9,7 +9,7 @@
 |---|---|---|---|
 | M0 | Bootstrap & guardrails | ☑ done | [2026-10-05](handoffs/2026-10-05-M0-bootstrap.md) |
 | M1 | Simulation core: tick, math, brush collision, greybox builder | ☑ done | [2026-10-06](handoffs/2026-10-06-M1-simulation-core.md) |
-| M2 | Base Q3 movement + client shell + Worker server + prediction | ☐ | |
+| M2 | Base Q3 movement + client shell + Worker server + prediction | ☑ done | [2026-10-07](handoffs/2026-10-07-M2-movement-and-prediction.md) |
 | — | *Optional:* Style spike: toon material, hull outline, crease lines on greybox (`docs/08` §18) | ☐ | |
 | M3 | Real networking: dedicated server, protocol, snapshots, interpolation, bots | ☐ | |
 | M4 | UrT movement set (sprint/stamina, wall jumps, slide, ledge grab, …) | ☐ | |
@@ -71,17 +71,19 @@
   - tick accumulator + render interpolation
   - console (`set`, `cvarlist`, `bind`), speedometer HUD, debug draw (hull, traces)
 - **Server in Web Worker** (same match code path that Node will use).
-- `LoopbackTransport` + `NetSimTransport`; minimal binary INPUT/SNAPSHOT for the local player only.
+- `createLoopbackPair` (in-process) and `PortTransport` (Worker) + `NetSimTransport`; minimal binary INPUT/SNAPSHOT for the local player only.
 - Prediction + reconciliation (`docs/05` §5), corrections counter in a mini netgraph.
 
 **Out of scope:** UrT mechanics, combat, remote players, dedicated server.
+
+**Records:** the approved plan and the design it builds on are `docs/design/M2-plan.md` and `docs/design/M2-design.md`.
 
 **Acceptance**
 - Movement tests MV-01, 03, 04, 05, 06, 07, 08, 17 (basic), 18 (basic), 19 pass.
 - NET-03 (prediction parity: 0 corrections on lossless loopback) passes.
 - With `net_profile wan-150-loss2`, movement stays smooth (no visible rubber-banding; corrections rare and small, logged).
 - `pnpm feel-report` prints base metrics.
-- The determinism vectors (`packages/shared/test/vectors`) replay bit for bit in Chrome, Firefox and Safari (D-016).
+- The determinism vectors (`packages/shared/test/vectors`) replay bit for bit in Chrome, Firefox and Safari (D-016; D-022: Chromium, Firefox and WebKit via `pnpm test:browser` and the CI `browsers` job, real Safari via the phone page).
 
 ## Style spike (optional, after M2)
 
@@ -108,6 +110,7 @@
 - Remote entity interpolation; simple capsule player models in team colors.
 - Full netgraph.
 - Headless bots (`pnpm bots`), demo recording (server snapshot stream) and playback (basic).
+- Deterministic pmove primer at match and prediction start, guarded by a late-branch native-ESM allocation workload (the M2 warm-up transient, `docs/10` §4).
 
 **Out of scope:** combat, relevance culling (send everything in M3), WebTransport.
 

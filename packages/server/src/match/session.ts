@@ -1,0 +1,49 @@
+import { PlayerState, type Transport, UserCmd } from "@game/shared";
+import { InputQueue } from "./inputQueue";
+
+/** Waiting for HELLO. */
+export const SESSION_CONNECTING = 0;
+/** WELCOME sent: clock-sync PINGs and console CMDs are answered, READY spawns the player. */
+export const SESSION_WELCOMED = 1;
+/** Spawned: simulated every tick and sent a snapshot every tick. */
+export const SESSION_ACTIVE = 2;
+/** Kicked or disconnected: dropped from the match after this tick's poll. */
+export const SESSION_CLOSED = 3;
+
+/** Per-client counters (live). */
+export class SessionStats {
+  /** Ticks simulated with a repeated cmd because none had arrived (docs/05 §8.1 step 2). */
+  starved = 0;
+  /** Ticks simulated with the client's own cmd. */
+  cmds = 0;
+  /** Packets dropped as malformed, unexpected for the state, or on the wrong channel. */
+  strikes = 0;
+  snapshots = 0;
+}
+
+/**
+ * One connected client (M2 design §1): its transport, handshake state, player, input queue,
+ * counters and admin flag. Fixed shape; everything per-tick is preallocated here.
+ */
+export class Session {
+  state = SESSION_CONNECTING;
+  readonly player = new PlayerState();
+  readonly queue = new InputQueue();
+  /** The cmd simulated last tick, repeated (attack cleared) when the next one is missing. */
+  readonly lastCmd = new UserCmd();
+  readonly stats = new SessionStats();
+  /** The tick the player spawned on (−1 before READY); that tick's snapshot carries TELEPORT. */
+  spawnTick = -1;
+  /** SNAP_FLAG_* bits for this tick's snapshot. */
+  snapFlags = 0;
+  /** The client's nonce from HELLO. */
+  nonce = 0;
+  buildHash = "";
+
+  constructor(
+    readonly clientId: number,
+    readonly transport: Transport,
+    /** May change replicated cvars through CMD (D-027: the Worker's one client is admin). */
+    readonly admin: boolean,
+  ) {}
+}

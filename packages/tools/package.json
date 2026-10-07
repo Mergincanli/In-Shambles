@@ -10,9 +10,12 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "greybox": "node --import tsx src/greybox/cli.ts",
     "bench": "node --import tsx bench/run.ts",
-    "vectors": "node --import tsx src/vectors/generate.ts"
+    "vectors": "node --import tsx src/vectors/generate.ts",
+    "feel-report": "node --import tsx src/reports/cli.ts"
   },
   "dependencies": {
+    "@game/client": "workspace:*",
+    "@game/server": "workspace:*",
     "@game/shared": "workspace:*"
   },
   "devDependencies": {

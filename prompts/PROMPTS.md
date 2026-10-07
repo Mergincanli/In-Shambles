@@ -170,7 +170,7 @@ Build:
    check), basic water (levels, swim, jump/crouch vertical control) and ladders (forward = up).
    All constants are REPLICATED cvars with FACT/INFERRED/ESTIMATE labels from docs/03 §2.
 2. shared/net (minimal for now): BitWriter/BitReader, INPUT (cmds with 4x redundancy + ack)
-   and SNAPSHOT (local player state only), LoopbackTransport, NetSimTransport with the
+   and SNAPSHOT (local player state only), createLoopbackPair/PortTransport, NetSimTransport with the
    profiles from docs/10 §3.
 3. Server match loop (environment-agnostic) running in a Web Worker: monotonic-clock
    accumulator, per-tick cmd consumption (repeat last cmd if missing), pmove, snapshot.

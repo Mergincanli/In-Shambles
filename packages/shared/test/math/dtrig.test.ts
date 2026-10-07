@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DevAssertError } from "../../src/debug/assert";
-import { cosU16, dcos, dsin, sinU16 } from "../../src/math/dtrig";
+import { cosU16, dcos, dsin, sinCosU16, sinU16 } from "../../src/math/dtrig";
 import { Mulberry32 } from "../../src/rng/mulberry32";
 import { nextAfter, ulpDistance } from "../helpers/f64";
 
@@ -75,6 +75,17 @@ describe("sinU16 / cosU16", () => {
     expect(sinU16(65536 + 16384)).toBe(1);
     expect(sinU16(-16384)).toBe(-1);
     expect(cosU16(-32768)).toBe(-1);
+  });
+
+  it("sinCosU16 writes exactly sinU16 and cosU16 for every integer angle, wrapped ones included", () => {
+    const out = new Float64Array(5);
+    for (let a = -70000; a < 140000; a++) {
+      sinCosU16(a, out, 2);
+      if (!Object.is(out[2], sinU16(a)) || !Object.is(out[3], cosU16(a))) {
+        expect([a, out[2], out[3]]).toEqual([a, sinU16(a), cosU16(a)]);
+      }
+    }
+    expect([out[0], out[1], out[4]]).toEqual([0, 0, 0]);
   });
 
   it("are exactly odd, even and symmetric over all 65536 angles", () => {

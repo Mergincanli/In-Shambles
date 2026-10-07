@@ -23,27 +23,49 @@ pnpm typecheck && pnpm lint && pnpm test
 
 | Command | What it does |
 |---|---|
-| `pnpm dev` | Client dev server on http://localhost:5173 |
+| `pnpm dev` | The game on http://localhost:5173: the client with the server in a Web Worker (offline loopback) |
 | `pnpm dev:server` | Dedicated server from source (stop with Ctrl+C) |
 | `pnpm build` | Production client build and server bundle (`packages/server/dist/main.js`) |
 | `pnpm test` | All tests |
+| `pnpm test:movement` | Movement tests (MV-xx) on the greybox courses, each printing measured vs. target |
+| `pnpm test:net` | Netcode tests (NET-xx): codec checks, and the real match and client net code under the network profiles; NET-04 prints a summary line per profile |
 | `pnpm test:balance` | Balance tests (BAL-xx) |
+| `pnpm test:browser` | Determinism, trace and pmove vectors in headless browsers (`BROWSERS=chromium,firefox,webkit`, default `chromium`), plus the client e2e smoke test in headless Chromium |
 | `pnpm typecheck` | Type-check all packages |
 | `pnpm lint` | Biome lint and format check |
 | `pnpm format` | Apply Biome formatting and safe fixes |
 | `pnpm greybox` | Recompile the greybox courses into `content/maps/` (commit the result) |
 | `pnpm bench` | Sim microbenchmarks against the `docs/10` §4.4 budgets (`--strict` exits 1 on a miss) |
+| `pnpm feel-report` | Base movement metrics vs. their targets on `movement_lab`; also writes `reports/feel.md` (git-ignored) |
 
 `pnpm dev:server` runs under pnpm, which doesn't forward signals to the server. To stop it from a script or process manager, signal its process group (Ctrl+C does this), or run the bundle directly with `node packages/server/dist/main.js`.
 
-Commands for later milestones (`test:movement`, `test:net`, `bots`, `feel-report`, `balance-report`, `mapc`) already exist and print the milestone that adds them. `CLAUDE.md` has the full list.
+`pnpm test:browser` uses the Playwright browsers already on the machine. `pnpm exec playwright install chromium firefox webkit` downloads them (CI does this), and `CHROMIUM_PATH` points the Chromium run at another build.
+
+`pnpm dev` opens `movement_lab`. Add `?bot=circle` to the URL to watch the scripted strafe-jump circuit, `?autotest=1` to have the page report its status in `<html data-*>`, and `?cam=x,y,z,yaw,pitch` for a fixed camera (map units and degrees). `pnpm --filter @game/client screenshot <dir>` saves PNG screenshots of a few viewpoints from the production build (`--dev` uses the dev server); the bot's shots run at 640x360 (`--bot-width`, `--bot-height`), since software WebGL is too slow at full size for the bot to move.
+
+`pnpm --filter @game/client vectors-page <out.html>` builds the determinism vectors page as one self-contained HTML file: open it in any browser (a phone's Safari, say) and it replays every vector table there, showing PASS/FAIL per table. `pnpm dev` also serves it at http://localhost:5173/vectors.html.
+
+Commands for later milestones (`bots`, `balance-report`, `mapc`) already exist and print the milestone that adds them. `CLAUDE.md` has the full list.
+
+## Try it
+
+1. `pnpm dev`, open http://localhost:5173 and click the view to take the mouse (Escape gives it back).
+2. Move with W A S D, jump with Space, crouch with C, walk with X. Mouse sensitivity uses Quake units: `sensitivity` × `m_yaw` (0.022) degrees per count, so a sensitivity from Quake-style games carries over.
+3. Backquote opens the console (Backquote or Escape closes it). `help` lists the commands. Some to try:
+   - `set cl_speedometer 1` and `set cl_netgraph 1`: speed and movement state, and the link, corrections, input buffer and traffic.
+   - `net_profile wan-150-loss2`: play over a simulated 150 ms link with 2% loss (`net_profile` lists the profiles; `lan` is the default). Movement should stay smooth and the netgraph's corrections rare and small.
+   - `set pm_gravity 400`: a server cvar; the change goes to the in-browser server and comes back to your prediction without a correction.
+   - `set cl_thirdPerson 1` with `set r_debugHull 1`, `set r_debugTraces 1` and `set r_debugGround 1`: the hull, pmove's traces and the ground normal.
+   - `bind KeyQ +jump`, `unbind KeyQ`, `cvarlist cl_`.
+4. Settings (sensitivity, field of view, HUD toggles, binds) are saved in the browser.
 
 ## Layout
 
 | Path | Contents |
 |---|---|
 | `packages/shared` | Pure simulation code shared by server and client |
-| `packages/server` | Dedicated Node server |
+| `packages/server` | Match code (runs in Node and in the browser Worker) and the dedicated Node server |
 | `packages/client` | Browser client (Vite, Three.js) |
 | `packages/tools` | Map compiler, bots, reports, content checks |
 | `content/` | Weapon data, names, maps, licenses |

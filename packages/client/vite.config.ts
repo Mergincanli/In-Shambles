@@ -36,4 +36,17 @@ export default defineConfig({
   server: {
     port: 5173,
   },
+  build: {
+    // Maps ship as files (boot.ts imports content/maps/*.cmap with ?url), never as data: URIs.
+    assetsInlineLimit: (file) => (file.endsWith(".cmap") ? false : undefined),
+    // three.js alone is about 600 kB minified; one chunk for now (code splitting is a later call).
+    chunkSizeWarningLimit: 1024,
+    // The minifier strips the libraries' @license headers; this file ships their notices instead
+    // (MIT and the like require it; content/LICENSES.md lists the same libraries).
+    license: { fileName: "third-party-licenses.md" },
+  },
+  // The server Worker is a module worker (boot.ts); its chunk keeps ES module format.
+  worker: {
+    format: "es",
+  },
 });

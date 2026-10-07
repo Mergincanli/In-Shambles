@@ -322,11 +322,13 @@ describe("trace bench verdict", () => {
 });
 
 describe("pnpm bench entry", () => {
+  // A short pmove part: pmove-bench.test.ts covers it.
   const run = (...args: string[]) =>
-    spawnSync(process.execPath, ["--import", "tsx", "bench/run.ts", ...args], {
-      cwd: fromRoot("packages", "tools"),
-      encoding: "utf8",
-    });
+    spawnSync(
+      process.execPath,
+      ["--import", "tsx", "bench/run.ts", "--pmove-ticks", "20", "--pmove-warmup", "0", ...args],
+      { cwd: fromRoot("packages", "tools"), encoding: "utf8" },
+    );
 
   it("prints the machine, the table and the verdict, and exits 0", () => {
     const out = run("--calls", "1000", "--warmup", "1000");

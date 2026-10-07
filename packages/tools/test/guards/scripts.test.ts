@@ -223,32 +223,64 @@ describe("docs", () => {
   });
 });
 
-describe("test:balance", () => {
-  // `vitest run -t "^BAL-"` finds BAL tests by name and exits 0 if none match, so each
-  // bal-NN-*.test.ts file must name its top-level describe after its ID (docs/10 §2).
-  const testFiles = readdirSync(fromRoot("packages"), { recursive: true, encoding: "utf8" })
-    .filter((file) => !file.includes("node_modules") && /\.test\.[cm]?[jt]sx?$/.test(file))
-    .map((file) => join(fromRoot("packages"), file));
-  const balFiles = testFiles.filter((file) => /^bal-\d+/i.test(basename(file)));
+// `vitest run -t "^BAL-"` (and MV-, NET-) finds tests by their full name, which starts with the
+// top-level describe, and exits 0 if none match. So each bal-NN / mv-NN / net-NN *.test.ts file
+// must name its top-level describe after its ID (docs/10 §2), and the suite script must filter on
+// that prefix. The guard's own describe must not start with a prefix, or the suites would run it.
+const testFiles = readdirSync(fromRoot("packages"), { recursive: true, encoding: "utf8" })
+  .filter((file) => !file.includes("node_modules") && /\.test\.[cm]?[jt]sx?$/.test(file))
+  .map((file) => join(fromRoot("packages"), file));
 
-  it("includes BAL-01", () => {
-    expect(balFiles.map((file) => basename(file))).toContainEqual(
-      expect.stringMatching(/^bal-01-/i),
+/**
+ * prefix, root script, IDs that must have a file (NET-01 is a shared unit test, D-026, so it has no
+ * net-01 file). acceptance-ids.test.ts checks the full docs/09 lists.
+ */
+const ID_SUITES = [
+  ["BAL", "test:balance", ["01"]],
+  ["MV", "test:movement", ["01", "03", "04", "05", "06", "07", "08", "17", "18", "19"]],
+  ["NET", "test:net", ["03", "04"]],
+] as const;
+
+describe.each(ID_SUITES)("naming of the %s-NN test files", (prefix, script, required) => {
+  const pattern = new RegExp(`^${prefix}-(\\d+)`, "i");
+  const files = testFiles.filter((file) => pattern.test(basename(file)));
+
+  it.each(required.map((id) => [id]))(`include ${prefix}-%s`, (id) => {
+    expect(files.map((file) => basename(file))).toContainEqual(
+      expect.stringMatching(new RegExp(`^${prefix}-${id}-`, "i")),
     );
   });
 
-  it.each(balFiles.map((file) => [basename(file), file]))(
-    "%s names its describe after its BAL ID",
+  // Pinned whole: a trailing `--project`, `--dir` or path would narrow the run to no ID test, and
+  // vitest would still exit 0. Only the flag that shows the suites' printed reports may follow.
+  it.runIf(files.length > 0)(`run under pnpm ${script}`, () => {
+    expect(rootScripts[script]).toMatch(
+      new RegExp(`^vitest run -t "\\^${prefix}-"( --silent=false)?$`),
+    );
+  });
+
+  it.each(files.map((file) => [basename(file), file]))(
+    "%s names its top-level describe after its ID",
     (name, file) => {
-      const id = `BAL-${/^bal-(\d+)/i.exec(name)?.[1]}`;
-      expect(readFileSync(file, "utf8")).toMatch(new RegExp(`describe\\(\\s*["'\`]${id}\\b`));
+      const id = `${prefix}-${pattern.exec(name)?.[1]}`;
+      // Top level: at column 0, outside block comments (a line comment can't start with it).
+      const source = readFileSync(file, "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+      expect(source).toMatch(
+        new RegExp(`^describe(\\.each\\([^\\n]*\\))?\\(\\s*["'\`]${id}\\b`, "m"),
+      );
     },
   );
+
+  it("never sit where the Vitest projects don't look (packages/<pkg>/test)", () => {
+    for (const file of files) {
+      expect(file.replace(fromRoot("packages"), "")).toMatch(/^[\\/][^\\/]+[\\/]test[\\/]/);
+    }
+  });
 });
 
 describe("stub scripts", () => {
-  // CLAUDE.md: "Until their milestone, these are stubs that print "added in M#": `test:movement`,
-  // `test:net`, `feel-report` (M2); ..."
+  // CLAUDE.md: "Until their milestone, these are stubs that print "added in M#": `test:net`
+  // (M2); ..."
   const sentence = /Until their milestone, these are stubs[^\n]*/.exec(claudeMd)?.[0] ?? "";
   const documented = new Map(
     sentence.split(";").flatMap((part) => {

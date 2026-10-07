@@ -12,22 +12,25 @@
     "dev:server": "pnpm --filter @game/server --fail-if-no-match start",
     "build": "pnpm -r build",
     "test": "vitest run",
-    "test:movement": "node scripts/not-yet.mjs test:movement M2",
-    "test:net": "node scripts/not-yet.mjs test:net M2",
+    "test:movement": "vitest run -t \"^MV-\" --silent=false",
+    "test:net": "vitest run -t \"^NET-\" --silent=false",
     "test:balance": "vitest run -t \"^BAL-\"",
+    "test:browser": "vitest run --config vitest.browser.config.ts",
     "typecheck": "pnpm -r typecheck && tsc --noEmit -p tsconfig.json",
     "lint": "biome check .",
     "format": "biome check --write .",
     "greybox": "pnpm --filter @game/tools --fail-if-no-match greybox",
     "bench": "pnpm --filter @game/tools --fail-if-no-match bench",
     "bots": "node scripts/not-yet.mjs bots M3",
-    "feel-report": "node scripts/not-yet.mjs feel-report M2",
+    "feel-report": "pnpm --filter @game/tools --fail-if-no-match feel-report",
     "balance-report": "node scripts/not-yet.mjs balance-report M6",
     "mapc": "node scripts/not-yet.mjs mapc M5"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.15",
     "@types/node": "^22.20.5",
+    "@vitest/browser-playwright": "5.0.3",
+    "playwright": "1.56.1",
     "typescript": "^7.0.2",
     "vitest": "^5.0.3"
   }

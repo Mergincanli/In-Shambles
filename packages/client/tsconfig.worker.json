@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // The server Worker (M2 design §1): the WebWorker globals, no DOM and no Node types, so it
+    // cannot reach for the page's window or document.
+    "lib": ["ES2023", "WebWorker"],
+    "types": [],
+    "noUncheckedIndexedAccess": true
+  },
+  "include": ["src/worker"]
+}
