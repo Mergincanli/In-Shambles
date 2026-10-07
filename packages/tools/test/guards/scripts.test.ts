@@ -251,8 +251,12 @@ describe.each(ID_SUITES)("naming of the %s-NN test files", (prefix, script, requ
     );
   });
 
+  // Pinned whole: a trailing `--project`, `--dir` or path would narrow the run to no ID test, and
+  // vitest would still exit 0. Only the flag that shows the suites' printed reports may follow.
   it.runIf(files.length > 0)(`run under pnpm ${script}`, () => {
-    expect(rootScripts[script]).toMatch(new RegExp(`^vitest run -t "\\^${prefix}-"( |$)`));
+    expect(rootScripts[script]).toMatch(
+      new RegExp(`^vitest run -t "\\^${prefix}-"( --silent=false)?$`),
+    );
   });
 
   it.each(files.map((file) => [basename(file), file]))(
