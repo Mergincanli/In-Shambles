@@ -1,7 +1,7 @@
 /**
  * @game/client/net: the client's DOM-free net code (M2 design §1): connection, clock, prediction
- * and reconciliation, render offset, stats, the Worker port transport and scripted input. The
- * browser app, the NET tests and the M3 bots all drive the same `ClientSim`.
+ * and reconciliation, render offset, stats, the Worker port and WebSocket transports, and scripted
+ * input. The browser app, the NET tests and the M3 bots all drive the same `ClientSim`.
  */
 export * from "./clientSim";
 export * from "./clock";
@@ -12,3 +12,4 @@ export * from "./predictor";
 export * from "./scriptedInput";
 export * from "./smoothing";
 export * from "./stats";
+export * from "./webSocketTransport";

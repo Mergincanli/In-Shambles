@@ -225,12 +225,27 @@ describe("Node server (in process, real WebSocket)", () => {
     expect(server.listener.http.listenerCount("upgrade")).toBe(1);
   });
 
-  it("KICKs a client with another build, and closes oversized and text frames", async () => {
-    const { port } = await start();
+  it("from source, lets another build in with a warning (sv_strictBuild 0, D-031)", async () => {
+    const { server, port } = await start();
+    expect(server.cvars.get("sv_strictBuild")).toBe(0);
+    expect(server.matches.main?.match.strictBuild).toBe(false);
+    const c = await client(port);
+    c.hello("someone-else");
+    await poll(c, () => c.welcomes.length === 1 && c.prints.length === 1, "WELCOME and PRINT");
+    expect(c.kicks).toEqual([]);
+    expect(c.prints[0]?.text).toMatch(
+      new RegExp(`^build someone-else differs from the server's ${server.buildHash};`),
+    );
+  });
+
+  it("KICKs a client with another build under sv_strictBuild 1, and closes oversized and text frames", async () => {
+    const { server, port } = await start(["--set", "sv_strictBuild=1"]);
     const c = await client(port);
     c.hello("someone-else");
     await poll(c, () => c.closed !== null, "kick");
-    expect(c.kicks[0]?.reason).toMatch(/build someone-else does not match/);
+    expect(c.kicks[0]?.reason).toBe(
+      `build someone-else does not match the server's ${server.buildHash}`,
+    );
     expect((sockets[0] as NodeWsClient).closeCode).toBe(1000);
 
     const big = await NodeWsClient.connect(`ws://127.0.0.1:${port}/`);

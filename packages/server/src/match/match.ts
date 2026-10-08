@@ -44,6 +44,7 @@ import {
   type PlayerState,
   PmoveParams,
   PongMsg,
+  PRINT_WARN,
   PROTOCOL_VERSION,
   PrintMsg,
   peekHelloVersion,
@@ -96,8 +97,14 @@ export interface MatchOptions {
   readonly world?: CollisionWorld;
   /** The server's registry; a new one with the pmove cvars when absent. */
   readonly cvars?: CvarRegistry;
-  /** HELLO's buildHash must equal it (short ASCII). */
+  /** HELLO's buildHash must equal it (short ASCII), unless `strictBuild` is false. */
   readonly buildHash: string;
+  /**
+   * Whether a client of another build is KICKed (default true; `sv_strictBuild`, D-031). When
+   * false it gets its WELCOME and a PRINT warning naming both builds. The protocol version is
+   * always strict.
+   */
+  readonly strictBuild?: boolean;
   readonly log?: MatchLog;
 }
 
@@ -157,6 +164,7 @@ export class Match {
   readonly mapHashLo: number;
   readonly mapHashHi: number;
   readonly buildHash: string;
+  readonly strictBuild: boolean;
   /** Spawn origin, raised to the D-017 rest height, and yaw (u16). */
   readonly spawnOrigin: Vec3 = vec3();
   readonly spawnYaw: number;
@@ -199,6 +207,7 @@ export class Match {
     }
     this.cvars = cvars;
     this.buildHash = options.buildHash;
+    this.strictBuild = options.strictBuild ?? true;
     this.mapName = cmap.name;
     this.mapHashHi = Number.parseInt(cmap.contentHash.slice(0, 8), 16);
     this.mapHashLo = Number.parseInt(cmap.contentHash.slice(8, 16), 16);
@@ -375,7 +384,8 @@ export class Match {
       this.kick(s, "malformed HELLO");
       return;
     }
-    if (this.hello.buildHash !== this.buildHash) {
+    const otherBuild = this.hello.buildHash !== this.buildHash;
+    if (otherBuild && this.strictBuild) {
       this.kick(s, `build ${this.hello.buildHash} does not match the server's ${this.buildHash}`);
       return;
     }
@@ -388,6 +398,14 @@ export class Match {
     }
     s.transport.sendReliable(this.writer.bytes, this.writer.byteLength);
     s.state = SESSION_WELCOMED;
+    if (otherBuild) {
+      this.sendPrint(
+        s,
+        PRINT_WARN,
+        `build ${this.hello.buildHash} differs from the server's ${this.buildHash}; ` +
+          "sv_strictBuild 0 lets it play, but the two may disagree",
+      );
+    }
   }
 
   private onCmd(s: Session, text: string): void {

@@ -15,8 +15,9 @@ import {
   STAT_STARVED_CORRECTIONS,
   STAT_STRIKES,
   StrafeCircuit,
+  welcomeMapHash,
 } from "@game/client/net";
-import { Match } from "@game/server";
+import { Match, SESSION_WELCOMED } from "@game/server";
 import {
   BitWriter,
   createLoopbackPair,
@@ -31,6 +32,7 @@ import {
   PongMsg,
   SnapshotMsg,
   UserCmd,
+  WelcomeMsg,
 } from "@game/shared";
 import { describe, expect, it } from "vitest";
 import { loadCourse } from "../../src/scenarios/course";
@@ -91,6 +93,154 @@ describe("client session", () => {
     }
     expect(client.state).toBe(CONN_CLOSED);
     expect(client.connection.closeReason).toMatch(/^server runs map jump_lab/);
+  });
+
+  it("loads the map WELCOME names before READY, and refuses another version (D-031)", () => {
+    const [clientEnd, serverEnd] = createLoopbackPair();
+    const now = { t: 0 };
+    const asked: [string, string][] = [];
+    const client = new ClientSim({
+      transport: clientEnd,
+      buildHash: HARNESS_BUILD,
+      clock: () => now.t,
+      onMapRequest: (name, hash) => asked.push([name, hash]),
+    });
+    expect(client.map).toBeNull();
+    const match = new Match({ cmap: course.cmap, world: course.world, buildHash: HARNESS_BUILD });
+    match.connect(serverEnd, true);
+    client.connect();
+    const step = (frames: number) => {
+      for (let i = 0; i < frames; i++) {
+        now.t += 1000 / 60;
+        match.tick();
+        client.frame();
+      }
+    };
+    step(60);
+    // The pings are done, but READY waits for the map: the server has not spawned anyone.
+    expect(asked).toEqual([["movement_lab", course.cmap.contentHash]]);
+    expect(client.mapRequest).toEqual({
+      name: "movement_lab",
+      contentHash: course.cmap.contentHash,
+    });
+    expect(client.clock.handshakeDone).toBe(true);
+    expect(client.state).toBe(CONN_SYNCING);
+    expect(match.session(0)?.state).toBe(SESSION_WELCOMED);
+    expect(client.provideMap(course.cmap, course.world)).toBeNull();
+    expect(client.world).toBe(course.world);
+    expect(client.provideMap(course.cmap)).toBe("a map is already loaded (movement_lab)");
+    step(30);
+    expect(client.state).toBe(CONN_ACTIVE);
+    expect(client.stats.totals[STAT_CORRECTIONS]).toBe(0);
+
+    // A file of the same name but another hash ends the session with both versions.
+    const [otherEnd, otherServerEnd] = createLoopbackPair();
+    const stale = new ClientSim({
+      transport: otherEnd,
+      buildHash: HARNESS_BUILD,
+      clock: () => now.t,
+    });
+    match.connect(otherServerEnd, false);
+    stale.connect();
+    for (let i = 0; i < 10; i++) {
+      now.t += 10;
+      match.tick();
+      stale.frame();
+    }
+    expect(stale.mapRequest?.name).toBe("movement_lab");
+    const jump = loadCourse("jump_lab").cmap;
+    const why = stale.provideMap({ ...jump, name: "movement_lab" });
+    expect(why).toBe(
+      `server runs map movement_lab (${course.cmap.contentHash}), ` +
+        `the client loaded movement_lab (${jump.contentHash})`,
+    );
+    expect(stale.closed).toBe(true);
+    expect(stale.connection.closeReason).toBe(why);
+  });
+
+  it("writes WELCOME's map hash as the cmap does: 16 hex digits, zero-padded (D-031)", () => {
+    const m = new WelcomeMsg();
+    m.mapHashHi = 0x0000abcd;
+    m.mapHashLo = 0x00000001;
+    expect(welcomeMapHash(m)).toBe("0000abcd00000001");
+    // A decoded u32 may come back signed.
+    m.mapHashHi = 0xffffffff | 0;
+    m.mapHashLo = 0x80000000 | 0;
+    expect(welcomeMapHash(m)).toBe("ffffffff80000000");
+    // End to end: a map whose hash has leading zeros is the client's own, not "another version".
+    const padded = { ...course.cmap, contentHash: "0000abcd00000001" };
+    const match = new Match({ cmap: padded, world: course.world, buildHash: HARNESS_BUILD });
+    const [clientEnd, serverEnd] = createLoopbackPair();
+    const now = { t: 0 };
+    const client = new ClientSim({
+      transport: clientEnd,
+      buildHash: HARNESS_BUILD,
+      clock: () => now.t,
+      onMapRequest: () => client.provideMap(padded, course.world),
+    });
+    match.connect(serverEnd, true);
+    client.connect();
+    for (let i = 0; i < 60 && !client.active; i++) {
+      now.t += 1000 / 60;
+      match.tick();
+      client.frame();
+    }
+    expect(client.mapRequest).toEqual({ name: "movement_lab", contentHash: "0000abcd00000001" });
+    expect(client.state).toBe(CONN_ACTIVE);
+  });
+
+  it("takes the map from inside onMapRequest, and stays closed when it refuses or throws", () => {
+    const match = new Match({ cmap: course.cmap, world: course.world, buildHash: HARNESS_BUILD });
+    const now = { t: 0 };
+    const jump = loadCourse("jump_lab").cmap;
+    /** A client whose loader runs synchronously in WELCOME's poll, as a Node host's would. */
+    const syncClient = (load: (c: ClientSim) => void) => {
+      const [clientEnd, serverEnd] = createLoopbackPair();
+      const box: { c: ClientSim | null } = { c: null };
+      const c = new ClientSim({
+        transport: clientEnd,
+        buildHash: HARNESS_BUILD,
+        clock: () => now.t,
+        onMapRequest: () => {
+          if (box.c !== null) load(box.c);
+        },
+      });
+      box.c = c;
+      match.connect(serverEnd, false);
+      c.connect();
+      return c;
+    };
+    const good = syncClient((c) => c.provideMap(course.cmap, course.world));
+    const stale = syncClient((c) => c.provideMap({ ...jump, name: "movement_lab" }));
+    const throws = syncClient(() => {
+      throw new Error("no such file");
+    });
+    const closes: string[] = [];
+    const quits = syncClient((c) => {
+      c.disconnect("changed my mind");
+      closes.push(c.connection.closeReason);
+    });
+    let threw = 0;
+    for (let i = 0; i < 90; i++) {
+      now.t += 1000 / 60;
+      match.tick();
+      for (const c of [good, stale, throws, quits]) {
+        try {
+          c.frame();
+        } catch {
+          threw++;
+        }
+      }
+    }
+    expect(threw).toBe(0);
+    expect(good.state).toBe(CONN_ACTIVE);
+    // A refusal or disconnect inside the callback must not be undone by WELCOME's own handling.
+    expect(stale.state).toBe(CONN_CLOSED);
+    expect(stale.connection.closeReason).toMatch(/^server runs map movement_lab \(/);
+    expect(quits.state).toBe(CONN_CLOSED);
+    expect(closes).toEqual(["changed my mind"]);
+    expect(throws.state).toBe(CONN_CLOSED);
+    expect(throws.connection.closeReason).toBe("could not load map movement_lab: no such file");
   });
 
   it("reports the server's kick", () => {

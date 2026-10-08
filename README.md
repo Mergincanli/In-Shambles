@@ -42,7 +42,7 @@ pnpm typecheck && pnpm lint && pnpm test
 
 `pnpm test:browser` uses the Playwright browsers already on the machine. `pnpm exec playwright install chromium firefox webkit` downloads them (CI does this), and `CHROMIUM_PATH` points the Chromium run at another build.
 
-`pnpm dev` opens `movement_lab`. Add `?bot=circle` to the URL to watch the scripted strafe-jump circuit, `?autotest=1` to have the page report its status in `<html data-*>`, and `?cam=x,y,z,yaw,pitch` for a fixed camera (map units and degrees). `pnpm --filter @game/client screenshot <dir>` saves PNG screenshots of a few viewpoints from the production build (`--dev` uses the dev server); the bot's shots run at 640x360 (`--bot-width`, `--bot-height`), since software WebGL is too slow at full size for the bot to move.
+`pnpm dev` opens `movement_lab` on the in-browser server. With `pnpm dev:server` running, `?connect=ws://localhost:28700` plays on the dedicated server instead (its map, `arena_greybox` by default), and `?net_profile=wan-100-loss1` starts on a simulated link; the console's `connect <address>` and `disconnect` do the same from inside the game. Add `?bot=circle` to the URL to watch the scripted strafe-jump circuit, `?autotest=1` to have the page report its status in `<html data-*>`, and `?cam=x,y,z,yaw,pitch` for a fixed camera (map units and degrees). `pnpm --filter @game/client screenshot <dir>` saves PNG screenshots of a few viewpoints from the production build (`--dev` uses the dev server); the bot's shots run at 640x360 (`--bot-width`, `--bot-height`), since software WebGL is too slow at full size for the bot to move.
 
 `pnpm --filter @game/client vectors-page <out.html>` builds the determinism vectors page as one self-contained HTML file: open it in any browser (a phone's Safari, say) and it replays every vector table there, showing PASS/FAIL per table. `pnpm dev` also serves it at http://localhost:5173/vectors.html.
 
@@ -59,6 +59,7 @@ Commands for later milestones (`bots`, `balance-report`, `mapc`) already exist a
    - `set cl_thirdPerson 1` with `set r_debugHull 1`, `set r_debugTraces 1` and `set r_debugGround 1`: the hull, pmove's traces and the ground normal.
    - `bind KeyQ +jump`, `unbind KeyQ`, `cvarlist cl_`.
 4. Settings (sensitivity, field of view, HUD toggles, binds) are saved in the browser.
+5. On a dedicated server: `pnpm dev:server` in one terminal, `pnpm dev` in another, then open http://localhost:5173/?connect=ws://localhost:28700 to play alone on `arena_greybox` over a real WebSocket.
 
 ## Layout
 

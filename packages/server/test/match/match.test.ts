@@ -23,6 +23,7 @@ import {
   PmoveParams,
   PRINT_ERROR,
   PRINT_INFO,
+  PRINT_WARN,
   PROTOCOL_VERSION,
   playerStateEquals,
   pmove,
@@ -238,14 +239,42 @@ describe("match handshake", () => {
     expect(match.metrics.kicks).toBe(1);
   });
 
-  it("kicks a client built from another build", () => {
+  it("kicks a client built from another build, naming both builds", () => {
     const match = newMatch();
+    expect(match.strictBuild).toBe(true);
     const client = connect(match);
     client.hello("other-build");
     run(match, client, 1);
-    expect(client.kicks[0]?.reason).toContain("other-build");
+    expect(client.kicks[0]?.reason).toBe(
+      `build other-build does not match the server's ${TEST_BUILD}`,
+    );
     expect(client.closed).not.toBeNull();
     expect(match.sessionCount).toBe(0);
+  });
+
+  it("lets another build in with a warning when strictBuild is off (sv_strictBuild 0, D-031)", () => {
+    const match = new Match({ cmap, world, buildHash: TEST_BUILD, strictBuild: false });
+    const client = connect(match);
+    client.hello("other-build");
+    run(match, client, 1);
+    expect(client.kicks).toEqual([]);
+    expect(client.welcomes).toHaveLength(1);
+    expect(client.prints.map((p) => [p.level, p.text])).toEqual([
+      [
+        PRINT_WARN,
+        `build other-build differs from the server's ${TEST_BUILD}; ` +
+          "sv_strictBuild 0 lets it play, but the two may disagree",
+      ],
+    ]);
+    // The same build gets no warning; another protocol version is refused either way.
+    const same = connect(match);
+    same.hello();
+    const old = connect(match);
+    old.hello(TEST_BUILD, PROTOCOL_VERSION + 1);
+    run(match, same, 1);
+    old.poll();
+    expect(same.prints).toEqual([]);
+    expect(old.kicks[0]?.reason).toMatch(/^protocol version/);
   });
 
   it("kicks a malformed HELLO with a strike", () => {

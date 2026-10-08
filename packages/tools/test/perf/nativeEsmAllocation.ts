@@ -3,10 +3,12 @@ import {
   ClientSim,
   type PortLike,
   PortTransport,
+  type SocketLike,
   STAT_CLOCK_ADJUSTMENTS,
   STAT_CORRECTIONS,
   STAT_HARD_RESYNCS,
   StrafeCircuit,
+  WebSocketTransport,
 } from "@game/client/net";
 import { LoopStats, Match, TickHistogram } from "@game/server";
 import {
@@ -162,6 +164,8 @@ for (let i = 0; i < CASES; i++) {
 const prev = vec3(0, 400, 24);
 const out = vec3();
 const outcomes = new Int32Array(3);
+/** A workload's further outcomes (wsTransport: the client end's). */
+const extra = new Int32Array(4);
 
 function runQuantize(n: number): void {
   const o = ps.origin;
@@ -987,6 +991,34 @@ wsUnreliable[0] = MSG_INPUT;
 const wsOversized = Buffer.alloc(MAX_UNRELIABLE_BYTES + 100);
 wsOversized[0] = MSG_INPUT;
 
+// The client end (D-030), in the same child: arrivals past the boundary (`receiveBytes`; the
+// browser's ArrayBuffer, event and view over it are the boundary's allocation) on both channels,
+// the zero-length marker and drop-oldest, a poll per 320; and the sends a session makes from its
+// one writer: INPUT every tick and, between them, a PING (another length) every 60.
+const wsClientSocket: SocketLike = {
+  binaryType: "arraybuffer",
+  readyState: 1,
+  send: () => {},
+  close: () => {},
+  onopen: null,
+  onmessage: null,
+  onclose: null,
+  onerror: null,
+};
+const wsClient = new WebSocketTransport(wsClientSocket);
+wsClient.onMessage((_d, len, reliable) => {
+  if (reliable) extra[0] = (extra[0] as number) + 1;
+  else if (len === 0) extra[1] = (extra[1] as number) + 1;
+});
+const wsClientReliable = new Uint8Array(40);
+wsClientReliable[0] = MSG_CMD;
+const wsClientUnreliable = new Uint8Array(300);
+wsClientUnreliable[0] = MSG_SNAPSHOT;
+const wsClientOversized = new Uint8Array(MAX_UNRELIABLE_BYTES + 100);
+wsClientOversized[0] = MSG_SNAPSHOT;
+const wsClientWriter = new Uint8Array(MAX_UNRELIABLE_BYTES);
+wsClientWriter[0] = MSG_INPUT;
+
 function runWsTransport(n: number): void {
   for (let i = 0; i < n; i++) {
     const k = i % 320;
@@ -994,10 +1026,18 @@ function runWsTransport(n: number): void {
     else if (k % 50 === 7) wsTransport.receive(wsOversized, true);
     else wsTransport.receive(wsUnreliable, true);
     if (k === 319) wsTransport.poll();
+
+    if ((k & 15) === 0) wsClient.receiveBytes(wsClientReliable);
+    else if (k % 50 === 7) wsClient.receiveBytes(wsClientOversized);
+    else wsClient.receiveBytes(wsClientUnreliable);
+    if (k === 319) wsClient.poll();
+    wsClient.sendUnreliable(wsClientWriter, i % 60 === 30 ? 13 : 55);
   }
   outcomes[0] = wsCounts[0] as number;
   outcomes[1] = wsCounts[1] as number;
   outcomes[2] = wsTransport.stats().lost;
+  extra[2] = wsClient.stats().lost;
+  extra[3] = wsClient.stats().sent;
 }
 
 const WORKLOADS: Record<string, (n: number) => void> = {
@@ -1043,5 +1083,11 @@ for (let attempt = 0; attempt < 3 && !clean; attempt++) {
 }
 observer.disconnect();
 console.log(
-  JSON.stringify({ clean, attempts, outcomes: Array.from(outcomes), rejected: codecRejected[0] }),
+  JSON.stringify({
+    clean,
+    attempts,
+    outcomes: Array.from(outcomes),
+    extra: Array.from(extra),
+    rejected: codecRejected[0],
+  }),
 );

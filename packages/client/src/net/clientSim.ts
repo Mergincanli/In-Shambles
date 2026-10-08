@@ -7,6 +7,7 @@ import {
   CvarRegistry,
   type CvarsMsg,
   copyUserCmd,
+  createCollisionWorld,
   cvarBlockHash,
   type PlayerState,
   PmoveEvent,
@@ -124,6 +125,17 @@ export interface CmdSampler {
   sample(cmd: UserCmd, ps: Readonly<PlayerState>): void;
 }
 
+/** The cmap `contentHash` (16 lowercase hex digits, high lane first) of WELCOME's two lanes. */
+export function welcomeMapHash(m: WelcomeMsg): string {
+  return (
+    (m.mapHashHi >>> 0).toString(16).padStart(8, "0") +
+    (m.mapHashLo >>> 0).toString(16).padStart(8, "0")
+  );
+}
+
+/** The collision world of a client that has no map yet: nothing to collide with. */
+const NO_WORLD = createCollisionWorld([]);
+
 /** Holds still, facing wherever the player faces. */
 export class NeutralInput implements CmdSampler {
   sample(cmd: UserCmd, ps: Readonly<PlayerState>): void {
@@ -141,10 +153,19 @@ export type ClientLog = (level: "info" | "warn" | "error", msg: string) => void;
 
 export interface ClientSimOptions {
   readonly transport: Transport;
-  /** The map this client has loaded; WELCOME must name it, with the same content hash. */
-  readonly cmap: Cmap;
+  /**
+   * The map this client has loaded; WELCOME must name it, with the same content hash. When
+   * absent, the client loads the map WELCOME names (D-031): `onMapRequest` asks for it and
+   * `provideMap` hands it over; READY waits for it.
+   */
+  readonly cmap?: Cmap;
   /** Built from `cmap` when absent. */
   readonly world?: CollisionWorld;
+  /**
+   * WELCOME named a map and no `cmap` was given: load `name` (its `contentHash` as the cmap
+   * writes it, 16 hex digits) and call `provideMap`. Called from a frame's poll.
+   */
+  readonly onMapRequest?: (name: string, contentHash: string) => void;
   /** Sent in HELLO; the server refuses another build. */
   readonly buildHash: string;
   /** Monotonic milliseconds: `performance.now` in the browser, a fake clock in tests. */
@@ -196,7 +217,6 @@ export class ClientSim {
   /** [0] this frame's time (ms), shared with the clock, stats and render offset. */
   readonly now = new Float64Array(1);
   readonly cvars: CvarRegistry;
-  readonly world: CollisionWorld;
   readonly settings = new ClientNetSettings();
   readonly clock: ClientClock;
   readonly stats: NetStats;
@@ -218,7 +238,12 @@ export class ClientSim {
    */
   readonly pathShift = new Float64Array(1);
 
-  private readonly cmap: Cmap;
+  /** The loaded map, null until `provideMap` when the client loads the one WELCOME names. */
+  private cmap: Cmap | null;
+  private currentWorld: CollisionWorld;
+  /** The map WELCOME named (name and contentHash), once it arrived. */
+  private requested: { readonly name: string; readonly contentHash: string } | null = null;
+  private readonly onMapRequest: ((name: string, contentHash: string) => void) | null;
   private readonly clockFn: () => number;
   private readonly log: ClientLog;
   /**
@@ -250,8 +275,11 @@ export class ClientSim {
   private started = false;
 
   constructor(options: ClientSimOptions) {
-    this.cmap = options.cmap;
-    this.world = options.world ?? buildCollisionWorld(options.cmap);
+    this.cmap = options.cmap ?? null;
+    const cmap = options.cmap;
+    this.currentWorld =
+      options.world ?? (cmap === undefined ? NO_WORLD : buildCollisionWorld(cmap));
+    this.onMapRequest = options.onMapRequest ?? null;
     let cvars = options.cvars;
     if (cvars === undefined) {
       cvars = new CvarRegistry();
@@ -266,11 +294,12 @@ export class ClientSim {
     this.clock = new ClientClock(this.now);
     this.stats = new NetStats(this.now);
     this.offset = new RenderOffset(this.now);
-    this.predictor = new Predictor(this.world);
+    this.predictor = new Predictor(this.currentWorld);
     this.t[MISMATCH_SINCE] = Number.NaN;
     const onClosed = options.onClosed;
     const handler: ConnectionHandler = {
       onWelcome: (m) => this.onWelcome(m),
+      mapReady: () => this.cmap !== null,
       onSnapshot: (m) => this.onSnapshot(m),
       onCvars: (m) => this.onCvars(m),
       onPrint: (_level, text) => {
@@ -299,6 +328,42 @@ export class ClientSim {
 
   get state(): number {
     return this.connection.state;
+  }
+
+  /** The map's collision (an empty world until the map is loaded). */
+  get world(): CollisionWorld {
+    return this.currentWorld;
+  }
+
+  /** The loaded map, or null while the client waits for the one WELCOME named. */
+  get map(): Cmap | null {
+    return this.cmap;
+  }
+
+  /** The map WELCOME named (`name`, `contentHash`), or null before WELCOME. */
+  get mapRequest(): { readonly name: string; readonly contentHash: string } | null {
+    return this.requested;
+  }
+
+  /**
+   * Hands over the map the client loaded (D-031), synchronously: the one WELCOME named, with
+   * its content hash, or (before WELCOME) the one WELCOME will be checked against. Returns null,
+   * or why the map was refused; a refusal after WELCOME also ends the session with that reason.
+   */
+  provideMap(cmap: Cmap, world?: CollisionWorld): string | null {
+    if (this.cmap !== null) return `a map is already loaded (${this.cmap.name})`;
+    const want = this.requested;
+    if (want !== null && (cmap.name !== want.name || cmap.contentHash !== want.contentHash)) {
+      const why =
+        `server runs map ${want.name} (${want.contentHash}), ` +
+        `the client loaded ${cmap.name} (${cmap.contentHash})`;
+      this.connection.disconnect(why);
+      return why;
+    }
+    this.cmap = cmap;
+    this.currentWorld = world ?? buildCollisionWorld(cmap);
+    this.predictor.world = this.currentWorld;
+    return null;
   }
 
   get active(): boolean {
@@ -535,14 +600,21 @@ export class ClientSim {
 
   private onWelcome(m: WelcomeMsg): string | null {
     const cmap = this.cmap;
-    const hi = Number.parseInt(cmap.contentHash.slice(0, 8), 16);
-    const lo = Number.parseInt(cmap.contentHash.slice(8, 16), 16);
-    if (m.mapName !== cmap.name || m.mapHashHi !== hi || m.mapHashLo !== lo) {
+    const hash = welcomeMapHash(m);
+    if (cmap !== null && (m.mapName !== cmap.name || hash !== cmap.contentHash)) {
       return `server runs map ${m.mapName}, this client has ${cmap.name} (${cmap.contentHash})`;
     }
     const applied = applyCvarBlock(this.cvars, m.cvars);
     if (!applied.ok) return `server cvars refused (${applied.error} ${applied.name})`;
     this.predictor.setParams(this.cvars, cvarBlockHash(m.cvars));
+    this.requested = { name: m.mapName, contentHash: hash };
+    if (cmap !== null || this.onMapRequest === null) return null;
+    // A host's loader that throws must not escape the transport's poll: it ends the session.
+    try {
+      this.onMapRequest(m.mapName, hash);
+    } catch (e) {
+      return `could not load map ${m.mapName}: ${e instanceof Error ? e.message : String(e)}`;
+    }
     return null;
   }
 

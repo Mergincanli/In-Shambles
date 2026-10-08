@@ -6,10 +6,10 @@ import { build } from "vite";
 import { describe, expect, it } from "vitest";
 
 const clientDir = fileURLToPath(new URL("..", import.meta.url));
-const mapFile = fileURLToPath(new URL("../../../content/maps/movement_lab.cmap", import.meta.url));
+const mapsDir = fileURLToPath(new URL("../../../content/maps", import.meta.url));
 
 describe("client production build", () => {
-  it("builds the page, the app with the build hash, the server Worker and the map", async () => {
+  it("builds the page, the app with the build hash, the server Worker and every map", async () => {
     const outDir = mkdtempSync(join(tmpdir(), "client-build-"));
     process.env.BUILD_HASH = "test1234";
     try {
@@ -35,11 +35,19 @@ describe("client production build", () => {
       expect(workerJs).toContain("server running ");
       expect(workerJs).not.toMatch(/\bdocument\b|\bwindow\b/);
 
-      // The map ships as a file (never inlined), byte for byte, and the app fetches it by name.
-      const map = assets.find((f) => /^movement_lab-[\w-]+\.cmap$/.test(f));
-      expect(map, assets.join(", ")).toBeDefined();
-      expect(readFileSync(join(outDir, "assets", map ?? ""))).toEqual(readFileSync(mapFile));
-      expect(js).toContain(`assets/${map}`);
+      // Every map ships as a file (never inlined), byte for byte, and the app knows it by name:
+      // a dedicated server's WELCOME may name any of them (D-031).
+      const maps = readdirSync(mapsDir).filter((f) => f.endsWith(".cmap"));
+      expect(maps).toContain("arena_greybox.cmap");
+      for (const file of maps) {
+        const name = file.slice(0, -".cmap".length);
+        const built = assets.find((f) => new RegExp(`^${name}-[\\w-]+\\.cmap$`).test(f));
+        expect(built, `${file} in ${assets.join(", ")}`).toBeDefined();
+        expect(readFileSync(join(outDir, "assets", built ?? ""))).toEqual(
+          readFileSync(join(mapsDir, file)),
+        );
+        expect(js).toContain(`assets/${built}`);
+      }
       expect(js).not.toContain("data:application/octet-stream");
     } finally {
       delete process.env.BUILD_HASH;

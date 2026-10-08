@@ -32,6 +32,18 @@ export function registerServerCvars(reg: CvarRegistry): void {
     flags: CvarFlag.SERVER,
   });
   reg.register({
+    name: "sv_strictBuild",
+    type: "int",
+    // design (D-031): a mismatched build is KICKed. From source (tsx) startServer starts it at 0
+    // (a PRINT warning instead), since a dev page and a dev server rebuild at different times.
+    default: 1,
+    min: 0,
+    max: 1,
+    description:
+      "1: KICK a client whose build hash differs from the server's; 0: warn and let it in",
+    flags: CvarFlag.SERVER,
+  });
+  reg.register({
     name: "sv_sendBufferDrop",
     type: "int",
     default: 32768, // ESTIMATE (D-030)

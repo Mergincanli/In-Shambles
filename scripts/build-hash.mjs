@@ -1,6 +1,8 @@
-// The build hash every part of the game agrees on (M3 design §1 "Root", D-029): the Node server
-// computes it here when it runs from source and its bundle has it baked in by build.mjs. HELLO
-// carries it and a server refuses another build.
+// The build hash every part of the game agrees on (M3 design §1 "Root", D-029, D-031): the Node
+// server computes it here when it runs from source, its bundle has it baked in by build.mjs, and
+// the page's `__BUILD_HASH__` comes from here too (vite.config.ts; the build-hash guard checks
+// that nothing computes it another way). HELLO carries it; a server with sv_strictBuild 1 refuses
+// another build.
 import { execSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { dirname, resolve } from "node:path";

@@ -7,6 +7,7 @@ import {
   registerPmoveCvars,
 } from "@game/shared";
 import { describe, expect, it } from "vitest";
+import { connectSearch } from "../../src/app/params";
 import { Binds } from "../../src/console/binds";
 import { registerClientCvars } from "../../src/console/clientCvars";
 import { CONSOLE_COMMANDS, type ConsoleHost, runConsoleCommand } from "../../src/console/commands";
@@ -21,6 +22,8 @@ function host(connected = true, withNet = true, corrections: CorrectionLog | nul
   let profile: NetProfile = NET_PROFILE_LAN;
   let toggled = 0;
   let cleared = 0;
+  const connects: string[] = [];
+  let disconnects = 0;
   const h: ConsoleHost = {
     cvars,
     binds: new Binds(),
@@ -41,6 +44,21 @@ function host(connected = true, withNet = true, corrections: CorrectionLog | nul
         }
       : null,
     corrections,
+    server: "the local server (Worker)",
+    connected: () => connected,
+    connect: (address) => {
+      // boot.ts's own step: the page query to reload with (here recorded instead).
+      const next = connectSearch(address, "?autotest=1&connect=ws://old:1/");
+      if (!next.ok) return next.error;
+      connects.push(next.search);
+      return null;
+    },
+    disconnect: () => {
+      if (!connected) return false;
+      connected = false;
+      disconnects++;
+      return true;
+    },
   };
   const run = (line: string) => {
     out.length = 0;
@@ -55,6 +73,8 @@ function host(connected = true, withNet = true, corrections: CorrectionLog | nul
     profile: () => profile,
     toggled: () => toggled,
     cleared: () => cleared,
+    connects,
+    disconnects: () => disconnects,
   };
 }
 
@@ -179,6 +199,30 @@ describe("console commands (M2 design §2)", () => {
     expect(t.profile()).toBe(findNetProfile("wan-150-loss2"));
     expect(t.run("net_profile moon")[0]).toMatch(/^unknown profile moon/);
     expect(host(true, false).run("net_profile lan")[0]).toMatch(/no network simulator/);
+  });
+
+  it("connect shows the server or starts a session on another; disconnect leaves (D-031)", () => {
+    const t = host();
+    expect(t.run("connect")).toEqual(["playing on the local server (Worker)"]);
+    expect(t.run("connect ws://127.0.0.1:28700")).toEqual([]);
+    expect(t.run("connect localhost:28700")).toEqual([]);
+    // The page reloads with only `connect` replaced (`URLSearchParams` encodes the URL).
+    expect(t.connects).toEqual([
+      "autotest=1&connect=ws%3A%2F%2F127.0.0.1%3A28700%2F",
+      "autotest=1&connect=ws%3A%2F%2Flocalhost%3A28700%2F",
+    ]);
+    expect(new URLSearchParams(t.connects[0]).get("connect")).toBe("ws://127.0.0.1:28700/");
+    expect(t.run("connect wss://example.org")[0]).toMatch(/^connect: wss:\/\/ comes with/);
+    expect(t.run("connect http://example.org")[0]).toMatch(/starts with ws:\/\//);
+    expect(t.run("connect ws://h:1/?x=1")[0]).toMatch(/no query string/);
+    expect(t.connects).toHaveLength(2);
+    expect(t.run("disconnect")).toEqual([]);
+    expect(t.disconnects()).toBe(1);
+    // Once the session closed, `connect` alone no longer claims it plays there.
+    expect(t.run("connect")).toEqual(["not connected (last: the local server (Worker))"]);
+    expect(t.run("disconnect")).toEqual(["disconnect: not connected"]);
+    expect(t.disconnects()).toBe(1);
+    expect(host(false).run("disconnect")).toEqual(["disconnect: not connected"]);
   });
 
   it("clear, toggle the console, help, quotes", () => {

@@ -43,15 +43,16 @@
 
 - **Dedicated server:** Node process (`packages/server`) running 1..N matches; one match = one tick loop.
 - **M3 Node server** (`packages/server/src/node`, `src/transport`; D-029, D-030): one process, one port (`sv_port`, default 28700) and, until several matches per process arrive (D-047), one match named `main` on `sv_map`. Settings come from `server.cfg`, then the command line (`docs/06` §8). Clients connect with a WebSocket to `ws://<host>:<port>/`; any other path, or a query string, gets HTTP 404 before a socket opens. The same port answers `GET /status` (`{buildHash, protocol, matches:[{name, map, players, maxClients}]}`) and `GET /metrics` (JSON). Shutdown (SIGINT/SIGTERM) KICKs every client "server shutting down", closes its socket with 1001 and exits 0. The match code is the Worker's, unchanged (D-027).
+- **Connecting a browser** (D-031): the page plays on the local Worker server by default; `?connect=ws://host[:port]` (the port defaults to the server's 28700; or the console's `connect <address>`, which reloads the page with it) opens a WebSocket to a dedicated server instead, and `?net_profile=<name>` starts the client's net simulator at that profile. Every compiled map ships with the client as a file (`client/src/app/maps.ts`); on a dedicated server the client loads the one WELCOME names, checks its content hash against WELCOME's, and only then sends READY. A refused or failed connection, a map this build doesn't have or one with another hash ends the session with a reason the page shows (`disconnected: could not connect to the server`, `… the server runs version …`).
 - **Local/offline:** the *same* server code runs in a **Web Worker** in the browser. The transport is `PortTransport` (postMessage with transferable ArrayBuffers, §3.1), and the net simulator can inject latency and loss even locally.
 - **Connection lifecycle:**
   1. `HELLO`: protocol version, build hash, client nonce.
   2. `WELCOME`: client id, tick rate, current server tick, map id + content hash, replicated cvar block, match rules (match rules join WELCOME in a later protocol version; v1 has none, §3.6).
   3. Clock sync: 5 × `PING`/`PONG`, median RTT.
-  4. The client loads the map, then sends `READY`.
+  4. The client loads the map (if it has not yet: on a dedicated server, the one WELCOME names, D-031), then sends `READY` once the clock sync is done too.
   5. The client starts as a spectator; it joins a team and picks a loadout through reliable messages.
 - **M2 handshake on the server** (`packages/server/src/match/match.ts`, D-027):
-  - `HELLO`: the version is read first from HELLO's frozen first 3 B (§3.2). Another protocol version, or a build hash other than the server's, gets a `KICK` that says why, and the connection closes. A HELLO that doesn't decode gets a strike and a `KICK`.
+  - `HELLO`: the version is read first from HELLO's frozen first 3 B (§3.2). Another protocol version gets a `KICK` that says why, and the connection closes. So does a build hash other than the server's while `sv_strictBuild` is 1 (the Worker, the Node bundle; the KICK names both builds); at 0 (the Node server run from source, D-031) that client gets its `WELCOME` and a `PRINT` warning naming both builds. A HELLO that doesn't decode gets a strike and a `KICK`.
   - `WELCOME` carries the newest tick simulated as `serverTick`; `PONG` does too. Clock-sync `PING`s are answered from WELCOME on, and so are console `CMD`s.
   - `READY` spawns the player at once (M2 has no spectator step) at the map's first `info_player_start`: at rest, facing its yaw (`degreesToU16`), pitch 0, full stamina, grounded when the ground trace finds walkable ground. The origin is the entity's raised by `TRACE_EPSILON` to the D-017 rest height, floor + 1/32 u, so a fresh spawn behaves like a player that has landed: with its feet exactly on the floor it would meet a steep wedge's toe as a wall (D-023, "Steep toes").
   - The spawn state is the player's state at the tick that handled READY; that tick's snapshot carries the teleport flag, and simulation starts on the next tick. Until the client's first cmd arrives, the server repeats a neutral cmd (no move, the spawn yaw), which is what the client predicts with (D-028).
@@ -85,7 +86,7 @@ interface Transport {
 | `createLoopbackPair()` | M2 | In-memory, both channels interleaved in send order. In-process tests, NET-03/04 and bots. |
 | `PortTransport` (`client/src/net/portTransport.ts`) | M2 | The Worker server: one `MessageChannel` per channel, a transferred copy per packet. |
 | `WsTransport` (`server/src/transport/wsTransport.ts`) | M3 | The server end of a WebSocket (`ws`, D-030): both channels over one socket, described below. |
-| `WebSocketTransport` | M3 | The client end (browser and Node's built-in WebSocket). Still uses acks/baselines as if unreliable. |
+| `WebSocketTransport` (`client/src/net/webSocketTransport.ts`) | M3 | The client end (the browser's and Node's built-in WebSocket, D-030), described below. Still uses acks/baselines as if unreliable. |
 | `WebTransportTransport` | M9 | Datagrams for unreliable traffic, one reliable stream. WebTransport is supported in all major browsers since Safari 26.4 (March 2026); server-side HTTP/3 tooling is less mature. |
 
 **WebSocket (D-030).** One socket per client carries both channels, binary frames only, one message per frame and no extra bytes: a message's channel is its type's (`MSG_CHANNEL`, from the §3.3 table); a type that is no message arrives as unreliable and is struck. TCP still delivers in order, but the protocol keeps treating the unreliable channel as datagrams (§0). On the server (`WsTransport`, over a `ws` listener):
@@ -96,6 +97,12 @@ interface Transport {
 - **Allocation:** ws's received Buffers and the one copy per send are this boundary's allocation (D-030 extends D-026's postMessage exception); the match tick and the codecs stay allocation-free.
 - **Scheme:** `ws://` in M3; `wss://` comes with deployment (M9).
 
+On the client (`WebSocketTransport`, over a structural `SocketLike` so the client's net code stays DOM-free; the browser's WebSocket and Node's built-in one both fit):
+- **Receive:** binary type `arraybuffer`; arrivals are copied into a pooled queue until `poll()`, with the server's caps: 256 unreliable (the oldest dropped as lost) and 64 reliable between polls (past that the socket closes); an unreliable message over 1200 B is queued as a zero-length message for the connection to strike; a message over `MAX_RELIABLE_BYTES` (16384 B) or a text frame closes the socket.
+- **Send:** a view of the caller's bytes (one cached per recent length, so INPUT, PING and CMD from the connection's one writer each reuse theirs), which the WebSocket API copies before `send` returns. Before the socket opens, reliable sends (HELLO) are copied and sent on open in order; unreliable ones are dropped as lost.
+- **Close:** the page may only send close code 1000 (or 3000–4999), so every close the client starts is 1000 with the reason (cut to 123 B) saying why. The server's close reason reaches the connection as is; a connection that never opened (refused, failed upgrade) reads "could not connect to the server", one that dropped without a close frame (1006) "connection lost".
+- **Allocation:** the received ArrayBuffer, its event and the view over it, and the WebSocket's copy on send are the boundary's (as on the server); the rest (queueing, polls, sends) allocates nothing, which the native-ESM `wsTransport` workload checks for both ends.
+
 Every transport can be wrapped by `NetSimTransport` (`shared/src/net/netsim.ts`: latency, jitter, loss, duplication, reorder; §13, D-028). A bandwidth cap is not simulated yet.
 
 ### 3.2 Framing and versioning
@@ -104,7 +111,7 @@ Every transport can be wrapped by `NetSimTransport` (`shared/src/net/netsim.ts`:
 - **Bit-packed** writer/reader (`BitWriter`/`BitReader`, `shared/src/net/bitstream.ts`) with explicit widths (1–32 bits), LSB-first: stream bit *i* is bit *i* & 7 of byte *i* >> 3, a value's low bit first. Both work over a preallocated `Uint8Array` and never throw: an overflow, a value its width can't carry or a short read sets a sticky error flag (D-026).
 - **Decoders are bounds-checked** and return false on a short read, a wrong type byte, any value the encoder never writes, or bits left after the message (beyond the zero padding of its last byte). The receiver drops the packet and counts a strike. Encoders refuse fields out of their layout's range the same way, so a bad message is never sent.
 - **One message per packet.** Unreliable packets are at most `MAX_UNRELIABLE_BYTES` = 1200 B (datagram-safe), reliable messages at most `MAX_RELIABLE_BYTES` = 16384 B (`shared/src/net/protocol.ts`).
-- **On a WebSocket** a packet is one binary frame, and the receiver takes the channel from the type byte (`MSG_CHANNEL`, §3.1). The server accepts frames up to `MAX_CLIENT_MESSAGE_BYTES` = 2048 B, above the largest message a client sends (a CMD of 1026 B), and closes the socket on a larger one (D-030).
+- **On a WebSocket** a packet is one binary frame, and the receiver takes the channel from the type byte (`MSG_CHANNEL`, §3.1). The server accepts frames up to `MAX_CLIENT_MESSAGE_BYTES` = 2048 B, above the largest message a client sends (a CMD of 1026 B), and closes the socket on a larger one; the client accepts up to `MAX_RELIABLE_BYTES` (D-030).
 
 ### 3.3 Message types
 
@@ -328,7 +335,7 @@ The loop is driven by a monotonic clock with an accumulator. **Never `setInterva
 - Initial: 5 ping samples during the handshake, median RTT → estimate the server tick.
 - Ongoing: an EWMA of RTT from `PING`/`PONG` every second. Snapshot `serverTick` re-anchors the estimate.
 - **M2 implementation** (`client/src/net/clock.ts`, D-028): the client predicts in **server-tick space**: its tick T is the server's tick T, run early enough that the cmd for T arrives just before the server simulates T.
-  - After WELCOME the client pings every 50 ms until 5 pongs are back (a lost ping is simply replaced), takes their median as the RTT and only then sends `READY`.
+  - After WELCOME the client pings every 50 ms until 5 pongs are back (a lost ping is simply replaced), takes their median as the RTT and only then sends `READY` (on a dedicated server, also only once the map WELCOME names is loaded, D-031).
   - At the first snapshot A (the spawn, adopted whole) it jumps to tick A + ceil(RTT / tick) + `cl_inputBuffer`, at most 64 ticks ahead (a later anchor adds the adaptive lead, §8.2). The ticks between are filled with neutral cmds (no move, the spawn's angles), predicted and sent at once: the server repeats that same neutral cmd until the client's arrive (§2), so the start costs no correction.
   - From then on the client's own accumulator advances its tick, at most 5 ticks per frame. What a longer frame owes is carried into the next frames, not dropped: the client's tick follows the server's clock, so dropped time would be lead lost until a clock step. Only a debt past 64 ticks is dropped (the snapshots then hard-resync), and the prediction stops 64 ticks past the newest snapshot (the server's input horizon) while snapshots are missing. A ping a second feeds EWMAs of the RTT and its jitter for the netgraph, and the input buffer health re-anchors the tick in steps (§8.2).
 

@@ -108,25 +108,32 @@ packages/server/src/
                        per-pass tick times, CPU per second, tick_drop)
     log.ts             JSON-lines logger
     maps.ts            content/maps/<name>.cmap (or --maps)
-    buildHash.ts       the bundle's baked-in hash, else scripts/build-hash.mjs
+    buildHash.ts       the bundle's baked-in hash, else scripts/build-hash.mjs (the page's too,
+                       D-031); whether this is the bundle (sv_strictBuild)
     console.ts         admin console on stdin
   transport/           wsListener.ts (http.Server + ws noServer, one upgrade handler, /status and
                        /metrics), wsTransport.ts (WsTransport, D-030); webtransport adapter (M9)
 
 packages/client/src/
-  app/                 boot.ts (fetch the map as a ?url asset, start the server Worker, connect over
-                       PortTransport, build the scene, start the frame loop), game.ts (the frame loop,
-                       the view pose, the autotest status), params.ts (the ?autotest=1, ?bot=, ?cam=
-                       URL hooks), settings.ts (ARCHIVE cvars and binds saved in localStorage, §6);
-                       later routing (menu ↔ match)
+  app/                 boot.ts (the local server: fetch movement_lab, start the server Worker, connect
+                       over PortTransport; or, with ?connect=, a WebSocketTransport to a dedicated
+                       server and the map its WELCOME names (D-031); the net simulator at
+                       ?net_profile=; build the scene, start the frame loop), maps.ts (every
+                       content/maps/*.cmap as a bundled ?url asset, fetched by name and checked
+                       against WELCOME's hash), game.ts (the frame loop, the view pose, the autotest
+                       status), params.ts (the ?autotest=1, ?bot=, ?cam=, ?connect=, ?net_profile=
+                       URL hooks; server addresses), settings.ts (ARCHIVE cvars and binds saved in
+                       localStorage, §6); later routing (menu ↔ match)
   net/                 DOM-free (tsconfig.net.json), exported as @game/client/net for tests and bots:
     clientSim.ts       ClientSim: one frame = poll (reconcile) → clock step → tick accumulator
-                       (sample, predict, INPUT) → pings; renderOrigin, renderTick, pathShift (the
+                       (sample, predict, INPUT) → pings; the map given up front, or the one WELCOME
+                       names through onMapRequest and provideMap (D-031); renderOrigin, renderTick,
+                       pathShift (the
                        render-tick jump of a clock step or re-anchor); tick-tagged movement events of
                        first predictions (TickEvents, flagged when predicted under such a jump); the
                        CmdSampler interface
-    connection.ts      handshake state machine (HELLO → WELCOME → pings → READY → spawn), decoding,
-                       channel checks and strikes, INPUT/CMD encoding
+    connection.ts      handshake state machine (HELLO → WELCOME → pings and the map → READY →
+                       spawn), decoding, channel checks and strikes, INPUT/CMD encoding
     predictor.ts       cmd and state rings (128), exact compare, re-simulation with params by tick,
                        pending CVARS params, correction log (32), hard resync (docs/05 §5)
     clock.ts           handshake median RTT, lead, RTT/jitter EWMAs, buffer-health step re-anchoring
@@ -137,6 +144,8 @@ packages/client/src/
     stats.ts           totals and rolling 1 s windows for the netgraph
     cvars.ts           the client's net settings (cl_inputBuffer, cl_correctionSmoothMs, cl_teleportDist)
     portTransport.ts   PortTransport over two MessagePort-like ports (the Worker link)
+    webSocketTransport.ts  WebSocketTransport over a structural SocketLike (the browser's or Node's
+                       WebSocket): channel from the type byte, pooled inbox, close reasons (D-030)
     scriptedInput.ts   StrafeCircuit, MixedInput (?bot= input, NET tests, M3 bots)
                        (later: remote interpolation)
   input/               keyboard.ts (keys → binds, KeyboardEvent.code), mouse.ts (raw counts → view
@@ -175,8 +184,10 @@ packages/client/scripts/  Node, driving the built client in headless Chromium (P
   png.ts               a minimal PNG decoder for pixel checks
   vectorsPage.ts       builds the phone vectors page as one self-contained vectors.html (D-022)
   singleFile.ts        inlines a Vite page's module script into one HTML file
-packages/client/e2e/   pnpm test:browser (docs/10 §2): smoke.e2e.ts (the e2e smoke test),
-                       vectors-page.e2e.ts (the one-file vectors page passes from a file URL)
+packages/client/e2e/   pnpm test:browser (docs/10 §2): smoke.e2e.ts (the e2e smoke test on the Worker),
+                       connect.e2e.ts (the built client at ?connect= on the built server, D-031),
+                       health.ts (the prediction-health rule both judge by), vectors-page.e2e.ts (the
+                       one-file vectors page passes from a file URL)
 
 packages/tools/src/
   mapc/                TrenchBroom .map → cmap compiler (M5)
@@ -239,7 +250,7 @@ DEV / OFFLINE                                  ONLINE
 - **Movement/combat tunables** (`pm_*`, `st_*`, `wp_*` overrides) are `REPLICATED`. The server sends the block on join and on change; the block hash appears in snapshots.
 - **Changing a replicated cvar** (D-027): the server owns them, so a client's console `set`, `reset` or `toggle` on a `REPLICATED` cvar goes to the server as a `CMD`. The server applies it if the session is admin (the Worker's one client is; M3 decides authorization on the Node server), replies with `PRINT`, and broadcasts `CVARS` with the effective tick; the client's mirror registry and its prediction parameters switch at that tick (`docs/05` §3.5).
 - **Console UI:** toggle with the backquote key (`Backquote` code); Escape also closes it, and both still do when the console's input has lost focus (a click on the view or its output). A held toggle key does not flip it again on auto-repeat. While it is open it owns the keyboard: every bound key is released, and the pointer lock with it. Planned commands: `set`, `toggle`, `reset`, `cvarlist [prefix]`, `bind`, `unbind`, `exec <file>`, `connect`, `disconnect`, `net_profile <name>`, `record`/`stoprecord`, `demo <file>`, `rcon <cmd>`.
-- **Implemented in M2** (`client/src/console/commands.ts`; tokens split at whitespace, double quotes group one with spaces, as the server's CMD parser does):
+- **Implemented in M2** (and `connect`/`disconnect` in M3; `client/src/console/commands.ts`; tokens split at whitespace, double quotes group one with spaces, as the server's CMD parser does):
 
   | Command | Effect |
   |---|---|
@@ -249,13 +260,15 @@ DEV / OFFLINE                                  ONLINE
   | `cvarlist [prefix]` | each cvar with its flags (`A`rchive, `R`eplicated, `C`heat, `L`atch, `S`erver) and value, then the count |
   | `bind <code> [command]` | shows or sets a key's command: a `+action` or any console line; refuses an empty command, Ctrl/Alt/Meta keys, and taking `toggleconsole` off its last key |
   | `unbind <code>` | removes a key's bind, except the last key bound to `toggleconsole` |
-  | `net_profile [name]` | shows, or switches, the client end's simulated link (`docs/10` §3 profiles; the page always wraps its transport in the net simulator, starting at `lan`) |
+  | `net_profile [name]` | shows, or switches, the client end's simulated link (`docs/10` §3 profiles; the page always wraps its transport in the net simulator, starting at `?net_profile=<name>`, or `lan` when that is absent or unknown, D-031) |
   | `net_corrections` | prints the prediction's correction log (the newest 32, oldest first): each snapshot tick, the newest tick re-simulated, the visible distance and the fields that differed (`docs/05` §5) |
+  | `connect [address]` | alone, says where this session plays (a server's address, or the local server); with `ws://host[:port][/path]` (or `host[:port]`; the port defaults to the server's 28700) reloads the page with `?connect=` to play there (D-031). `wss://` comes with deployment (M9) |
+  | `disconnect` | leaves the server: the session closes with "left the server" |
   | `clear` | empties the console |
   | `toggleconsole` | opens or closes the console (what Backquote is bound to) |
   | `help` | lists these; a cvar's name alone prints its value, default and description |
 
-  `exec`, `connect`, `disconnect`, demos and `rcon` come with the milestones that need them.
+  `connect` and `disconnect` came in M3 (D-031); `exec`, demos and `rcon` come with the milestones that need them.
 - **Binds** use `KeyboardEvent.code` (physical keys) so AZERTY/QWERTZ layouts work; mouse buttons are `Mouse0`..`Mouse4`. Codes match ignoring case. A `+action` is held while its key is down (a key releases what it pressed even if rebound meanwhile); any other bound line runs once on the press. Bound keys call `preventDefault` (Space must not scroll); presses with Ctrl, Meta or Alt held go to the browser, so those keys cannot be bound (`ControlLeft`/`Right`, `AltLeft`/`Right`, `MetaLeft`/`Right`; a Ctrl crouch would also swallow the movement keys pressed under it). An auto-repeat never runs a command again. One key always stays bound to `toggleconsole`: binds are saved, and without it nothing could reopen the console to repair them. A hidden tab or a lost focus releases every key.
 - **Default binds** (M2 design §2; all rebindable). There are no Ctrl binds: the browser keeps Ctrl+W and its kin.
 
@@ -335,6 +348,7 @@ DEV / OFFLINE                                  ONLINE
 | `sv_port` | 28700 | design (D-029); 0 picks a free port |
 | `sv_host` | 0.0.0.0 | design; bind address |
 | `sv_map` | arena_greybox | design; `content/maps/<name>.cmap` |
+| `sv_strictBuild` | 1 | design (D-031): a client whose HELLO names another build is KICKed with both hashes; at 0 it gets its WELCOME and a PRINT warning. Run from source (tsx) the server starts it at 0, since a dev page and a dev server compute their hashes when each starts; read when the match is created; the protocol version is always strict |
 | `sv_sendBufferDrop` | 32768 | ESTIMATE (D-030): bytes waiting in a client's socket past which unreliable sends drop |
 | `sv_sendBufferClose` | 1048576 | ESTIMATE (D-030): past this the socket closes 1008 "too slow" (checked every tick); must be above `sv_sendBufferDrop` |
 

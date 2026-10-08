@@ -40,6 +40,17 @@ export interface ConsoleHost {
   readonly net: NetProfileControl | null;
   /** The prediction's correction log, for `net_corrections`; null without a client. */
   readonly corrections: CorrectionLog | null;
+  /** Where this session plays, for `connect` alone: a server's ws:// URL or the local Worker. */
+  readonly server: string;
+  /** Whether that session is still open (a kick, a lost link or `disconnect` ends it). */
+  connected(): boolean;
+  /**
+   * Starts a session on the server at `address` (D-031; the page reloads with `?connect=`).
+   * Returns why it can't, or null.
+   */
+  connect(address: string): string | null;
+  /** Ends the session; false when there is none. */
+  disconnect(): boolean;
 }
 
 /** Every command and its usage, for `help` and docs/06 §6. */
@@ -52,6 +63,8 @@ export const CONSOLE_COMMANDS: readonly (readonly [string, string])[] = Object.f
   ["unbind", "unbind <code>: remove a key's bind (one key always keeps toggleconsole)"],
   ["net_profile", "net_profile [name]: show or switch the simulated network profile"],
   ["net_corrections", "net_corrections: the newest prediction corrections and what differed"],
+  ["connect", "connect [ws://host[:port]]: show the server, or play on another (the page reloads)"],
+  ["disconnect", "disconnect: leave the server"],
   ["clear", "clear: empty the console"],
   ["toggleconsole", "toggleconsole: open or close the console"],
   ["help", "help: this list; a cvar's name alone shows its value"],
@@ -147,6 +160,19 @@ export function runConsoleCommand(text: string, host: ConsoleHost): void {
       return;
     case "net_corrections":
       netCorrections(host);
+      return;
+    case "connect":
+      if (args[0] === undefined) {
+        host.print(
+          host.connected() ? `playing on ${host.server}` : `not connected (last: ${host.server})`,
+        );
+      } else {
+        const why = host.connect(args[0]);
+        if (why !== null) host.print(`connect: ${why}`);
+      }
+      return;
+    case "disconnect":
+      if (!host.disconnect()) host.print("disconnect: not connected");
       return;
     case "clear":
       host.clear();

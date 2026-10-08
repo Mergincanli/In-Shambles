@@ -6,7 +6,7 @@ import { fromRoot } from "../../src/paths";
 // The per-tick paths (quantizePlayerState, snapOrigin, the state ring, copy/equals,
 // sanitizeUserCmd, the pmove params refresh and basics, whole pmove ticks in every M2 move mode,
 // the scenario runner and bots, the per-tick message codecs, the transports, the server's match
-// tick and the Node server's timing wrapper, the server's WebSocket inbox, the client's prediction
+// tick and the Node server's timing wrapper, both ends of the WebSocket transport, the client's prediction
 // and reconciliation, and the BVH queries)
 // must not allocate under native ES modules either, where V8 boxes a double returned by a call it
 // doesn't inline or joined with a module constant in a ternary. Vitest's module runner hides
@@ -20,6 +20,8 @@ interface ChildResult {
   clean: boolean;
   attempts: string[];
   outcomes: number[];
+  /** wsTransport only: the client end's outcomes. */
+  extra: number[];
   /** codec only: hostile packets the decoders refused. */
   rejected: number;
 }
@@ -132,12 +134,14 @@ describe.concurrent("per-tick paths under native ES modules", () => {
     expect(r.clean, r.attempts.join("; ")).toBe(true);
   }, 30_000);
 
-  it("the server's WebSocket transport allocates nothing per arrival or poll (D-030)", async ({
+  it("both WebSocket transport ends allocate nothing per arrival, poll or client send (D-030)", async ({
     expect,
   }) => {
     const r = await runChild("wsTransport");
-    // Reliable deliveries, zero-length markers for oversized messages, drop-oldest losses.
+    // Reliable deliveries, zero-length markers for oversized messages, drop-oldest losses; on
+    // both ends, and the client's sends.
     for (const n of r.outcomes) expect(n).toBeGreaterThan(0);
+    for (const n of r.extra) expect(n).toBeGreaterThan(0);
     expect(r.clean, r.attempts.join("; ")).toBe(true);
   }, 30_000);
 

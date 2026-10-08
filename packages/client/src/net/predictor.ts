@@ -178,7 +178,8 @@ export class Predictor {
   private readonly scratch = new PlayerState();
   private readonly oldLatest = new Float64Array(3);
 
-  constructor(readonly world: CollisionWorld) {}
+  /** The map's collision; `ClientSim.provideMap` sets it when the map arrives after WELCOME. */
+  constructor(public world: CollisionWorld) {}
 
   /** The parameters for `tick`. */
   paramsFor(tick: number): PmoveParams {

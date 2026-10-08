@@ -11,6 +11,7 @@ export {
   WsListener,
 } from "../transport/wsListener";
 export { attachWs, WsLimits, type WsSocket, WsTransport } from "../transport/wsTransport";
+export { isBundledServer, serverBuildHash } from "./buildHash";
 export { type CommandLine, ConfigError, parseCommandLine, parseServerCfg } from "./config";
 export { createNodeHost, type PassClock, type ServerMatch, TimedPass } from "./host";
 export { createJsonLog, type JsonLog } from "./log";

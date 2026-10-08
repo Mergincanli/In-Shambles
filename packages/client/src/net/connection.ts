@@ -64,6 +64,8 @@ export const CONN_CLOSED = 5;
 export interface ConnectionHandler {
   /** WELCOME arrived; returns a reason to disconnect, or null to go on. */
   onWelcome(m: WelcomeMsg): string | null;
+  /** The map WELCOME named is loaded: READY may go (D-031). */
+  mapReady(): boolean;
   /** A SNAPSHOT that decoded, in CONN_SPAWNING or CONN_ACTIVE. `m` is reused. */
   onSnapshot(m: SnapshotMsg): void;
   /** A CVARS that decoded, from WELCOME on. `m` is reused. */
@@ -133,7 +135,10 @@ export class Connection {
     if (this.state !== CONN_IDLE && this.state !== CONN_CLOSED) this.transport.poll();
   }
 
-  /** Per frame, after `poll`: pings when due, and READY once the clock handshake is done. */
+  /**
+   * Per frame, after `poll`: pings when due, and READY once the clock handshake is done and the
+   * map WELCOME named is loaded (D-031), so the spawn never arrives before the world it is in.
+   */
   update(): void {
     const s = this.state;
     if (s < CONN_SYNCING || s === CONN_CLOSED) return;
@@ -143,7 +148,7 @@ export class Connection {
       w.reset();
       if (encodePing(w, this.ping)) this.sendUnreliable();
     }
-    if (s === CONN_SYNCING && this.clock.handshakeDone) {
+    if (s === CONN_SYNCING && this.clock.handshakeDone && this.handler.mapReady()) {
       const w = this.writer;
       w.reset();
       encodeReady(w);
@@ -277,6 +282,8 @@ export class Connection {
       this.disconnect(refusal);
       return;
     }
+    // The handler may have ended the session itself (a map refused from inside `onMapRequest`).
+    if (this.state === CONN_CLOSED) return;
     this.clientId = m.clientId;
     this.state = CONN_SYNCING;
   }

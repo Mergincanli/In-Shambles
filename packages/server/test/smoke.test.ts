@@ -193,6 +193,18 @@ describe("server smoke test", () => {
       return client.welcomes.length === 1;
     }, "WELCOME");
     expect(client.welcomes[0]?.mapName).toBe("arena_greybox");
+    // The bundle is strict about builds (sv_strictBuild 1, D-031): another one is KICKed with both.
+    const stranger = await NodeWsClient.connect(`ws://127.0.0.1:${port}/`);
+    onTestFinished(() => stranger.ws.close());
+    const other = new TestClient(stranger);
+    other.hello("someone-else");
+    await until(() => {
+      other.poll();
+      return other.closed !== null;
+    }, "the other build's kick");
+    expect(other.kicks.map((k) => k.reason)).toEqual([
+      `build someone-else does not match the server's ${buildHash}`,
+    ]);
 
     run.kill("SIGTERM");
     const exit = await within(run.exited, 5_000, "no exit after SIGTERM");

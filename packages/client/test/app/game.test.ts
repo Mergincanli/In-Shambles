@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { Match } from "@game/server";
+import { DEFAULT_PORT } from "@game/server/node";
 import {
   buildCollisionWorld,
   CvarRegistry,
@@ -24,7 +25,7 @@ import {
   type StatusSink,
   THIRD_PERSON_DISTANCE,
 } from "../../src/app/game";
-import { parseBootParams } from "../../src/app/params";
+import { DEFAULT_SERVER_PORT, parseBootParams, parseServerUrl } from "../../src/app/params";
 import { ACTION_FORWARD, ACTION_JUMP, Binds } from "../../src/console/binds";
 import { registerClientCvars } from "../../src/console/clientCvars";
 import { type ConsoleHost, runConsoleCommand } from "../../src/console/commands";
@@ -510,6 +511,10 @@ describe("player input, console, HUD and debug draw in the frame (M2 increment 1
       sendServer: (t) => p.client.sendCommand(t),
       net: null,
       corrections: p.client.predictor.corrections,
+      server: "the test match",
+      connected: () => !p.client.closed,
+      connect: () => "not in this test",
+      disconnect: () => false,
     };
     p.actions.press(ACTION_FORWARD);
     p.actions.press(ACTION_JUMP);
@@ -531,6 +536,8 @@ describe("boot URL parameters (M2 design §2 autotest hooks)", () => {
       autotest: true,
       bot: "circle",
       camera: null,
+      connect: null,
+      netProfile: null,
     });
     expect(parseBootParams("").autotest).toBe(false);
     expect(parseBootParams("?autotest=yes").autotest).toBe(false);
@@ -538,5 +545,46 @@ describe("boot URL parameters (M2 design §2 autotest hooks)", () => {
     for (const bad of ["1,2,3,4", "1,2,3,4,5,6", "1,2,,4,5", "a,2,3,4,5", "1,2,3,4,Infinity"]) {
       expect(parseBootParams(`?cam=${bad}`).camera, bad).toBeNull();
     }
+  });
+
+  it("reads a server to connect to and a net profile (D-031)", () => {
+    const p = parseBootParams("?connect=ws://127.0.0.1:28700&net_profile=wan-100-loss1");
+    expect(p.connect).toBe("ws://127.0.0.1:28700");
+    expect(p.netProfile).toBe("wan-100-loss1");
+  });
+});
+
+describe("server addresses (D-031)", () => {
+  it("take ws://host:port or host:port, with an optional path", () => {
+    expect(parseServerUrl("ws://127.0.0.1:28700")).toEqual({
+      ok: true,
+      url: "ws://127.0.0.1:28700/",
+    });
+    expect(parseServerUrl(" localhost:28700 ")).toEqual({ ok: true, url: "ws://localhost:28700/" });
+    // Without a port: the server's default, not the scheme's 80.
+    expect(DEFAULT_SERVER_PORT).toBe(DEFAULT_PORT);
+    expect(parseServerUrl("ws://host/m/lab")).toEqual({ ok: true, url: "ws://host:28700/m/lab" });
+    expect(parseServerUrl("localhost")).toEqual({ ok: true, url: "ws://localhost:28700/" });
+    expect(parseServerUrl("[::1]")).toEqual({ ok: true, url: "ws://[::1]:28700/" });
+    expect(parseServerUrl("ws://[::1]:9/")).toEqual({ ok: true, url: "ws://[::1]:9/" });
+    // An explicit 80 stays 80 (URL writes it without the port).
+    expect(parseServerUrl("ws://host:80/")).toEqual({ ok: true, url: "ws://host/" });
+  });
+
+  it.each([
+    ["", /no server address/],
+    ["ws://", /not a server address/],
+    ["wss://example.org", /wss:\/\/ comes with deployment/],
+    ["http://example.org", /starts with ws:\/\//],
+    ["ws://host:1/?a=1", /no query string/],
+    ["ws://host:1/#x", /no query string/],
+    ["ws://host:1/?", /no query string/],
+    ["ws://host:1/#", /no query string/],
+    ["host:1?", /no query string/],
+    ["ws://user:pw@host:1", /no user name/],
+  ])("refuse %j", (text, why) => {
+    const r = parseServerUrl(text);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(why);
   });
 });

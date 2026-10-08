@@ -7,7 +7,7 @@ import { MATCH_MAX_CLIENTS, Match } from "../match/match";
 import { TickHistogram, type TickWindow } from "../match/tickStats";
 import { WsListener } from "../transport/wsListener";
 import type { WsTransport } from "../transport/wsTransport";
-import { serverBuildHash } from "./buildHash";
+import { isBundledServer, serverBuildHash } from "./buildHash";
 import {
   applyAssignments,
   ConfigError,
@@ -89,6 +89,9 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   const cli = parseCommandLine(options.args ?? []);
   const cvars = new CvarRegistry();
   registerServerCvars(cvars);
+  // From source a mismatched build only warns (D-031): `pnpm dev` and `pnpm dev:server` compute
+  // their hashes when each starts. server.cfg or a flag may still set it.
+  if (!isBundledServer()) cvars.set("sv_strictBuild", 0);
   const template = new CvarRegistry();
   registerPmoveCvars(template);
   const cfgPath = cli.cfg === null ? resolve(cwd, "server.cfg") : resolve(cwd, cli.cfg);
@@ -107,7 +110,13 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
 
   const main: ServerMatch = {
     name: DEFAULT_MATCH,
-    match: new Match({ cmap, cvars: template, buildHash, log: matchLog(log, DEFAULT_MATCH) }),
+    match: new Match({
+      cmap,
+      cvars: template,
+      buildHash,
+      strictBuild: cvars.getNumber("sv_strictBuild", 1) === 1,
+      log: matchLog(log, DEFAULT_MATCH),
+    }),
     ticks: new TickHistogram(),
   };
   const matches: Record<string, ServerMatch> = { [DEFAULT_MATCH]: main };
