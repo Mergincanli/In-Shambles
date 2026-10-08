@@ -11,6 +11,7 @@ import {
   NeutralInput,
   SCRIPTED_INPUTS,
   STAT_CORRECTIONS,
+  STAT_HARD_RESYNCS,
   STAT_STARVED,
   STAT_STARVED_CORRECTIONS,
   STAT_STRIKES,
@@ -487,5 +488,42 @@ describe("scripted input", () => {
     s.sample(c, ps);
     expect(c.forward).toBe(127);
     expect(c.buttons).not.toBe(0);
+  });
+});
+
+// In the NET gate (`pnpm test:net`): the match loop's yield on a late wake (D-027). The real Node
+// server is held to the same in `pnpm test:long` (packages/tools/long/server-stall.long.ts),
+// since this harness encodes Node's order of a stall's timer and reads as an assumption.
+describe("NET-04: a server stall's catch-up ticks", () => {
+  it("get the cmds sent during it: none starves, on a 60 fps lan client (D-027)", () => {
+    // 60 fps on lan, the e2e's rhythm: a lead of 3 ticks covers the round trip and the 2-tick
+    // input buffer. The server's host stalls 50–100 ms (a GC, a long callback) while the
+    // client's frames stay on time; the input that arrives meanwhile is read after the wake due
+    // at the stall's end, as on Node. The loop yields on that late wake, so its 3–5 catch-up
+    // ticks find the cmds that were sent on time. Without the yield, the ticks past the input
+    // buffer repeated a cmd: 13 starved ticks here, each a correction, with no client frame over
+    // 18 ms (the e2e's "starved cmds, no long frame").
+    const h = new NetHarness({ input: new StrafeCircuit(), frameHz: 60, seed: 7 });
+    h.run(4000);
+    const t = h.client.stats.totals;
+    const before = [t[STAT_STARVED], t[STAT_CORRECTIONS], t[STAT_HARD_RESYNCS]];
+    const starvedBefore = h.serverStarved.length;
+    const frames = h.frames.time.length;
+    const stats = h.multi.loop.stats;
+    for (const ms of [50, 70, 85, 100]) {
+      h.multi.stallServer(ms);
+      h.run(1000);
+    }
+    // The client's frames stayed on time (60 fps ± 1 ms), so nothing was sent late.
+    const times = h.frames.time.slice(frames - 1);
+    let longest = 0;
+    for (let i = 1; i < times.length; i++) {
+      longest = Math.max(longest, (times[i] as number) - (times[i - 1] as number));
+    }
+    expect(longest).toBeLessThan(20);
+    expect(h.serverStarved.slice(starvedBefore)).toEqual([]);
+    expect([t[STAT_STARVED], t[STAT_CORRECTIONS], t[STAT_HARD_RESYNCS]]).toEqual(before);
+    // Each stall made one late wake, and it yielded.
+    expect(stats.yields).toBe(4);
   });
 });

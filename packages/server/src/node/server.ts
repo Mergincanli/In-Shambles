@@ -156,6 +156,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
             uptimeS: round3((performance.now() - startedMs) / 1000),
             passes: pass.passes,
             droppedTicks: loop.stats.dropped,
+            loopYields: loop.stats.yields,
             tickUs: windowJson(pass.ticks.run),
             lastSecondUs: lastSecondJson(pass.ticks),
             cpuMsPerWallS: round3(pass.cpuMsPerWallS),

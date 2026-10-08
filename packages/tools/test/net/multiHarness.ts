@@ -152,7 +152,14 @@ export class SessionTap implements Transport {
   readonly down = new TrafficCounts();
   readonly up = new TrafficCounts();
 
-  constructor(readonly inner: Transport) {}
+  /**
+   * `held()` true keeps what arrived from the match's poll (the harness holds a stalled server's
+   * input, `MultiHarness.stallServer`).
+   */
+  constructor(
+    readonly inner: Transport,
+    private readonly held: () => boolean = () => false,
+  ) {}
 
   // Counted only when the inner transport took the message (its own `sent` rose).
   sendUnreliable(d: Uint8Array, len: number): void {
@@ -179,7 +186,7 @@ export class SessionTap implements Transport {
   }
 
   poll(): void {
-    this.inner.poll();
+    if (!this.held()) this.inner.poll();
   }
 
   close(reason?: string): void {
@@ -298,7 +305,7 @@ export class HarnessClient {
         : (rng) => 1000 / frameHz + (rng.nextFloat() * 2 - 1));
     this.rng = new Mulberry32((seed ^ 0x51f7) >>> 0);
     const [clientEnd, serverEnd] = createLoopbackPair();
-    this.tap = new SessionTap(serverEnd);
+    this.tap = new SessionTap(serverEnd, () => h.serverInputHeld);
     this.session = h.match.connect(this.tap, options.admin ?? false);
     let transport: Transport = clientEnd;
     this.sim = null;
@@ -571,6 +578,11 @@ export class MultiHarness {
   private readonly timers: TimerHeap = { at: [], seq: [], cb: [] };
   private seq = 0;
   private stopped = false;
+  /** The server's host is stalled until this harness time (`stallServer`). */
+  private serverStalledUntil = 0;
+  /** The release of a stall's held input is queued. */
+  private releaseQueued = false;
+  private inputHeld = false;
 
   constructor(options: MultiHarnessOptions = {}) {
     this.mapName = options.map ?? "movement_lab";
@@ -586,7 +598,7 @@ export class MultiHarness {
     });
     const host: LoopHost = {
       now: () => this.now,
-      schedule: (cb, ms) => this.at(this.now + ms, cb),
+      schedule: (cb, ms) => this.at(this.now + ms, () => this.serverWake(cb)),
       log: () => {},
     };
     this.loop = startMatchLoop({ tick: () => this.serverTick() }, host);
@@ -620,6 +632,28 @@ export class MultiHarness {
     const r = new RawClient(this.match, clientEnd, serverEnd, admin);
     this.raws.push(r);
     return r;
+  }
+
+  /**
+   * Stalls the server's host for `ms` from now (its JS blocked: a GC, a long callback): its loop's
+   * wakes wait for the end, while the clients' frames go on. The input that arrives meanwhile is
+   * read only after the wake that is due at the end, the order Node keeps for such a stall (an
+   * overdue timer runs before the socket reads that piled up; D-027). That order is an assumption
+   * here: `packages/tools/long/server-stall.long.ts` checks it on the real Node server. The match
+   * loop's yield on a late wake is what lets that input reach the catch-up ticks. Raw endpoints
+   * are not held.
+   */
+  stallServer(ms: number): void {
+    this.serverStalledUntil = Math.max(this.serverStalledUntil, this.now + ms);
+    this.inputHeld = true;
+  }
+
+  /**
+   * The clients' input is held from the match while a stall's I/O waits (`stallServer`): the
+   * match's polls of their sessions deliver nothing.
+   */
+  get serverInputHeld(): boolean {
+    return this.inputHeld;
   }
 
   /** Runs `cb` at harness time `atMs` (now if it is past), after timers already due then. */
@@ -664,6 +698,26 @@ export class MultiHarness {
   /** Stops the event loop: `run` returns at once from now on. */
   stop(): void {
     this.stopped = true;
+  }
+
+  /** A wake of the match loop: during a stall it moves to the stall's end, ahead of the I/O. */
+  private serverWake(cb: () => void): void {
+    const until = this.serverStalledUntil;
+    if (this.now < until) {
+      this.at(until, () => this.serverWake(cb));
+      if (!this.releaseQueued) {
+        // Queued after the wake, at the same time: the timer first, then the reads.
+        this.releaseQueued = true;
+        this.at(until, () => {
+          this.releaseQueued = false;
+          this.inputHeld = false;
+        });
+      }
+      return;
+    }
+    // A stall that ended before the loop's next wake was due made no wake late: nothing to order.
+    if (this.inputHeld && !this.releaseQueued) this.inputHeld = false;
+    cb();
   }
 
   private serverTick(): void {

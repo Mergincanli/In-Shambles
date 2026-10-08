@@ -24,6 +24,7 @@ import {
   STAT_CORRECTIONS,
   STAT_HARD_RESYNCS,
   STAT_SNAPSHOTS,
+  STAT_SNAPSHOTS_LOST,
   STAT_STARVED,
   STAT_STARVED_CORRECTIONS,
   StepSmoother,
@@ -38,6 +39,39 @@ import { refreshViewSettings, ViewSettings } from "../render/viewCvars";
 const DEG_PER_U16 = 360 / 65536;
 /** How often the autotest status is written to the page, ms (it allocates strings). */
 const STATUS_INTERVAL_MS = 250;
+
+// Frame timing slots (`Game.timing`).
+/** The previous frame's time (ms; NaN before the first). */
+const T_PREV = 0;
+/** The longest frame gap since the last report (ms). */
+const T_MAX_FRAME = 1;
+/** The time of the last frame that took a snapshot (ms; NaN before the first). */
+const T_LAST_SNAP = 2;
+/** The longest snapshot gap since the last report, and since the start (ms). */
+const T_MAX_SNAP_GAP = 3;
+const T_PEAK_SNAP_GAP = 4;
+/** Link gap excuses end at this page time (ms; -Infinity before the first gap). */
+const T_EXCUSE_UNTIL = 5;
+/** The last link gap: its length and the page time it ended (ms; NaN before the first). */
+const T_LINK_GAP_MS = 6;
+const T_LINK_GAP_AT = 7;
+/** Counters before this frame's client step: hard resyncs, snapshots, lost, starved, corrected. */
+const T_RESYNCS = 8;
+const T_SNAPS = 9;
+const T_LOST = 10;
+const T_STARVED = 11;
+const T_STARVED_CORR = 12;
+const T_COUNT = 13;
+
+function newTiming(): Float64Array {
+  const g = new Float64Array(T_COUNT);
+  g[T_PREV] = Number.NaN;
+  g[T_LAST_SNAP] = Number.NaN;
+  g[T_EXCUSE_UNTIL] = Number.NEGATIVE_INFINITY;
+  g[T_LINK_GAP_MS] = Number.NaN;
+  g[T_LINK_GAP_AT] = Number.NaN;
+  return g;
+}
 const RAD_PER_DEG = Math.PI / 180;
 /** `cl_thirdPerson` pulls the camera this far behind the eye, u (M2 design §2). */
 export const THIRD_PERSON_DISTANCE = 120;
@@ -102,6 +136,24 @@ export class Game {
   longFrames = 0;
   /** Hard resyncs that came in a long frame (the rest would be prediction faults). */
   lateResyncs = 0;
+  /**
+   * Link gaps: frames that ended a gap in the snapshot stream longer than `cl_inputBuffer` ticks
+   * plus their own frame gap (50 ms at 60 fps; frames on time take snapshots at most two frames
+   * apart) by taking a burst of two or more with none lost in between. That is the trace of a link
+   * that held the snapshots and then let them through together (the browser's network process,
+   * stalled on a busy host, holds them both ways at once: seen in the e2e, 8 INPUTs sent at 60 fps
+   * reaching the Node server together 60–120 ms late, the snapshots 35–50 ms late). A gap a lost
+   * snapshot or a NetSim drop leaves ends with a tick jump and is not one. Such a stall can starve
+   * the server with no long frame, like one on a real link (D-028).
+   */
+  linkGaps = 0;
+  /**
+   * Starved flags (and starved corrections) taken by the frame that ended a link gap or within
+   * the gap's length plus the round trip and twice the input buffer after it: the cmds that link
+   * stall held. The e2e excuses only these, never the rest of its window.
+   */
+  starvedAfterGap = 0;
+  starvedCorrectionsAfterGap = 0;
   private readonly client: ClientSim;
   private readonly renderer: GameRenderer | null;
   private readonly status: StatusSink | null;
@@ -116,11 +168,15 @@ export class Game {
   private wasActive = false;
   private firstTick = -1;
   private lastStatus = Number.NEGATIVE_INFINITY;
+  /** Frame timing, indexed by the T_* constants (allocation-free in `frame`). */
+  private readonly timing = newTiming();
   /**
-   * Frame timing: [0] the previous frame's time (ms; NaN before the first), [1] the longest gap
-   * since the last report, [2] the hard resyncs before this frame's client step.
+   * The last starve the client heard of (a probe for the e2e's failure messages): [0] the page
+   * time (ms; NaN before any), [1] the prediction's lead over the snapshot (ticks), [2] the
+   * clock's low edge and [3] mean of the input buffer health (ticks), [4] the frame's gap and
+   * [5] the snapshot gap it ended (ms), [6] the round trip (ms).
    */
-  private readonly timing = new Float64Array([Number.NaN, 0, 0]);
+  private readonly lastStarve = new Float64Array(7).fill(Number.NaN);
   /** [0..2] the predicted origin at the last report, [3] horizontal path length since spawn. */
   private readonly travel = new Float64Array([Number.NaN, 0, 0, 0]);
   private running = false;
@@ -176,7 +232,13 @@ export class Game {
       p.traceLog = null;
       this.debugLines.clearTraces();
     }
-    this.timing[2] = c.stats.totals[STAT_HARD_RESYNCS] as number;
+    const g = this.timing;
+    const totals = c.stats.totals;
+    g[T_RESYNCS] = totals[STAT_HARD_RESYNCS] as number;
+    g[T_SNAPS] = totals[STAT_SNAPSHOTS] as number;
+    g[T_LOST] = totals[STAT_SNAPSHOTS_LOST] as number;
+    g[T_STARVED] = totals[STAT_STARVED] as number;
+    g[T_STARVED_CORR] = totals[STAT_STARVED_CORRECTIONS] as number;
     c.frame();
     this.frames++;
     this.timeFrame();
@@ -215,18 +277,62 @@ export class Game {
     if (this.onFrame !== null) this.onFrame();
   }
 
-  /** The gap since the previous frame: the longest per report, the long frames and their resyncs. */
+  /**
+   * The gap since the previous frame (the longest per report, the long frames and their resyncs)
+   * and, when this frame took snapshots, the gap since the last frame that did (the longest per
+   * report and overall, the link gaps and the starves they excuse).
+   */
   private timeFrame(): void {
     const c = this.client;
     const g = this.timing;
-    const prev = g[0] as number;
-    g[0] = c.now[0] as number;
+    const totals = c.stats.totals;
+    const prev = g[T_PREV] as number;
+    const now = c.now[0] as number;
+    g[T_PREV] = now;
+    const buffer = c.settings.inputBuffer * TICK_MS;
+    const dt = Number.isNaN(prev) ? 0 : now - prev;
+    const took = (totals[STAT_SNAPSHOTS] as number) - (g[T_SNAPS] as number);
+    let snapGap = 0;
+    if (took > 0) {
+      const last = g[T_LAST_SNAP] as number;
+      g[T_LAST_SNAP] = now;
+      if (!Number.isNaN(last)) {
+        snapGap = now - last;
+        if (snapGap > (g[T_MAX_SNAP_GAP] as number)) g[T_MAX_SNAP_GAP] = snapGap;
+        if (snapGap > (g[T_PEAK_SNAP_GAP] as number)) g[T_PEAK_SNAP_GAP] = snapGap;
+        // A held stream comes through as a burst; a lost snapshot leaves a tick jump instead.
+        const lost = (totals[STAT_SNAPSHOTS_LOST] as number) > (g[T_LOST] as number);
+        if (snapGap > buffer + dt && took >= 2 && !lost) {
+          this.linkGaps++;
+          g[T_LINK_GAP_MS] = snapGap;
+          g[T_LINK_GAP_AT] = now;
+          g[T_EXCUSE_UNTIL] = now + snapGap + c.clock.rttMs + 2 * buffer;
+        }
+      }
+    }
+    const starved = (totals[STAT_STARVED] as number) - (g[T_STARVED] as number);
+    if (starved > 0) {
+      const excused = now <= (g[T_EXCUSE_UNTIL] as number);
+      if (excused) {
+        this.starvedAfterGap += starved;
+        this.starvedCorrectionsAfterGap +=
+          (totals[STAT_STARVED_CORRECTIONS] as number) - (g[T_STARVED_CORR] as number);
+      }
+      const p = c.predictor;
+      const st = this.lastStarve;
+      st[0] = now;
+      st[1] = p.latestTick - p.snapshotTick;
+      st[2] = c.clock.bufferLow;
+      st[3] = c.clock.bufferHealth;
+      st[4] = dt;
+      st[5] = snapGap;
+      st[6] = c.clock.rttMs;
+    }
     if (Number.isNaN(prev)) return;
-    const dt = (g[0] as number) - prev;
-    if (dt > (g[1] as number)) g[1] = dt;
-    if (dt <= c.settings.inputBuffer * TICK_MS) return;
+    if (dt > (g[T_MAX_FRAME] as number)) g[T_MAX_FRAME] = dt;
+    if (dt <= buffer) return;
     this.longFrames++;
-    if ((c.stats.totals[STAT_HARD_RESYNCS] as number) > (g[2] as number)) this.lateResyncs++;
+    if ((totals[STAT_HARD_RESYNCS] as number) > (g[T_RESYNCS] as number)) this.lateResyncs++;
   }
 
   /** The `r_debug*` segments: this frame's traces, the hull where it is drawn, the ground. */
@@ -362,8 +468,24 @@ export class Game {
     // Frame timing, which explains the hard resyncs and starved cmds of a slow host (D-028).
     s.longFrames = String(this.longFrames);
     s.lateResyncs = String(this.lateResyncs);
-    s.maxFrameMs = String(Math.round(this.timing[1] as number));
-    this.timing[1] = 0;
+    const g = this.timing;
+    s.maxFrameMs = String(Math.round(g[T_MAX_FRAME] as number));
+    g[T_MAX_FRAME] = 0;
+    // The snapshot stream: its gaps per report and overall, and the link gaps (D-028).
+    s.maxSnapGapMs = String(Math.round(g[T_MAX_SNAP_GAP] as number));
+    g[T_MAX_SNAP_GAP] = 0;
+    s.peakSnapGapMs = String(Math.round(g[T_PEAK_SNAP_GAP] as number));
+    s.linkGaps = String(this.linkGaps);
+    s.lastLinkGap = Number.isNaN(g[T_LINK_GAP_AT] as number)
+      ? ""
+      : `${Math.round(g[T_LINK_GAP_MS] as number)}ms@${Math.round(g[T_LINK_GAP_AT] as number)}`;
+    s.starvedAfterGap = String(this.starvedAfterGap);
+    s.starvedCorrectionsAfterGap = String(this.starvedCorrectionsAfterGap);
+    const st = this.lastStarve;
+    s.lastStarve = Number.isNaN(st[0] as number)
+      ? ""
+      : `at ${Math.round(st[0] as number)} lead ${st[1]} low ${st[2]} mean ${(st[3] as number).toFixed(2)} ` +
+        `dt ${Math.round(st[4] as number)} snapGap ${Math.round(st[5] as number)} rtt ${Math.round(st[6] as number)}`;
     s.drawCalls = String(this.renderer?.drawCalls ?? 0);
     s.triangles = String(this.renderer?.triangles ?? 0);
     // How far the player went (u, horizontal, sampled per report): proof a bot moves.

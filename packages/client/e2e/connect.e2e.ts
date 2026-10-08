@@ -106,7 +106,7 @@ describe("client e2e: connect to a Node server (D-031)", () => {
     expect(s.state).toBe("running");
     expect(Number(s.snapshots), JSON.stringify(s)).toBeGreaterThan(120);
     expect(Number(s.distance), JSON.stringify(s)).toBeGreaterThan(200);
-    expectHealthy(moving, end);
+    expectHealthy(moving, end, { webSocket: true });
     if (s.webgl === "1") expect(Number(s.drawCalls)).toBeGreaterThan(0);
   }, 60_000);
 
@@ -124,7 +124,7 @@ describe("client e2e: connect to a Node server (D-031)", () => {
     const end = await sample(page);
     expect(end.s.netProfile).toBe("wan-100-loss1");
     expect(end.s.map).toBe("arena_greybox");
-    expectHealthy(moving, end);
+    expectHealthy(moving, end, { webSocket: true });
 
     await page.keyboard.press("Backquote");
     const input = page.locator("#console-input");

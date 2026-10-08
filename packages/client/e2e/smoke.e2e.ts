@@ -118,7 +118,7 @@ describe("client e2e smoke (M2 design §5)", () => {
     expect(Number(s.snapshots), JSON.stringify(s)).toBeGreaterThan(120);
     expect(Number(s.ticks), JSON.stringify(s)).toBeGreaterThan(120);
     expect(Number(s.frames), JSON.stringify(s)).toBeGreaterThan(30);
-    expectHealthy(moving, end);
+    expectHealthy(moving, end, { webSocket: false });
     // The circle bot ran: well over 1000 u in RUN_MS once moving (standing still reports 0).
     expect(Number(s.distance), JSON.stringify(s)).toBeGreaterThan(200);
     if (s.webgl !== "1") {
@@ -155,7 +155,7 @@ describe("client e2e smoke (M2 design §5)", () => {
     expect(errors).toEqual([]);
     // Some 600 to 800 u forward in 2 s from a standing start.
     expect(Number(after.s.distance), JSON.stringify(after.s)).toBeGreaterThan(200);
-    expectHealthy(before, after);
+    expectHealthy(before, after, { webSocket: false });
   }, 60_000);
 
   it.each(["none", "reject", "throw"])(
@@ -284,7 +284,7 @@ describe("client e2e smoke (M2 design §5)", () => {
     expect(errors).toEqual([]);
     expect(end.s.state).toBe("running");
     // D-027: a live cvar change switches by tick, with no correction.
-    expectHealthy(moving, end);
+    expectHealthy(moving, end, { webSocket: false });
   }, 60_000);
 
   it("tells the player why the session closed and hides the click-to-play prompt", async () => {

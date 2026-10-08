@@ -46,6 +46,16 @@ export function fpsBetween(a: Sample, b: Sample): number {
 }
 
 /**
+ * Which slack the rule allows besides long frames. `webSocket`: the page talks to a Node server
+ * through the browser's network process, which a busy host can stall both ways at once (D-028),
+ * so starves right after a link gap are excused. The Worker server's MessageChannel has no such
+ * process: its cases stay strict.
+ */
+export interface Link {
+  readonly webSocket: boolean;
+}
+
+/**
  * The prediction stayed healthy from `a` to `b` (NET-03 in a browser): no misprediction, ever,
  * i.e. no correction on a snapshot the server simulated with our own cmd. The rest is judged
  * against frame timing: the page counts the frames longer than the input buffer (`longFrames`,
@@ -53,15 +63,36 @@ export function fpsBetween(a: Sample, b: Sample): number {
  * Such a gap sends cmds late, so the server repeats one (a starved cmd) and the client is either
  * corrected on that starved snapshot (`starvedCorrections`) or, past the lead, hard-resynced: by
  * design on `lan` until the clock has grown the lead for such gaps (D-028). So every resync must
- * be a late one (bar the one a slow start may need), and starved cmds and their corrections need
- * a long frame in between. A host too slow to tell (more than MAX_LONG_SHARE of its frames long)
- * is a failure that says so, not a random pass or fail; the fps goes into every message.
+ * be a late one (bar the one a slow start may need), and in a window with no long frame every
+ * starved cmd and starved correction must be one the page counted right after a link gap
+ * (`starvedAfterGap`, `starvedCorrectionsAfterGap`: a gap in the snapshot stream past the input
+ * buffer that ended in a burst with none lost, i.e. a stalled link, and the gap's length plus the
+ * round trip and twice the buffer after it), and only over a WebSocket. A stall of the server
+ * alone does not starve (D-027; `pnpm test:long` holds the real Node server to that). A host too
+ * slow to tell (more than MAX_LONG_SHARE of its frames long) is a failure that says so, not a
+ * random pass or fail; the fps, the window's largest snapshot gap and the page's last starve
+ * (`lastStarve`: the lead, the clock's low edge and mean, the frame and snapshot gaps) go into
+ * every message.
  */
-export function expectHealthy(a: Sample, b: Sample): void {
+export function expectHealthy(a: Sample, b: Sample, link: Link): void {
   const fps = fpsBetween(a, b);
   const frames = grew(a, b, "frames");
   const long = grew(a, b, "longFrames");
-  const detail = JSON.stringify({ fps: Math.round(fps), from: a.s, to: b.s });
+  const detail = JSON.stringify({
+    fps: Math.round(fps),
+    linkGaps: grew(a, b, "linkGaps"),
+    // The per-report maxima of both ends, and the overall peak: the window's largest gap is one of
+    // them unless it fell in a report between the two samples (then the peak shows it if it grew).
+    snapGapMs: [
+      a.s.maxSnapGapMs,
+      b.s.maxSnapGapMs,
+      `peak ${a.s.peakSnapGapMs}→${b.s.peakSnapGapMs}`,
+    ],
+    lastLinkGap: b.s.lastLinkGap,
+    lastStarve: b.s.lastStarve,
+    from: a.s,
+    to: b.s,
+  });
   expect(
     long,
     `host too slow for the e2e checks (${long} of ${frames} frames over the input buffer): ${detail}`,
@@ -73,12 +104,17 @@ export function expectHealthy(a: Sample, b: Sample): void {
     1,
   );
   expect(onTime(b) - onTime(a), `hard resyncs in on-time frames: ${detail}`).toBe(0);
-  if (long === 0) {
-    expect(grew(a, b, "starved"), `starved cmds, no long frame: ${detail}`).toBe(0);
-    expect(grew(a, b, "starvedCorrections"), `starved corrections, no long frame: ${detail}`).toBe(
-      0,
-    );
-  }
+  if (long > 0) return;
+  const excused = (key: string) => (link.webSocket ? grew(a, b, key) : 0);
+  const why = link.webSocket ? "no long frame or link gap" : "no long frame";
+  expect(
+    grew(a, b, "starved") - excused("starvedAfterGap"),
+    `starved cmds, ${why}: ${detail}`,
+  ).toBe(0);
+  expect(
+    grew(a, b, "starvedCorrections") - excused("starvedCorrectionsAfterGap"),
+    `starved corrections, ${why}: ${detail}`,
+  ).toBe(0);
 }
 
 /** Waits until the circle bot leaves its 1.5 s idle start (any starvation of the start is over). */

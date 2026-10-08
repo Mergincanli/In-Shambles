@@ -94,10 +94,16 @@ describe("Node server (in process, real WebSocket)", () => {
       },
     });
     const metrics = (await httpJson(port, "/metrics")).body as {
-      process: { passes: number; tickUs: { count: number; p99: number }; memoryMB: object };
+      process: {
+        passes: number;
+        loopYields: number;
+        tickUs: { count: number; p99: number };
+        memoryMB: object;
+      };
       matches: { main: { serverTick: number; players: number; snapshots: number } };
     };
     expect(metrics.process.passes).toBeGreaterThan(0);
+    expect(metrics.process.loopYields).toBeGreaterThanOrEqual(0);
     expect(metrics.process.tickUs.count).toBe(metrics.process.passes);
     expect(metrics.process.memoryMB).toHaveProperty("heapUsed");
     expect(metrics.matches.main.serverTick).toBeGreaterThan(0);

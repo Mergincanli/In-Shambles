@@ -4,16 +4,20 @@ import { Match } from "@game/server";
 import { DEFAULT_PORT } from "@game/server/node";
 import {
   buildCollisionWorld,
+  type CloseHandler,
   CvarRegistry,
   createLoopbackPair,
   decodeCmap,
   degreesToU16,
   ENTITY_NONE,
   HULL_MINS,
+  type MessageHandler,
   MOVE_AXIS_MAX,
   PlayerState,
   registerPmoveCvars,
   TRACE_EPSILON,
+  type Transport,
+  type TransportStats,
   type UserCmd,
   VIEW_HEIGHT_STANDING,
 } from "@game/shared";
@@ -37,6 +41,8 @@ import {
   type CmdSampler,
   NeutralInput,
   STAT_HARD_RESYNCS,
+  STAT_SNAPSHOTS_LOST,
+  STAT_STARVED,
   StrafeCircuit,
 } from "../../src/net";
 
@@ -44,6 +50,77 @@ const mapUrl = new URL("../../../../content/maps/movement_lab.cmap", import.meta
 const cmap = decodeCmap(new Uint8Array(readFileSync(fileURLToPath(mapUrl))));
 const world = buildCollisionWorld(cmap);
 const BUILD = "game-test";
+
+/**
+ * The client's end of the link, with stalls: `up`/`down` held keep what is sent that way until
+ * released (then it goes through in order, as a stalled browser network process lets it), and
+ * `dropDown` loses the unreliable messages coming down instead.
+ */
+class StallableLink implements Transport {
+  up = false;
+  down = false;
+  dropDown = false;
+  private readonly upQueue: { d: Uint8Array; reliable: boolean }[] = [];
+  private readonly downQueue: { d: Uint8Array; reliable: boolean }[] = [];
+  private cb: MessageHandler = () => {};
+
+  constructor(private readonly inner: Transport) {
+    inner.onMessage((d, len, reliable) => {
+      if (this.dropDown && !reliable) return;
+      if (this.down || this.downQueue.length > 0) {
+        this.downQueue.push({ d: d.slice(0, len), reliable });
+        if (!this.down) this.flushDown();
+        return;
+      }
+      this.cb(d, len, reliable);
+    });
+  }
+
+  sendUnreliable(d: Uint8Array, len: number): void {
+    if (this.up) this.upQueue.push({ d: d.slice(0, len), reliable: false });
+    else this.inner.sendUnreliable(d, len);
+  }
+
+  sendReliable(d: Uint8Array, len: number): void {
+    if (this.up) this.upQueue.push({ d: d.slice(0, len), reliable: true });
+    else this.inner.sendReliable(d, len);
+  }
+
+  onMessage(cb: MessageHandler): void {
+    this.cb = cb;
+  }
+
+  onClose(cb: CloseHandler): void {
+    this.inner.onClose(cb);
+  }
+
+  poll(): void {
+    if (!this.up) {
+      for (const m of this.upQueue.splice(0)) {
+        if (m.reliable) this.inner.sendReliable(m.d, m.d.length);
+        else this.inner.sendUnreliable(m.d, m.d.length);
+      }
+    }
+    if (!this.down) this.flushDown();
+    this.inner.poll();
+  }
+
+  close(reason?: string): void {
+    this.inner.close(reason);
+  }
+
+  isOpen(): boolean {
+    return this.inner.isOpen();
+  }
+
+  stats(): TransportStats {
+    return this.inner.stats();
+  }
+
+  private flushDown(): void {
+    for (const m of this.downQueue.splice(0)) this.cb(m.d, m.d.length, m.reliable);
+  }
+}
 
 /** The page's pieces without the page: a Match, a client over loopback, a Game, a fake clock. */
 function session(
@@ -59,8 +136,9 @@ function session(
   const cvars = new CvarRegistry();
   registerPmoveCvars(cvars);
   registerClientCvars(cvars);
+  const link = new StallableLink(clientEnd);
   const client = new ClientSim({
-    transport: clientEnd,
+    transport: link,
     cmap,
     world,
     buildHash: BUILD,
@@ -104,7 +182,26 @@ function session(
     now.t = end;
     frames = Math.floor((end * 144) / 1000);
   };
-  return { game, client, match, status, run, hitch };
+  /**
+   * The snapshot stream stops for `ms` while frames go on (a link or server stall): the server's
+   * ticks of that stretch then run at once at its end, as a match loop catches up.
+   */
+  const stallSnapshots = (ms: number) => {
+    const end = now.t + ms;
+    for (;;) {
+      const nextFrame = ((frames + 1) * 1000) / 144;
+      if (nextFrame > end) break;
+      now.t = nextFrame;
+      frames++;
+      game.frame();
+    }
+    now.t = end;
+    while (((serverTicks + 1) * 1000) / 60 <= end) {
+      serverTicks++;
+      match.tick();
+    }
+  };
+  return { game, client, match, status, run, hitch, stallSnapshots, link };
 }
 
 /** Walks north (yaw 90°) at full speed while `walking`. */
@@ -177,6 +274,75 @@ describe("game frame loop (M2 design §2)", () => {
     run(500);
     expect(Number(status.maxFrameMs)).toBe(7);
     expect(status.lateResyncs).toBe("1");
+  });
+
+  it("reports the gaps in the snapshot stream past the input buffer and the frame rhythm", () => {
+    const { game, status, run, stallSnapshots } = session(new StrafeCircuit());
+    run(2000);
+    // 60 Hz snapshots taken by 144 Hz frames: at most a tick and a frame apart.
+    expect(status.linkGaps).toBe("0");
+    expect(Number(status.maxSnapGapMs)).toBeLessThanOrEqual(21);
+    // 30 ms without a snapshot: within the 2-tick input buffer plus a frame.
+    stallSnapshots(30);
+    run(500);
+    expect(game.linkGaps).toBe(0);
+    // 80 ms, ended by a burst of the held snapshots: a link gap, with every frame on time.
+    stallSnapshots(80);
+    run(300);
+    expect(game.linkGaps).toBe(1);
+    expect(game.longFrames).toBe(0);
+    expect(status.linkGaps).toBe("1");
+    expect(status.lastLinkGap).toMatch(/^(8\d|9\d)ms@\d+$/);
+    // The longest gap per report resets; the peak stays.
+    run(500);
+    expect(Number(status.maxSnapGapMs)).toBeLessThanOrEqual(21);
+    expect(Number(status.peakSnapGapMs)).toBeGreaterThanOrEqual(80);
+  });
+
+  it("does not count a gap that lost snapshots (a tick jump, not a burst) as a link gap", () => {
+    const { game, client, status, run, link } = session(new StrafeCircuit());
+    run(2000);
+    const lost = client.stats.totals[STAT_SNAPSHOTS_LOST] as number;
+    link.dropDown = true;
+    run(80);
+    link.dropDown = false;
+    run(500);
+    expect(client.stats.totals[STAT_SNAPSHOTS_LOST] as number).toBeGreaterThan(lost);
+    expect(Number(status.peakSnapGapMs)).toBeGreaterThanOrEqual(80);
+    expect(game.linkGaps).toBe(0);
+    expect(game.longFrames).toBe(0);
+  });
+
+  it("excuses only the starves right after a link stall, and probes the last one", () => {
+    const { game, client, status, run, link } = session(new StrafeCircuit());
+    run(3000);
+    const t = client.stats.totals;
+    const starved0 = t[STAT_STARVED] as number;
+    // Both ways held 100 ms, frames on time (a stalled browser network process): the server
+    // starves past the input buffer, and those flags come down in the burst that ends the gap.
+    link.up = true;
+    link.down = true;
+    run(100);
+    link.up = false;
+    link.down = false;
+    run(1000);
+    const starved1 = t[STAT_STARVED] as number;
+    expect(starved1).toBeGreaterThan(starved0);
+    expect(game.longFrames).toBe(0);
+    expect(game.linkGaps).toBe(1);
+    expect(game.starvedAfterGap).toBe(starved1 - starved0);
+    expect(status.starvedAfterGap).toBe(String(starved1 - starved0));
+    expect(status.lastStarve).toMatch(
+      /^at \d+ lead -?\d+ low -?\d+ mean -?[\d.]+ dt \d+ snapGap \d+ rtt \d+$/,
+    );
+    // Only the uplink held: the snapshots keep coming, so nothing excuses these starves.
+    link.up = true;
+    run(100);
+    link.up = false;
+    run(1000);
+    expect(t[STAT_STARVED] as number).toBeGreaterThan(starved1);
+    expect(game.linkGaps).toBe(1);
+    expect(game.starvedAfterGap).toBe(starved1 - starved0);
   });
 
   it("puts the eye at the interpolated origin plus the eye height, facing the spawn's yaw", () => {
