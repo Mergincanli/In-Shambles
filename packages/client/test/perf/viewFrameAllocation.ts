@@ -1,14 +1,14 @@
 /**
- * Child process of view-frame-allocation.test.ts: runs `Game.frame` (renderer and status off)
- * under native ES modules, where V8 boxes a double returned by a call it doesn't inline, and
- * prints whether the heap stayed flat. Each cycle runs MixedInput's phases (crouch, turns, pitch
- * sweeps, jumps), then a 120-tick walk north from `stairs_base` (the server's player moved
- * there), and a frame hitch every 2048 ticks forces a hard resync: STEP events, eye-height
- * changes, angle interpolation and the step smoother's re-timing all run. The walk climbs the
- * stairs, crosses the landing and walks off its north edge, so the next cycle starts in mid-air
- * over a 128 u drop: a fall and a landing run too. No wall is met. The first such walk deopts
- * pmove's late branches once per process (docs/10 §4 known limit, D-023); this test warms up
- * past it.
+ * Child process of long/view-frame-allocation.long.ts (`pnpm test:long`, D-032): runs `Game.frame`
+ * (renderer and status off) under native ES modules, where V8 boxes a double returned by a call
+ * it doesn't inline, and prints whether the heap stayed flat. Each cycle runs MixedInput's phases
+ * (crouch, turns, pitch sweeps, jumps), then a 120-tick walk north from `stairs_base` (the
+ * server's player moved there), and a frame hitch every 2048 ticks forces a hard resync: STEP
+ * events, eye-height changes, angle interpolation and the step smoother's re-timing all run. The
+ * walk climbs the stairs, crosses the landing and walks off its north edge, so the next cycle
+ * starts in mid-air over a 128 u drop: a fall and a landing run too. No wall is met. The first
+ * such walk deopts pmove's late branches once per process (docs/10 §4 known limit, D-023); this
+ * test warms up past it.
  *
  * The player's per-frame paths run too (M2 increment 12): mouse look with counts every frame,
  * the cmd sampler with keys going up and down, the third-person pull-back, the underwater test,

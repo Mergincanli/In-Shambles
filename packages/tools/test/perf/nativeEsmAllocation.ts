@@ -116,9 +116,10 @@ import { HoldInput, HopForward, StrafeHop } from "../../src/scenarios/bots";
 import { anchorYawU16, courseAnchor, loadCourse } from "../../src/scenarios/course";
 import { placeAtAnchor, ScenarioRecord, ScenarioRunner } from "../../src/scenarios/runner";
 
-// Child process for native-esm-allocation.test.ts: `node --import tsx` loads shared as native ES
-// modules, as dev:server and bench do. There V8 boxes doubles that the Vitest module runner and
-// the bundle keep unboxed, so the in-process allocation test cannot see it. Prints one JSON line.
+// Child process for long/native-esm-allocation.long.ts (`pnpm test:long`, D-032): `node --import
+// tsx` loads shared as native ES modules, as dev:server and bench do. There V8 boxes doubles that
+// the Vitest module runner and the bundle keep unboxed, so the in-process allocation test cannot
+// see it. Prints one JSON line.
 
 const CALLS = 200_000;
 const CASES = 1024;

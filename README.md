@@ -26,7 +26,8 @@ pnpm typecheck && pnpm lint && pnpm test
 | `pnpm dev` | The game on http://localhost:5173: the client with the server in a Web Worker (offline loopback) |
 | `pnpm dev:server` | Dedicated server from source on port 28700 (stop with Ctrl+C); JSON log lines on stdout |
 | `pnpm build` | Production client build and server bundle (`packages/server/dist/main.js`) |
-| `pnpm test` | All tests |
+| `pnpm test` | The fast tests (about 40 s); the last line gives the run's wall and CPU time against its budget |
+| `pnpm test:long` | The long tier: long deterministic runs and the native-ESM allocation guards (CI runs both) |
 | `pnpm test:movement` | Movement tests (MV-xx) on the greybox courses, each printing measured vs. target |
 | `pnpm test:net` | Netcode tests (NET-xx): codec checks, and the real match and client net code under the network profiles; NET-04 prints a summary line per profile |
 | `pnpm test:balance` | Balance tests (BAL-xx) |

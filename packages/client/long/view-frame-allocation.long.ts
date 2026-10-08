@@ -5,9 +5,9 @@ import { describe, expect, it } from "vitest";
 // The render frame's sim side (Game.frame: the client frame, step smoothing, eye height, the
 // pose) must not allocate under native ES modules, where V8 boxes a double returned by a call it
 // doesn't inline (a getter, say). Vitest's module runner hides that, so this runs a child process
-// (as packages/tools/test/perf/native-esm-allocation.test.ts does for the per-tick paths).
+// (as packages/tools/long/native-esm-allocation.long.ts does for the per-tick paths).
 
-const clientDir = fileURLToPath(new URL("../..", import.meta.url));
+const clientDir = fileURLToPath(new URL("..", import.meta.url));
 
 describe("view frame under native ES modules", () => {
   it("Game.frame allocates nothing: steps, crouch, turns, resyncs, mouse look, debug draw", () => {

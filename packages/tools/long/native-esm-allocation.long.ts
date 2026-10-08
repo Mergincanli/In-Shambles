@@ -1,20 +1,20 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { describe, it } from "vitest";
-import { fromRoot } from "../../src/paths";
+import { fromRoot } from "../src/paths";
 
 // The per-tick paths (quantizePlayerState, snapOrigin, the state ring, copy/equals,
 // sanitizeUserCmd, the pmove params refresh and basics, whole pmove ticks in every M2 move mode,
 // the scenario runner and bots, the per-tick message codecs, the transports, the server's match
-// tick and the Node server's timing wrapper, both ends of the WebSocket transport, the client's prediction
-// and reconciliation, and the BVH queries)
-// must not allocate under native ES modules either, where V8 boxes a double returned by a call it
-// doesn't inline or joined with a module constant in a ternary. Vitest's module runner hides
-// that, so this runs a child process.
+// tick and the Node server's timing wrapper, both ends of the WebSocket transport, the client's
+// prediction and reconciliation, and the BVH queries) must not allocate under native ES modules
+// either, where V8 boxes a double returned by a call it doesn't inline or joined with a module
+// constant in a ternary. Vitest's module runner hides that, so this runs a child process.
 //
-// The children run two at a time: one after another this file took some 16 s alone and set the
-// floor of `pnpm test`. Each child counts only its own GCs and heap, so a neighbour cannot add
-// garbage to it; more at once would mostly slow the JIT warm-ups the measurements wait for.
+// The children run two at a time: one after another this file took some 16 s alone (it set the
+// floor of `pnpm test`, where it ran until D-032 moved it to `pnpm test:long`). Each child counts
+// only its own GCs and heap, so a neighbour cannot add garbage to it; more at once would mostly
+// slow the JIT warm-ups the measurements wait for.
 
 interface ChildResult {
   clean: boolean;

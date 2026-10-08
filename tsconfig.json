@@ -4,5 +4,5 @@
   "compilerOptions": {
     "types": ["node"]
   },
-  "include": ["vitest.config.ts", "vitest.browser.config.ts"]
+  "include": ["vitest.config.ts", "vitest.long.config.ts", "vitest.browser.config.ts"]
 }

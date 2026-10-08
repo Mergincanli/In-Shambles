@@ -6,14 +6,23 @@ import { fromRoot } from "../../src/paths";
 
 // Every acceptance test ID a milestone lists in docs/09 must have a test whose top-level
 // describe starts with it, or `vitest run -t "^MV-"` would pass with the test missing (M2 design
-// §5, guards; risk "-t exits 0 when nothing matches"). An ID whose test lands in a later increment
-// of the milestone waits in `pending`, which must be empty by the time docs/09 marks the
-// milestone done. This guard's own describe must not start with an ID prefix.
+// §5, guards; risk "-t exits 0 when nothing matches"). From M3 an ID may also have a tier (D-032,
+// M3 design §2.16): its long legs (`pnpm test:long`, `packages/<pkg>/long/**/*.long.ts`) or
+// real-time legs (`pnpm test:load`, `packages/tools/load/*.load.ts`) need a describe there too,
+// besides the fast smoke in a `test/` file. A test that lands in a later increment of the
+// milestone waits in `pending` ("<ID>" for the fast file, "<ID> long" or "<ID> load" for a tier),
+// which must be empty by the time docs/09 marks the milestone done. This guard's own describe must
+// not start with an ID prefix.
+
+/** Where an ID's tests run besides `pnpm test` (M3 design §2.16). */
+type Tier = "long" | "load";
 
 interface Milestone {
   /** The IDs docs/09 lists under the milestone's **Acceptance**, in order. */
   readonly ids: readonly string[];
-  /** IDs whose test is still to come; each must name its increment. */
+  /** IDs that also need a test in a tier's files. */
+  readonly tiers?: Readonly<Record<string, Tier>>;
+  /** Tests still to come, as "<ID>" or "<ID> <tier>"; each must name its increment. */
   readonly pending: Readonly<Record<string, string>>;
 }
 
@@ -33,6 +42,33 @@ const MILESTONES: Readonly<Record<string, Milestone>> = {
       "NET-03",
     ],
     pending: {},
+  },
+  M3: {
+    ids: ["NET-01", "NET-02", "NET-04", "NET-05", "NET-07", "NET-08", "NET-09", "NET-10", "NET-12"],
+    // §2.16 names NET-02, NET-04, NET-12 (long) and NET-09 (load); §5 and §6 increment 7 give
+    // NET-05 long legs too (16 clients in increment 7, 64 players in increment 10).
+    tiers: {
+      "NET-02": "long",
+      "NET-04": "long",
+      "NET-05": "long",
+      "NET-12": "long",
+      "NET-09": "load",
+    },
+    // NET-01 and NET-04 keep their M2 fast tests until increments 4 and 9 extend them.
+    pending: {
+      "NET-02": "increment 8",
+      "NET-02 long": "increment 9",
+      "NET-04 long": "increment 9",
+      "NET-05": "increment 7",
+      "NET-05 long": "increment 7",
+      "NET-07": "increment 11",
+      "NET-08": "increment 9",
+      "NET-09": "increment 6",
+      "NET-09 load": "increment 18",
+      "NET-10": "increment 13",
+      "NET-12": "increment 9",
+      "NET-12 long": "increment 9",
+    },
   },
 };
 
@@ -77,31 +113,63 @@ function hasTopLevelDescribe(id: string, source: string): boolean {
   return top.test(code);
 }
 
-const testSources = readdirSync(fromRoot("packages"), { recursive: true, encoding: "utf8" })
-  .filter((file) => !file.includes("node_modules") && /[\\/]test[\\/].*\.test\.ts$/.test(file))
-  .map((file) => ({ file, source: readFileSync(join(fromRoot("packages"), file), "utf8") }));
+/** Which tier a file under packages/ belongs to by its path, or null for none. */
+function tierOf(file: string): "fast" | Tier | null {
+  if (/[\\/]test[\\/].*\.test\.ts$/.test(file)) return "fast";
+  if (/^[^\\/]+[\\/]long[\\/].*\.long\.ts$/.test(file)) return "long";
+  if (/^tools[\\/]load[\\/][^\\/]+\.load\.ts$/.test(file)) return "load";
+  return null;
+}
 
-function filesFor(id: string): string[] {
-  return testSources.filter((t) => hasTopLevelDescribe(id, t.source)).map((t) => t.file);
+const testSources = readdirSync(fromRoot("packages"), { recursive: true, encoding: "utf8" })
+  .filter((file) => !file.includes("node_modules") && tierOf(file) !== null)
+  .map((file) => ({
+    file,
+    tier: tierOf(file),
+    source: readFileSync(join(fromRoot("packages"), file), "utf8"),
+  }));
+
+function filesFor(id: string, tier: "fast" | Tier = "fast"): string[] {
+  return testSources
+    .filter((t) => t.tier === tier && hasTopLevelDescribe(id, t.source))
+    .map((t) => t.file);
+}
+
+/** Each test a milestone needs: "<ID>" (fast) and "<ID> <tier>", with the files that hold it. */
+function requirements(m: Milestone): { key: string; files: () => string[] }[] {
+  return m.ids.flatMap((id) => {
+    const fast = { key: id, files: () => filesFor(id) };
+    const tier = m.tiers?.[id];
+    return tier === undefined
+      ? [fast]
+      : [fast, { key: `${id} ${tier}`, files: () => filesFor(id, tier) }];
+  });
 }
 
 describe.each(Object.entries(MILESTONES))("acceptance tests of %s", (milestone, m) => {
+  const needed = requirements(m);
+
   it("match the IDs docs/09 lists", () => {
     expect(acceptanceIds(acceptanceText(milestone))).toEqual(m.ids);
   });
 
-  it.each(m.ids.filter((id) => m.pending[id] === undefined).map((id) => [id]))(
+  it("give tiers and pending entries only for listed IDs and known tiers", () => {
+    for (const id of Object.keys(m.tiers ?? {})) expect(m.ids).toContain(id);
+    const keys = needed.map((r) => r.key);
+    for (const key of Object.keys(m.pending)) expect(keys).toContain(key);
+  });
+
+  it.each(needed.filter((r) => m.pending[r.key] === undefined).map((r) => [r.key, r]))(
     "%s has a test file named after it",
-    (id) => {
-      expect(filesFor(id)).not.toEqual([]);
+    (_key, r) => {
+      expect(r.files()).not.toEqual([]);
     },
   );
 
-  it.each(Object.keys(m.pending).map((id) => [id]))(
+  it.each(needed.filter((r) => m.pending[r.key] !== undefined).map((r) => [r.key, r]))(
     "%s is still pending (drop it from the list once its test lands)",
-    (id) => {
-      expect(m.ids).toContain(id);
-      expect(filesFor(id)).toEqual([]);
+    (_key, r) => {
+      expect(r.files()).toEqual([]);
     },
   );
 
@@ -131,6 +199,22 @@ describe("acceptance ID lists", () => {
     ['describe("crouch MV-05", () => {});', false],
   ] as const)("count a top-level describe: %j → %s", (source, expected) => {
     expect(hasTopLevelDescribe("MV-05", source)).toBe(expected);
+  });
+
+  it.each([
+    ["shared/test/net/codecs.test.ts", "fast"],
+    ["tools/test/net/net-04-reconciliation.test.ts", "fast"],
+    ["tools/long/net-04-sixteen-clients.long.ts", "long"],
+    ["client/long/perf/view-frame-allocation.long.ts", "long"],
+    ["tools/load/net-09-server-perf.load.ts", "load"],
+    ["tools/long/helpers.ts", null],
+    ["tools/test/net/harness.ts", null],
+    ["tools/long/net-04.test.ts", null],
+    ["tools/test/net-04.long.ts", null],
+    ["server/load/net-09.load.ts", null],
+    ["tools/load/sub/net-09.load.ts", null],
+  ] as const)("put %s in tier %s", (file, tier) => {
+    expect(tierOf(file)).toBe(tier);
   });
 
   it('tell "MV-1" from "MV-19"', () => {

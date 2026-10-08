@@ -12,6 +12,7 @@
     "dev:server": "pnpm --filter @game/server --fail-if-no-match start",
     "build": "pnpm -r build",
     "test": "vitest run",
+    "test:long": "vitest run --config vitest.long.config.ts",
     "test:movement": "vitest run -t \"^MV-\" --silent=false",
     "test:net": "vitest run -t \"^NET-\" --silent=false",
     "test:balance": "vitest run -t \"^BAL-\"",

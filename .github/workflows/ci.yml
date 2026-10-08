@@ -30,6 +30,8 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm lint
       - run: pnpm test
+      # D-032: the long tier (deterministic long legs, native-ESM allocation guards) blocks too.
+      - run: pnpm test:long
       - run: pnpm build
 
   # D-022: the shared determinism, trace and pmove vectors replayed in all three browser engines.

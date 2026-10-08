@@ -62,7 +62,8 @@ docs/       specs, roadmap, decisions, handoffs.
 | `pnpm dev` | Client + in-browser Worker server (loopback) |
 | `pnpm dev:server` | Dedicated Node server from source (not `pnpm server`, a pnpm built-in; D-015) |
 | `pnpm build` | Production client build + server bundle (`packages/server/dist/main.js`) |
-| `pnpm test` | All tests (Vitest) |
+| `pnpm test` | All fast tests (Vitest; prints wall and CPU time against the D-032 budget) |
+| `pnpm test:long` | Long tier: deterministic long runs and native-ESM allocation guards (blocking in CI; D-032) |
 | `pnpm test:movement` | Movement tests |
 | `pnpm test:net` | Netcode tests |
 | `pnpm test:balance` | Balance tests |
