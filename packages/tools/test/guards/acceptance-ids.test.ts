@@ -54,7 +54,8 @@ const MILESTONES: Readonly<Record<string, Milestone>> = {
       "NET-12": "long",
       "NET-09": "load",
     },
-    // NET-01 and NET-04 keep their M2 fast tests until increments 4 and 9 extend them.
+    // NET-01's fast test covers the v2 full snapshots since increment 4 (deltas and the deferred
+    // list extend it in increments 8 and 10); NET-04 keeps its M2 fast test until increment 9.
     pending: {
       "NET-02": "increment 8",
       "NET-02 long": "increment 9",

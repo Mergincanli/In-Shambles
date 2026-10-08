@@ -1,10 +1,14 @@
 /**
- * Protocol v1 constants (docs/05 §3.2–§3.6, D-026). Any change to a message layout bumps
+ * Protocol constants (docs/05 §3.2–§3.6; v1 D-026, v2 D-033). Any change to a message layout bumps
  * PROTOCOL_VERSION and updates docs/05 §3.6 in the same change (.claude/rules/netcode.md).
  */
 
-/** u16 on the wire, in HELLO and WELCOME. */
-export const PROTOCOL_VERSION = 1;
+/**
+ * u16 on the wire, in HELLO and WELCOME. v2 (D-033) changed only SNAPSHOT: the player list and the
+ * teleport counter. Its delta forms (D-038) and deferred list (D-046) join within v2: nothing ships
+ * between those increments.
+ */
+export const PROTOCOL_VERSION = 2;
 
 /** The u8 type byte that leads every message. 0 is never a message, so a zeroed buffer is bad. */
 export const MSG_HELLO = 1;
@@ -69,10 +73,28 @@ export const INPUT_MAX_CMDS = 4;
 /** Older cmds in an INPUT are a u8 tick offset back from the newest. */
 export const INPUT_TICK_BACK_MAX = 255;
 
-/** SNAPSHOT flag bits. */
+/**
+ * SNAPSHOT flag bits (D-033). Bit 1 was v1's teleport flag; the header's teleport counter replaced
+ * it (D-035), and it must be 0, like bits 4–7.
+ */
+/** The server repeated a cmd of this client's that had not arrived (docs/05 §8.1). */
 export const SNAP_FLAG_STARVED = 1 << 0;
-export const SNAP_FLAG_TELEPORT = 1 << 1;
-export const SNAP_FLAG_MASK = SNAP_FLAG_STARVED | SNAP_FLAG_TELEPORT;
+/** Every player, no local block: demo files only (D-044); a live connection drops it. */
+export const SNAP_FLAG_SPECTATOR = 1 << 2;
+/** A deferred-id list follows the entities (D-046). Refused until the byte-budget scheduler. */
+export const SNAP_FLAG_DEFERRED = 1 << 3;
+/** The flags a snapshot may carry now. */
+export const SNAP_FLAG_MASK = SNAP_FLAG_STARVED | SNAP_FLAG_SPECTATOR;
+
+/** Snapshots each end keeps, and so the oldest baseline a delta may use (docs/05 §4.3). */
+export const SNAPSHOT_HISTORY = 64;
+
+/** A live snapshot's size cap (docs/05 §4.3, docs/10 §4.2): datagram-safe. */
+export const MAX_SNAPSHOT_BYTES = 1100;
+export const SNAP_BUDGET_BITS = MAX_SNAPSHOT_BYTES * 8;
+
+/** A spectator snapshot's cap (design): up to 64 players, in demo files only, never on a socket. */
+export const MAX_SPECTATOR_SNAPSHOT_BYTES = 2048;
 
 /** PRINT levels (u2; 3 is not used and rejected). */
 export const PRINT_INFO = 0;

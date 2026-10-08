@@ -23,8 +23,9 @@ import {
 } from "./multiHarness";
 
 // The multi-client harness (M3 design §5 "Harness"): its event loop, joins, leaves and rejoins,
-// raw endpoints and per-session byte counts, then the protocol v1 baseline that later increments
-// measure against: 16 clients on arena_greybox at wan-150-loss2, each predicting only itself.
+// raw endpoints, per-session byte counts and the frame digests against the server's, then the
+// 16-client baseline that later increments measure against: 16 clients on arena_greybox at
+// wan-150-loss2, each predicting only itself, now over full v2 snapshots that list every player.
 
 const profile = (name: string) => findNetProfile(name) as NetProfile;
 
@@ -131,6 +132,10 @@ describe("MultiHarness: clients", () => {
       expect(c.server.size).toBeGreaterThan(200);
       expect(c.unreconciled()).toEqual([]);
       expect(c.session?.stats.strikes).toBe(0);
+      // Every frame the client stored is the server's world frame of that tick, as it sees it.
+      expect(c.digestsChecked).toBeGreaterThan(200);
+      expect(c.digestMismatches).toEqual([]);
+      expect(c.client.store.newest?.presentCount).toBe(4);
     }
   });
 
@@ -194,10 +199,10 @@ describe("MultiHarness: clients", () => {
     if (s === null) return;
     const down = c.tap.down;
     const up = c.tap.up;
-    // Every snapshot the match sent, each the v1 42 B.
+    // Every snapshot the match sent: alone in the match, a full v2 one is 37 B (292 bits).
     expect(down.messagesByType[MSG_SNAPSHOT]).toBe(s.stats.snapshots);
-    expect(down.bytesByType[MSG_SNAPSHOT]).toBe(42 * s.stats.snapshots);
-    expect(down.maxByType[MSG_SNAPSHOT]).toBe(42);
+    expect(down.bytesByType[MSG_SNAPSHOT]).toBe(37 * s.stats.snapshots);
+    expect(down.maxByType[MSG_SNAPSHOT]).toBe(37);
     expect(down.messagesByType[MSG_WELCOME]).toBe(1);
     // The totals are the server end's own counters.
     const end = c.tap.inner.stats();
@@ -284,11 +289,12 @@ describe("MultiHarness: clients", () => {
     expect(honest.session?.stats.strikes).toBe(0);
   });
 
-  it("holds at most 64 clients and raw endpoints together, as the match counts them", () => {
-    const h = new MultiHarness();
-    const raws = Array.from({ length: MAX_HARNESS_CLIENTS - 1 }, () => h.addRaw());
+  it("holds the match's maxClients clients and raw endpoints together, as the match counts them", () => {
+    expect(new MultiHarness().match.maxClients).toBe(32);
+    const h = new MultiHarness({ maxClients: 20 });
+    const raws = Array.from({ length: 19 }, () => h.addRaw());
     h.addClient({ input: new NeutralInput() });
-    expect(() => h.addClient({ input: new NeutralInput() })).toThrow(/64 clients/);
+    expect(() => h.addClient({ input: new NeutralInput() })).toThrow(/20 clients/);
     // Closed raw endpoints free their slots once the match has polled their close.
     for (const r of raws) r.transport.close();
     h.run(100);
@@ -296,31 +302,45 @@ describe("MultiHarness: clients", () => {
     expect(h.addClient({ input: new NeutralInput() }).session?.clientId).toBe(0);
   });
 
-  it("plays 64 clients in one match, refuses a 65th, and refills a slot once it is free", () => {
-    const h = new MultiHarness({ map: "arena_greybox", seed: 9 });
+  it("plays a full 37-player match (sv_maxClients 64, clamped until D-046), refuses a 38th, and refills a slot", () => {
+    const h = new MultiHarness({ map: "arena_greybox", seed: 9, maxClients: MAX_HARNESS_CLIENTS });
+    const full = h.match.maxClients;
+    expect(full).toBe(37);
     const wan = profile("wan-100-loss1");
-    for (let i = 0; i < MAX_HARNESS_CLIENTS; i++) {
-      h.addClient({ input: i % 2 === 0 ? new MixedInput() : new StrafeCircuit(), profile: wan });
+    for (let i = 0; i < full; i++) {
+      h.addClient({
+        input: i % 2 === 0 ? new MixedInput() : new StrafeCircuit(),
+        profile: wan,
+        record: i === 3,
+      });
     }
     h.run(2000);
     expect(h.clients.map((c) => c.session?.clientId)).toEqual(
-      Array.from({ length: MAX_HARNESS_CLIENTS }, (_, i) => i),
+      Array.from({ length: full }, (_, i) => i),
     );
-    expect(h.active.length).toBe(MAX_HARNESS_CLIENTS);
-    for (const c of h.clients) expect(c.client.active).toBe(true);
+    expect(h.active.length).toBe(full);
+    for (const c of h.clients) {
+      expect(c.client.active).toBe(true);
+      // 36 other players in every snapshot once all are in: 86 + 199 + 7 + 36 × 213 bits, 995 B.
+      expect(c.tap.down.maxByType[MSG_SNAPSHOT]).toBe(995);
+    }
+    const watched = h.clients[3] as HarnessClient;
+    expect(watched.client.store.newest?.presentCount).toBe(full);
+    expect(watched.digestsChecked).toBeGreaterThan(50);
+    expect(watched.digestMismatches).toEqual([]);
     expect(h.match.metrics.strikes).toBe(0);
-    // The match KICKs a 65th connection itself; the harness refuses a 65th client.
+    // The match KICKs a 38th connection itself; the harness refuses a 38th client.
     const extra = h.addRaw();
     h.run(100);
     expect(extra.session).toBeNull();
     expect(extra.closedReason).toBe("server full");
-    expect(() => h.addClient({ input: new NeutralInput() })).toThrow(/64 clients/);
+    expect(() => h.addClient({ input: new NeutralInput() })).toThrow(/37 clients/);
 
     // A left session holds its slot until its close crosses the link.
     const gone = h.clients[5] as HarnessClient;
     gone.leave();
-    expect(h.active.length).toBe(MAX_HARNESS_CLIENTS - 1);
-    expect(() => h.addClient({ input: new NeutralInput() })).toThrow(/64 clients/);
+    expect(h.active.length).toBe(full - 1);
+    expect(() => h.addClient({ input: new NeutralInput() })).toThrow(/37 clients/);
     h.runUntil(() => h.match.session(5) === undefined, 1000, "slot 5 freed");
     const back = h.addClient({ input: new MixedInput(), profile: wan });
     h.run(1000);
@@ -359,11 +379,13 @@ describe("MultiHarness: clients", () => {
 // The M3 starting point (M3 design §6 increment 3, "v1 16-client baseline"): 16 clients on
 // arena_greybox, all spawning at its first info_player_start (spawn rotation is increment 5), on
 // wan-150-loss2 with their own NetSim seeds, joining 100 ms apart; client 0 is observed (every tick
-// recorded) at 144 Hz, the others alternate 144 Hz and browser hitches. Protocol v1: every snapshot
-// carries only the receiver's own state, 42 B. Prediction must hold as NET-04 asks of its 16-client
-// leg (< 1 correction/s, mean < 2 u, the observed client's render offset < 8 u and every snapshot
-// reconciled), with no strike. It prints the per-client bandwidth and the match tick's cost, the
-// numbers increments 4 (full v2 snapshots) and 9 (deltas) are compared with.
+// recorded) at 144 Hz, the others alternate 144 Hz and browser hitches. Prediction must hold as
+// NET-04 asks of its 16-client leg (< 1 correction/s, mean < 2 u, the observed client's render
+// offset < 8 u and every snapshot reconciled), with no strike. It prints the per-client bandwidth
+// and the match tick's cost. Under protocol v1 every snapshot was 42 B (2.53 KB/s down, 3.26 up,
+// match tick p50 130 µs, p99 400–570 µs; increment 3). Increment 4 made them full v2 snapshots
+// that list the other 15 players (436 B, about 26 KB/s), checked against the server's frames;
+// increment 9 (deltas) is compared with this.
 
 const BASELINE_CLIENTS = 16;
 const BASELINE_SECONDS = 30;
@@ -373,8 +395,8 @@ const BASELINE_SECONDS = 30;
  */
 const SW_SQUARE = { centerX: -720, centerY: -560, halfSide: 260, maxSpeed: 450 } as const;
 
-describe("16 clients on arena_greybox over protocol v1 (the M3 baseline)", () => {
-  it("predict without rubber-banding at wan-150-loss2, 42 B snapshots, no strikes", () => {
+describe("16 clients on arena_greybox over full v2 snapshots (the M3 baseline)", () => {
+  it("predict without rubber-banding at wan-150-loss2, 436 B full snapshots, no strikes", () => {
     const h = new MultiHarness({ map: "arena_greybox", seed: 1, timeTicks: true });
     const link = profile("wan-150-loss2");
     for (let i = 0; i < BASELINE_CLIENTS; i++) {
@@ -424,6 +446,8 @@ describe("16 clients on arena_greybox over protocol v1 (the M3 baseline)", () =>
     expect(observed.unreconciled()).toEqual([]);
     expect(observed.snapshotTicks.length).toBeGreaterThan(BASELINE_SECONDS * 60 * 0.5);
     expect(Math.max(...observed.frames.offset)).toBeLessThan(8);
+    expect(observed.digestsChecked).toBeGreaterThan(BASELINE_SECONDS * 60 * 0.5);
+    expect(observed.digestMismatches).toEqual([]);
 
     let worstRate = 0;
     let worstMean = 0;
@@ -447,7 +471,8 @@ describe("16 clients on arena_greybox over protocol v1 (the M3 baseline)", () =>
       ).toBeGreaterThan(500);
       worstRate = Math.max(worstRate, t.corrections / seconds);
       worstMean = Math.max(worstMean, t.meanCorrection);
-      expect(c.tap.down.maxByType[MSG_SNAPSHOT]).toBe(42);
+      // 86 + 199 + 7 + 15 × 213 bits once all 16 are in.
+      expect(c.tap.down.maxByType[MSG_SNAPSHOT]).toBe(436);
       const [d0, u0] = bytes0[i] as number[];
       down = Math.max(down, (c.tap.down.bytes - (d0 as number)) / seconds);
       up = Math.max(up, (c.tap.up.bytes - (u0 as number)) / seconds);
@@ -458,10 +483,10 @@ describe("16 clients on arena_greybox over protocol v1 (the M3 baseline)", () =>
 
     const ticks = h.tickTimes;
     console.log(
-      `M3 baseline (protocol v1): ${BASELINE_CLIENTS} clients, arena_greybox, wan-150-loss2, ` +
+      `M3 baseline (full v2 snapshots): ${BASELINE_CLIENTS} clients, arena_greybox, wan-150-loss2, ` +
         `${seconds.toFixed(0)} s: corrections worst ${worstRate.toFixed(2)}/s (mean ≤ ` +
         `${worstMean.toFixed(2)} u); per client down ≤ ${(down / 1000).toFixed(2)} KB/s, ` +
-        `up ≤ ${(up / 1000).toFixed(2)} KB/s (payload, KB = 1000 B); 42 B snapshots; match tick ` +
+        `up ≤ ${(up / 1000).toFixed(2)} KB/s (payload, KB = 1000 B); 436 B snapshots; match tick ` +
         `p50 ${ticks?.percentileUs(50)} µs, p99 ${ticks?.percentileUs(99)} µs, ` +
         `max ${ticks?.maxUs} µs (in-process, Vitest)`,
     );

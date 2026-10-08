@@ -1,4 +1,5 @@
-import { CvarFlag, type CvarRegistry } from "@game/shared";
+import { CvarFlag, type CvarRegistry, MATCH_MAX_CLIENTS } from "@game/shared";
+import { MATCH_DEFAULT_MAX_CLIENTS } from "../match/match";
 
 /** The dedicated server's default port (D-029; design value). */
 export const DEFAULT_PORT = 28700;
@@ -29,6 +30,17 @@ export function registerServerCvars(reg: CvarRegistry): void {
     type: "string",
     default: "arena_greybox", // design
     description: "Map of the server's match (content/maps/<name>.cmap)",
+    flags: CvarFlag.SERVER,
+  });
+  reg.register({
+    name: "sv_maxClients",
+    type: "int",
+    // design (D-034, Mustafa's decision: "Cap 64, default 32"); the match clamps it to 37 until
+    // the byte-budget scheduler (D-046), so every snapshot fits 1100 B by construction.
+    default: MATCH_DEFAULT_MAX_CLIENTS,
+    min: 1,
+    max: MATCH_MAX_CLIENTS,
+    description: "Players the match admits (client ids are the lowest free below it)",
     flags: CvarFlag.SERVER,
   });
   reg.register({

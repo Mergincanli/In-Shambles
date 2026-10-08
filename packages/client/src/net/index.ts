@@ -11,5 +11,6 @@ export * from "./portTransport";
 export * from "./predictor";
 export * from "./scriptedInput";
 export * from "./smoothing";
+export * from "./snapshotStore";
 export * from "./stats";
 export * from "./webSocketTransport";

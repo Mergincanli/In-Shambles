@@ -52,7 +52,8 @@ packages/shared/src/
                        BVH and match their brute-force references (traceBoxBrute, …) bit for bit
     contents.ts        SOLID, PLAYERCLIP, WATER, LADDER, SLICK, NODAMAGE, TRIGGER, NODRAW; SURF_* flags
   sim/
-    entity.ts          ENTITY_NONE (−1), ENTITY_WORLD (32767)
+    entity.ts          ENTITY_NONE (−1), ENTITY_WORLD (32767), MATCH_MAX_CLIENTS (64), TEAM_*,
+                       ENTITY_FLAG_MASK (D-034)
     hull.ts            player hulls (docs/03 §2)
     playerState.ts     PlayerState struct + quantize(), PlayerStateRing (128 ticks)
     usercmd.ts         UserCmd struct + sanitize(), BUTTON_* bits
@@ -76,7 +77,11 @@ packages/shared/src/
     bitstream.ts       BitWriter/BitReader: LSB-first, explicit widths, sticky error flag (D-026)
     protocol.ts        PROTOCOL_VERSION, MSG_* type ids, MSG_CHANNEL (type → channel), packet,
                        client-message and text size limits
-    messages.ts        protocol v1 message structs + encodeX/decodeX (docs/05 §3.6)
+    messages.ts        message structs + encodeX/decodeX (docs/05 §3.6) but SNAPSHOT; readTick/writeTick
+    snapshot.ts        SNAPSHOT v2: SnapshotHeader, encodeSnapshot, decodeSnapshotHeader/Body, the size
+                       constants (D-033)
+    worldFrame.ts      WorldFrame (64 slots as typed arrays, stamps, masks), FrameRing (64 by tick),
+                       slot ↔ PlayerState, copySlot, entityEquals, frameDigest (D-034)
     playerStateCodec.ts  the PlayerState bit layout and its decode-time range checks
     cvarBlock.ts       replicated cvar block: canonical encoding, hash, all-or-nothing apply (D-027)
     delta.ts           field masks, baseline diff/apply (M3)
@@ -91,7 +96,8 @@ packages/server/src/
   match/               environment-agnostic (tsconfig.match.json: ES2023, no DOM/Node types; D-027)
     host.ts            LoopHost: now, schedule, log (the Worker or Node adapter)
     loop.ts            accumulator loop: ticks due since start, catch-up cap 5
-    match.ts           Match: handshake, spawn, per-tick order (docs/05 §8.1), snapshots, CVARS
+    match.ts           Match: handshake, sv_maxClients, spawn, per-tick order (docs/05 §8.1), the
+                       world frame and the v2 snapshots built from it, CVARS
     session.ts         per-client state, player, input queue, counters, admin flag
     inputQueue.ts      cmds by tick (64 slots), duplicate/late/early counters
     commands.ts        CMD: set/reset/toggle on replicated cvars, cvars resend
@@ -134,6 +140,8 @@ packages/client/src/
                        CmdSampler interface
     connection.ts      handshake state machine (HELLO → WELCOME → pings and the map → READY →
                        spawn), decoding, channel checks and strikes, INPUT/CMD encoding
+    snapshotStore.ts   SnapshotStore: snapshots decoded into a FrameRing of 64 by tick, newest stored,
+                       counters; a spectator snapshot is refused (D-033, D-034)
     predictor.ts       cmd and state rings (128), exact compare, re-simulation with params by tick,
                        pending CVARS params, correction log (32), hard resync (docs/05 §5)
     clock.ts           handshake median RTT, lead, RTT/jitter EWMAs, buffer-health step re-anchoring
@@ -338,9 +346,9 @@ DEV / OFFLINE                                  ONLINE
 
 - One process can host several matches (one tick loop each). Each match is isolated (no shared mutable state). Until D-047 the Node server runs one match, `main`.
 - **Config (D-029):** `server.cfg` (`packages/server/server.cfg`; by default the one in the working directory, or `--cfg <file>`): one `set <cvar> <value>` per line, tokenized like the console; lines starting with `//` or `#` are comments (a comment after a value is refused, not read into it). Then the command line, in this order: `--port <n>` and `--map <name>` (shorthands for `sv_port` and `sv_map`), then each `--set <cvar>=<value>`; `--maps <dir>` points at the compiled maps (default: the repository's `content/maps`). A `set` reaches the server's own cvars (below) or the match's replicated ones (`pm_*`, sent to clients). An unknown cvar, a bad value, one out of range, or `sv_sendBufferClose` not above `sv_sendBufferDrop` stops the server with a ConfigError (exit 1) rather than starting with another setting. Later: map rotation, rcon password (env var).
-- **Structured logs (JSON lines, D-029):** one object per line on stdout, `{"t":<ISO time>,"lvl":"info"|"warn"|"error","ev":…, …}`: `server_ok` (`startupMs`, monotonic since process start) and then `listening` (`port`, `buildHash`, `matches`) once the match exists and the port is bound, `connect` (`match`, `client`, `ip`), `log` (the match's own text lines, with `match`), `loop` (the loop's own lines other than drops), `tick_drop` (ticks dropped after a stall: one line per drop, naming every match), `console` (admin console replies), `shutdown` (`signal`), `error`. Later: `welcome`, `ready`, `leave` and `kick` (reason, strikes) as their own events with D-041 (increment 13; until then they are the match's `log` lines), kills, metrics lines.
+- **Structured logs (JSON lines, D-029):** one object per line on stdout, `{"t":<ISO time>,"lvl":"info"|"warn"|"error","ev":…, …}`: `server_ok` (`startupMs`, monotonic since process start) and then `listening` (`port`, `buildHash`, `matches`) once the match exists and the port is bound, `max_clients_clamped` (`match`, `requested`, `maxClients`: right after `listening`, a warning that `sv_maxClients` is above what the match admits), `connect` (`match`, `client`, `ip`), `log` (the match's own text lines, with `match`), `loop` (the loop's own lines other than drops), `tick_drop` (ticks dropped after a stall: one line per drop, naming every match), `console` (admin console replies), `shutdown` (`signal`), `error`. Later: `welcome`, `ready`, `leave` and `kick` (reason, strikes) as their own events with D-041 (increment 13; until then they are the match's `log` lines), kills, metrics lines.
 - **Admin console:** stdin lines run as admin on the match: `set`/`reset`/`toggle` on replicated cvars (the CVARS broadcast follows on the next tick).
-- **Metrics:** tick time p50/p95/p99, players, bytes in/out, starved cmds, corrections requested (full snapshots), GC pauses. `GET /metrics` (D-029) serves `{process:{…}, matches:{<name>:{…}}}`: the loop pass and each match's tick times (`TickHistogram`: run window and the last closed 1 s window, in µs), dropped ticks, CPU ms per wall second, memory (heapUsed, external, RSS) and connections; per match its map, players, server tick, starved player-ticks, strikes, snapshots and kicks. `GET /status` serves `{buildHash, protocol, matches:[{name, map, players, maxClients}]}` (`maxClients` is `MATCH_MAX_CLIENTS` until `sv_maxClients` arrives). Later: bytes, GC pauses, the metrics log line and a metrics file.
+- **Metrics:** tick time p50/p95/p99, players, bytes in/out, starved cmds, corrections requested (full snapshots), GC pauses. `GET /metrics` (D-029) serves `{process:{…}, matches:{<name>:{…}}}`: the loop pass and each match's tick times (`TickHistogram`: run window and the last closed 1 s window, in µs), dropped ticks, CPU ms per wall second, memory (heapUsed, external, RSS) and connections; per match its map, players, server tick, starved player-ticks, strikes, snapshots and kicks. `GET /status` serves `{buildHash, protocol, matches:[{name, map, players, maxClients}]}` (`maxClients` is the cap the match applies: `sv_maxClients` after its clamp, D-034). Later: bytes, GC pauses, the metrics log line and a metrics file.
 - **Graceful shutdown (SIGINT/SIGTERM):** between ticks, stop accepting, KICK every client "server shutting down" and close its socket 1001, stop the loop, wait up to 1 s (design value) for the closing handshakes, then terminate the rest, exit 0.
 
 | Cvar | Default | Label / note |
@@ -348,6 +356,7 @@ DEV / OFFLINE                                  ONLINE
 | `sv_port` | 28700 | design (D-029); 0 picks a free port |
 | `sv_host` | 0.0.0.0 | design; bind address |
 | `sv_map` | arena_greybox | design; `content/maps/<name>.cmap` |
+| `sv_maxClients` | 32 | design (D-034, Mustafa's decision: "Cap 64, default 32"); players the match admits, 1–64 (`MATCH_MAX_CLIENTS` slots), client ids the lowest free below it; clamped to 37 until the byte-budget scheduler (D-046), with a `max_clients_clamped` warning, so every snapshot fits 1100 B; `/status` reports the effective cap |
 | `sv_strictBuild` | 1 | design (D-031): a client whose HELLO names another build is KICKed with both hashes; at 0 it gets its WELCOME and a PRINT warning. Run from source (tsx) the server starts it at 0, since a dev page and a dev server compute their hashes when each starts; read when the match is created; the protocol version is always strict |
 | `sv_sendBufferDrop` | 32768 | ESTIMATE (D-030): bytes waiting in a client's socket past which unreliable sends drop |
 | `sv_sendBufferClose` | 1048576 | ESTIMATE (D-030): past this the socket closes 1008 "too slow" (checked every tick); must be above `sv_sendBufferDrop` |

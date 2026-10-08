@@ -9,17 +9,18 @@ import {
   copyUserCmd,
   createCollisionWorld,
   cvarBlockHash,
-  type PlayerState,
+  PlayerState,
   PmoveEvent,
   registerPmoveCvars,
   SNAP_FLAG_STARVED,
-  SNAP_FLAG_TELEPORT,
-  type SnapshotMsg,
+  type SnapshotHeader,
+  slotToPlayerState,
   type Transport,
   UserCmd,
   type Vec3,
   vec3,
   type WelcomeMsg,
+  type WorldFrame,
 } from "@game/shared";
 import { ClientClock, TICK_MS } from "./clock";
 import {
@@ -38,6 +39,7 @@ import {
   SNAPSHOT_STALE,
 } from "./predictor";
 import { RenderOffset } from "./smoothing";
+import type { SnapshotStore } from "./snapshotStore";
 import {
   NetStats,
   STAT_CLOCK_ADJUSTMENTS,
@@ -227,6 +229,11 @@ export class ClientSim {
   /** The last tick of the startup fill: snapshots up to it may be starved without harm. */
   startTick = -1;
   frames = 0;
+  /**
+   * Teleport-counter changes seen on snapshots newer than the last (D-035): one per counter step,
+   * none for the spawn snapshot that seeds it. Increment 5 moves this into the predictor.
+   */
+  teleports = 0;
   /** Messages from PRINT, oldest first; the caller drains it (the console, a test). */
   readonly prints: string[] = [];
   /** Movement events of this frame's first predictions (cleared at the start of each frame). */
@@ -262,8 +269,12 @@ export class ClientSim {
   private readonly curOrigin = vec3();
   /** The predicted path changed during this frame's poll. */
   private changed = false;
-  /** A snapshot of this poll carried the teleport flag. */
+  /** A snapshot of this poll changed the local player's teleport counter (D-035). */
   private teleport = false;
+  /** The teleport counter of the newest snapshot, seeded by the first (D-035). */
+  private teleportSeq = 0;
+  /** The local player's state from the snapshot in hand (its frame's own slot). */
+  private readonly snapState = new PlayerState();
   /** Clock step asked for by this poll's snapshots (ticks; negative = hold). */
   private step = 0;
   /** The newest snapshot tick of this poll that needs a hard resync, −1 for none. */
@@ -300,7 +311,7 @@ export class ClientSim {
     const handler: ConnectionHandler = {
       onWelcome: (m) => this.onWelcome(m),
       mapReady: () => this.cmap !== null,
-      onSnapshot: (m) => this.onSnapshot(m),
+      onSnapshot: (h, f) => this.onSnapshot(h, f),
       onCvars: (m) => this.onCvars(m),
       onPrint: (_level, text) => {
         this.prints.push(text);
@@ -328,6 +339,11 @@ export class ClientSim {
 
   get state(): number {
     return this.connection.state;
+  }
+
+  /** The snapshots received, by tick (protocol v2's frames, D-033). */
+  get store(): SnapshotStore {
+    return this.connection.store;
   }
 
   /** The map's collision (an empty world until the map is loaded). */
@@ -628,25 +644,36 @@ export class ClientSim {
     this.changed = true;
   }
 
-  private onSnapshot(m: SnapshotMsg): void {
+  private onSnapshot(h: SnapshotHeader, frame: WorldFrame): void {
     const p = this.predictor;
     const stats = this.stats;
+    const tick = h.serverTick;
+    const state = this.snapState;
+    // Prediction reads the local slot, bit for bit (M3 design §2.3).
+    slotToPlayerState(frame, this.connection.clientId, state);
     stats.add(STAT_SNAPSHOTS, 1);
     if (this.connection.state === CONN_SPAWNING) {
-      // The first snapshot is the spawn: adopted whole (it carries the teleport flag).
-      p.reset(m.serverTick, m.state);
-      this.anchor(m.serverTick, true);
+      // The first snapshot is the spawn: adopted whole, and its counter is the one to watch.
+      p.reset(tick, state);
+      this.teleportSeq = h.teleportSeq;
+      this.anchor(tick, true);
       this.connection.markActive();
       return;
     }
     const prevTick = p.snapshotTick;
-    const result = p.onSnapshot(m.serverTick, m.state, m.cvarHash);
+    const result = p.onSnapshot(tick, state, h.cvarHash);
     if (result === SNAPSHOT_STALE) return;
-    if (m.serverTick > prevTick + 1) stats.add(STAT_SNAPSHOTS_LOST, m.serverTick - prevTick - 1);
-    if ((m.flags & SNAP_FLAG_STARVED) !== 0 && m.serverTick > this.startTick) {
+    if (tick > prevTick + 1) stats.add(STAT_SNAPSHOTS_LOST, tick - prevTick - 1);
+    if ((h.flags & SNAP_FLAG_STARVED) !== 0 && tick > this.startTick) {
       stats.add(STAT_STARVED, 1);
     }
-    if ((m.flags & SNAP_FLAG_TELEPORT) !== 0) this.teleport = true;
+    // A changed counter is a teleport even when the snapshot of the jump itself was lost (D-035);
+    // only snapshots newer than the last one move it.
+    if (h.teleportSeq !== this.teleportSeq) {
+      this.teleportSeq = h.teleportSeq;
+      this.teleport = true;
+      this.teleports++;
+    }
     const t = this.t;
     if (result === SNAPSHOT_PARAMS_RESYNC) {
       stats.add(STAT_PARAM_RESYNCS, 1);
@@ -665,19 +692,19 @@ export class ClientSim {
       stats.add(STAT_CORRECTIONS, 1);
       stats.add(STAT_CORRECTION_DIST, dist[0] as number);
       stats.add(STAT_CORRECTION_MAX, dist[0] as number);
-      if ((m.flags & SNAP_FLAG_STARVED) !== 0) stats.add(STAT_STARVED_CORRECTIONS, 1);
+      if ((h.flags & SNAP_FLAG_STARVED) !== 0) stats.add(STAT_STARVED_CORRECTIONS, 1);
       this.changed = true;
     } else if (result === SNAPSHOT_HARD_RESYNC) {
       // A backlog after a stall resyncs on every snapshot ahead of the last; it is one event,
       // re-anchored once after the poll from the newest.
       if (this.resyncTick < 0) stats.add(STAT_HARD_RESYNCS, 1);
-      this.resyncTick = m.serverTick;
+      this.resyncTick = tick;
       this.changed = true;
       return;
     }
     const step = this.clock.onSnapshotHealth(
-      m.inputBufferHealth,
-      m.serverTick,
+      h.inputBufferHealth,
+      tick,
       p.latestTick,
       this.settings.inputBuffer,
     );

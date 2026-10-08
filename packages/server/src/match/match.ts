@@ -10,7 +10,6 @@ import {
   CvarRegistry,
   CvarsMsg,
   captureCvarBlock,
-  copyPlayerState,
   copyUserCmd,
   cvarHash16,
   DEV_ASSERT,
@@ -34,6 +33,7 @@ import {
   InputMsg,
   KickMsg,
   MASK_PLAYERSOLID,
+  MATCH_MAX_CLIENTS,
   MAX_RELIABLE_BYTES,
   MSG_CMD,
   MSG_HELLO,
@@ -49,16 +49,18 @@ import {
   PrintMsg,
   peekHelloVersion,
   peekMessageType,
+  playerStateToSlot,
   pmove,
   positionTest,
   quantizePlayerState,
   refreshPmoveParams,
   registerPmoveCvars,
   registryCvarHash,
+  SNAP_FIT_MAX_PLAYERS,
   SNAP_FLAG_STARVED,
-  SNAP_FLAG_TELEPORT,
-  SnapshotMsg,
+  SnapshotHeader,
   sanitizeUserCmd,
+  TEAM_NONE,
   TICK_DT,
   TICK_MAX,
   TICK_RATE,
@@ -68,6 +70,7 @@ import {
   type Vec3,
   vec3,
   WelcomeMsg,
+  WorldFrame,
 } from "@game/shared";
 import { runServerCommand } from "./commands";
 import type { MatchLog } from "./host";
@@ -79,11 +82,21 @@ import {
   Session,
 } from "./session";
 
+/** Player slots (D-034), from @game/shared since protocol v2 put them on the wire. */
+export { MATCH_MAX_CLIENTS };
+
+/** Players a match admits by default (`sv_maxClients`; D-034, design: "Cap 64, default 32"). */
+export const MATCH_DEFAULT_MAX_CLIENTS = 32;
+
 /**
- * Most clients one match takes (a design constant above the 16-player budget of docs/05 §9.2;
- * client ids are 0..MATCH_MAX_CLIENTS − 1, which fits WELCOME's u8).
+ * The cap a match applies for `sv_maxClients` = `requested`: at least 1, and at most
+ * SNAP_FIT_MAX_PLAYERS (37) until the D-046 byte-budget scheduler, so every snapshot fits 1100 B by
+ * construction (D-034). A non-finite request (NaN would pass Math.min/max) takes the default.
  */
-export const MATCH_MAX_CLIENTS = 64;
+export function effectiveMaxClients(requested: number): number {
+  const n = Number.isFinite(requested) ? Math.floor(requested) : MATCH_DEFAULT_MAX_CLIENTS;
+  return Math.max(1, Math.min(SNAP_FIT_MAX_PLAYERS, MATCH_MAX_CLIENTS, n));
+}
 
 /** Stamina at spawn, in hundredths: staminaMax = health 100 with no vest (docs/03 §5.2, FACT). */
 export const SPAWN_STAMINA = 100 * 100;
@@ -105,6 +118,12 @@ export interface MatchOptions {
    * always strict.
    */
   readonly strictBuild?: boolean;
+  /**
+   * `sv_maxClients`: players admitted (MATCH_DEFAULT_MAX_CLIENTS when absent), clamped by
+   * `effectiveMaxClients`. Client ids are the lowest free below it; a client past it is KICKed
+   * "server full".
+   */
+  readonly maxClients?: number;
   readonly log?: MatchLog;
 }
 
@@ -123,14 +142,14 @@ export class MatchMetrics {
 
 function ignoreLog(): void {}
 
-/** Lowest free client id, or −1 when every id is taken. `sessions` is sorted by id. */
-function freeClientId(sessions: readonly Session[]): number {
+/** Lowest free client id below `cap`, or −1 when every one is taken. `sessions` is sorted by id. */
+function freeClientId(sessions: readonly Session[], cap: number): number {
   let id = 0;
   for (let i = 0; i < sessions.length; i++) {
     if ((sessions[i] as Session).clientId !== id) break;
     id++;
   }
-  return id < MATCH_MAX_CLIENTS ? id : -1;
+  return id < cap ? id : -1;
 }
 
 /**
@@ -147,9 +166,11 @@ function freeClientId(sessions: readonly Session[]): number {
  * 3. Per active client in id order: take its cmd for T, or repeat its last cmd with ATTACK cleared
  *    and tick = T (starved); sanitize; pmove. A player spawned this tick is not simulated: its
  *    spawn state is its state at T.
- * 4. Per active client: a SNAPSHOT of T with lastProcessedCmdTick = T and inputBufferHealth =
- *    newest cmd tick received − T (clamped to i8), flagged STARVED or TELEPORT.
- * 5. Metrics.
+ * 4. Capture the world frame of T: every active player's state, serial and teleport counter.
+ * 5. Per active client: a full SNAPSHOT of T (protocol v2, D-033): its own state as the local block,
+ *    every other active player as an entity record, inputBufferHealth = newest cmd tick received −
+ *    T (clamped to i8), flagged STARVED.
+ * 6. Metrics.
  *
  * After warm-up a tick allocates nothing: messages decode into and encode from preallocated
  * structs, and the transports pool their packets. HELLO, CMD, kicks and cvar changes allocate
@@ -168,6 +189,10 @@ export class Match {
   /** Spawn origin, raised to the D-017 rest height, and yaw (u16). */
   readonly spawnOrigin: Vec3 = vec3();
   readonly spawnYaw: number;
+  /** Players admitted: `sv_maxClients` after `effectiveMaxClients`. */
+  readonly maxClients: number;
+  /** Every active player at the last tick simulated, as snapshots are encoded from it (D-034). */
+  readonly worldFrame = new WorldFrame();
 
   private readonly log: MatchLog;
   private readonly sessions: Session[] = [];
@@ -186,7 +211,13 @@ export class Match {
   private readonly hello = new HelloMsg();
   private readonly welcome = new WelcomeMsg();
   private readonly input = new InputMsg();
-  private readonly snapshot = new SnapshotMsg();
+  private readonly snapHeader = new SnapshotHeader();
+  /**
+   * Per slot: the teleport counter every spawn bumps (8 bits, kept across the slot's players, so a
+   * new player in a slot snaps on every client; D-035) and the connect counter (`Session.serial`).
+   */
+  private readonly teleportSeqs = new Uint8Array(MATCH_MAX_CLIENTS);
+  private readonly serials = new Uint16Array(MATCH_MAX_CLIENTS);
   private readonly ping = new PingMsg();
   private readonly pong = new PongMsg();
   private readonly cvarsMsg = new CvarsMsg();
@@ -208,6 +239,7 @@ export class Match {
     this.cvars = cvars;
     this.buildHash = options.buildHash;
     this.strictBuild = options.strictBuild ?? true;
+    this.maxClients = effectiveMaxClients(options.maxClients ?? MATCH_DEFAULT_MAX_CLIENTS);
     this.mapName = cmap.name;
     this.mapHashHi = Number.parseInt(cmap.contentHash.slice(0, 8), 16);
     this.mapHashLo = Number.parseInt(cmap.contentHash.slice(8, 16), 16);
@@ -262,15 +294,18 @@ export class Match {
 
   /**
    * Adds a client on `transport`; it gets a WELCOME once its HELLO arrives. Returns the session,
-   * or null (after a KICK) when the match is full.
+   * or null (after a KICK) when the match holds `maxClients` already.
    */
   connect(transport: Transport, admin = false): Session | null {
-    const id = freeClientId(this.sessions);
+    const id = freeClientId(this.sessions, this.maxClients);
     if (id < 0) {
       this.sendKickTo(transport, "server full");
       return null;
     }
     const s = new Session(id, transport, admin);
+    const serial = ((this.serials[id] as number) + 1) & 0xffff;
+    this.serials[id] = serial;
+    s.serial = serial;
     let at = 0;
     while (at < this.sessions.length && (this.sessions[at] as Session).clientId < id) at++;
     this.sessions.splice(at, 0, s);
@@ -316,6 +351,7 @@ export class Match {
       const s = sessions[i] as Session;
       if (s.state === SESSION_ACTIVE && s.spawnTick !== t) this.simulate(s, t);
     }
+    this.capture(t);
     for (let i = 0; i < sessions.length; i++) {
       const s = sessions[i] as Session;
       if (s.state === SESSION_ACTIVE) this.sendSnapshot(s, t);
@@ -420,7 +456,7 @@ export class Match {
   /**
    * READY: the player appears at the spawn point at rest, facing its yaw, with full stamina,
    * grounded if the ground trace finds walkable ground. Its state at tick `t` is this spawn
-   * state; simulation starts at t + 1, and the snapshot of `t` carries TELEPORT. The repeated cmd
+   * state; simulation starts at t + 1, and the slot's teleport counter steps (D-035). The repeated cmd
    * for a starved tick starts as a neutral one with the spawn yaw, which is what the client
    * predicts with before its first real cmd (M2 design §2, "Client clock").
    */
@@ -448,7 +484,8 @@ export class Match {
     s.queue.reset(t + 1);
     s.spawnTick = t;
     s.state = SESSION_ACTIVE;
-    s.snapFlags |= SNAP_FLAG_TELEPORT;
+    const id = s.clientId;
+    this.teleportSeqs[id] = ((this.teleportSeqs[id] as number) + 1) & 0xff;
     this.log("info", `client ${s.clientId} spawned at tick ${t}`);
   }
 
@@ -514,18 +551,34 @@ export class Match {
     return encodeWelcome(w, m);
   }
 
+  /** The world frame of tick `t`: every active player (stamp t), its serial and teleport counter. */
+  private capture(t: number): void {
+    const f = this.worldFrame;
+    f.clear();
+    const sessions = this.sessions;
+    for (let i = 0; i < sessions.length; i++) {
+      const s = sessions[i] as Session;
+      if (s.state !== SESSION_ACTIVE) continue;
+      const id = s.clientId;
+      f.setPresent(id, t);
+      playerStateToSlot(f, id, s.player);
+      f.serial[id] = s.serial;
+      f.team[id] = TEAM_NONE;
+      f.teleportSeq[id] = this.teleportSeqs[id] as number;
+    }
+  }
+
   private sendSnapshot(s: Session, t: number): void {
-    const m = this.snapshot;
-    m.serverTick = t;
-    m.baselineTick = 0;
-    m.lastProcessedCmdTick = t;
-    m.inputBufferHealth = Math.max(-128, Math.min(127, s.queue.newestTick - t));
-    m.cvarHash = this.blockHash16;
-    m.flags = s.snapFlags;
-    copyPlayerState(m.state, s.player);
+    const h = this.snapHeader;
+    h.serverTick = t;
+    h.baseBack = 0;
+    h.flags = s.snapFlags;
+    h.cvarHash = this.blockHash16;
+    h.inputBufferHealth = Math.max(-128, Math.min(127, s.queue.newestTick - t));
     const w = this.writer;
     w.reset();
-    if (!encodeSnapshot(w, m)) {
+    // Up to SNAP_FIT_MAX_PLAYERS every full snapshot fits 1100 B (D-034), so a failure is a bug.
+    if (!encodeSnapshot(w, h, this.worldFrame, null, s.clientId)) {
       DEV_ASSERT(false, "SNAPSHOT did not encode", s.clientId);
       return;
     }

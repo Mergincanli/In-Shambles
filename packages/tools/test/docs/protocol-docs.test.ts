@@ -7,6 +7,7 @@ import {
   CHANNEL_UNRELIABLE,
   CmdMsg,
   CVAR_HASH_SEED,
+  ENTITY_NEW_BITS,
   encodeCmd,
   encodeHello,
   encodeInput,
@@ -21,6 +22,7 @@ import {
   KickMsg,
   MAX_CLIENT_MESSAGE_BYTES,
   MAX_RELIABLE_BYTES,
+  MAX_SNAPSHOT_BYTES,
   MAX_UNRELIABLE_BYTES,
   MSG_CHANNEL,
   PingMsg,
@@ -29,21 +31,24 @@ import {
   PROTOCOL_VERSION,
   PrintMsg,
   SHORT_TEXT_MAX,
-  SnapshotMsg,
+  SNAP_FULL_FIXED_BITS,
+  SNAP_HEADER_BITS,
+  SnapshotHeader,
   TEXT_MAX,
   type UserCmd,
+  WorldFrame,
 } from "@game/shared";
 import { describe, expect, it } from "vitest";
 import { firstTable, mdSection } from "../../src/docs/mdTable";
 import { fromRoot } from "../../src/paths";
 
-// Doc-golden test (D-026): docs/05 §3.6 states the protocol v1 layout the codecs implement. The
-// type ids, the player-state widths, the packet sizes (exact or the largest) and the cvar hash
-// seed must match the code, so a layout change can't land without its doc (and its
-// PROTOCOL_VERSION bump).
+// Doc-golden test (D-026, D-033): docs/05 §3.6 states the protocol layout the codecs implement.
+// The type ids, the player-state, snapshot-header and entity-record widths, the packet sizes
+// (exact or the largest) and the cvar hash seed must match the code, so a layout change can't land
+// without its doc (and its PROTOCOL_VERSION bump).
 
 const doc = readFileSync(fromRoot("docs", "05-netcode.md"), "utf8");
-const layout = mdSection(doc, "3.6 Protocol v1 layout");
+const layout = mdSection(doc, `3.6 Protocol v${PROTOCOL_VERSION} layout`);
 
 /** MSG_* constants of @game/shared, by name (HELLO → 1, …). */
 function messageIds(): Map<string, number> {
@@ -55,9 +60,32 @@ function messageIds(): Map<string, number> {
   return ids;
 }
 
-describe("docs/05 §3.6 protocol v1 layout", () => {
+/** The sum of a widths table's "Bits" column ("21" or "3 × 21"). */
+function tableBits(after: string): number {
+  const table = firstTable(layout.slice(layout.indexOf(after)));
+  let bits = 0;
+  for (const row of table.rows) {
+    const cell = row[1] ?? "";
+    const m = /^(?:(\d+) × )?(\d+)$/.exec(cell);
+    if (!m) throw new Error(`unexpected width "${cell}"`);
+    bits += Number(m[1] ?? 1) * Number(m[2]);
+  }
+  return bits;
+}
+
+/** The cells of the row named `name` (first column) in the first table after `after`. */
+function tableRow(after: string, name: string): string {
+  const table = firstTable(layout.slice(layout.indexOf(after)));
+  const row = table.rows.find((r) => r[0] === name);
+  if (!row) throw new Error(`no row "${name}" after ${after}`);
+  return row.join(" | ");
+}
+
+describe("docs/05 §3.6 protocol layout", () => {
   it("names the protocol version the code sends", () => {
-    expect(doc).toContain(`### 3.6 Protocol v1 layout (\`PROTOCOL_VERSION\` = ${PROTOCOL_VERSION}`);
+    expect(doc).toContain(
+      `### 3.6 Protocol v${PROTOCOL_VERSION} layout (\`PROTOCOL_VERSION\` = ${PROTOCOL_VERSION}`,
+    );
   });
 
   it("lists every message type id, and the message table has a row for each", () => {
@@ -70,24 +98,48 @@ describe("docs/05 §3.6 protocol v1 layout", () => {
   });
 
   it("gives the player-state widths the codec writes", () => {
-    const table = firstTable(layout.slice(layout.indexOf("**Player state**")));
-    let bits = 0;
-    for (const row of table.rows) {
-      const cell = row[1] ?? "";
-      const m = /^(?:(\d+) × )?(\d+)$/.exec(cell);
-      if (!m) throw new Error(`unexpected width "${cell}"`);
-      bits += Number(m[1] ?? 1) * Number(m[2]);
-    }
-    expect(bits).toBe(PLAYER_STATE_BITS);
+    expect(tableBits("**Player state**")).toBe(PLAYER_STATE_BITS);
     expect(layout).toContain(`(\`shared/src/net/playerStateCodec.ts\`, ${PLAYER_STATE_BITS} bits)`);
+  });
+
+  it("gives the snapshot header and entity record widths the codec writes (D-033)", () => {
+    expect(tableBits("**Snapshot header**")).toBe(SNAP_HEADER_BITS);
+    expect(layout).toContain(`(\`shared/src/net/snapshot.ts\`, ${SNAP_HEADER_BITS} bits with`);
+    expect(tableBits("**Entity record**")).toBe(ENTITY_NEW_BITS);
+    expect(layout).toContain(`the full ("new") form, ${ENTITY_NEW_BITS} bits:`);
+  });
+
+  // Inc. 4 lands the full forms only (D-033): the decoder refuses deltas, removals and the
+  // deferred list, and the doc must say so until D-038 (inc. 8) and D-046 (inc. 10) flip both.
+  it("marks the delta forms refused until D-038 and the deferred list until D-046", () => {
+    expect(tableRow("**Snapshot header**", "baseBack")).toContain("is refused until D-038");
+    expect(tableRow("**Snapshot header**", "flags")).toContain(
+      "deferred list, refused until D-046",
+    );
+    expect(tableRow("**Entity record**", "removed")).toContain("(refused until D-038)");
+    expect(tableRow("**Entity record**", "new")).toContain("is refused until D-038");
+    expect(layout).toContain("with D-038; the deferred-id list (`flags` bit 3) and pending");
+    expect(layout).toContain("with D-046. Until then the decoder refuses them.");
   });
 
   it("states the sizes of a full snapshot and a four-cmd INPUT", () => {
     const rows = firstTable(layout).rows;
     const size = (name: string) => rows.find((r) => r[0]?.startsWith(`\`${name}\``))?.[3];
     const w = new BitWriter(MAX_UNRELIABLE_BYTES);
-    encodeSnapshot(w, new SnapshotMsg());
-    expect(size("SNAPSHOT")).toBe(`${w.bitLength} bits, ${w.byteLength} B`);
+    const h = new SnapshotHeader();
+    h.serverTick = 1;
+    const frame = new WorldFrame();
+    const bytesWith = (others: number) => {
+      frame.clear();
+      for (let s = 0; s <= others; s++) frame.setPresent(s, 1);
+      w.reset();
+      expect(encodeSnapshot(w, h, frame, null, 0)).toBe(true);
+      return w.byteLength;
+    };
+    expect(size("SNAPSHOT")).toBe(
+      `${SNAP_FULL_FIXED_BITS} bits + ${ENTITY_NEW_BITS} per other player: ${bytesWith(0)} B ` +
+        `alone, ${bytesWith(31)} B at 32 players; ≤ ${MAX_SNAPSHOT_BYTES} B`,
+    );
     const input = new InputMsg();
     input.count = 4;
     for (let i = 0; i < 4; i++) (input.cmds[i] as UserCmd).tick = 10 - i;

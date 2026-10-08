@@ -67,7 +67,7 @@ A browser-native, server-authoritative arena/tactical FPS. It reproduces Urban T
 | O-5 | Business model and license | **TBD** | Default assumption until decided: closed source, free-to-play, **no GPL code**. |
 | O-6 | v1 game modes | **Proposed**: FFA, TDM, Team Survivor (rounds), CTF, Movement Trials (timed courses) | Modes are "ours"; these are suggestions. |
 | O-7 | Hosting regions | **TBD** | Proposal: start with one EU region (NL/DE), add more later. |
-| O-8 | Max players and team sizes | **Proposed**: 16 max; 5v5 for round modes | |
+| O-8 | Max players and team sizes | **Partly decided** (D-034): up to 64 players per match, `sv_maxClients` default 32; 5v5 for round modes still proposed | Budgets (`docs/05` §9.2, `docs/10` §4) are set for 16 players. Until the byte-budget scheduler (D-046) a match admits at most 37, so every snapshot fits 1100 B (`docs/05` §2). |
 
 ### Guidance for O-2 (naming)
 

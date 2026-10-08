@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { CvarRegistry, PROTOCOL_VERSION, registerPmoveCvars } from "@game/shared";
 import { MatchLoop } from "../match/loop";
-import { MATCH_MAX_CLIENTS, Match } from "../match/match";
+import { MATCH_DEFAULT_MAX_CLIENTS, MATCH_MAX_CLIENTS, Match } from "../match/match";
 import { TickHistogram, type TickWindow } from "../match/tickStats";
 import { WsListener } from "../transport/wsListener";
 import type { WsTransport } from "../transport/wsTransport";
@@ -108,6 +108,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   const cmap = loadMap(mapName, mapsDir);
   const buildHash = serverBuildHash();
 
+  const maxClients = cvars.getNumber("sv_maxClients", MATCH_DEFAULT_MAX_CLIENTS);
   const main: ServerMatch = {
     name: DEFAULT_MATCH,
     match: new Match({
@@ -115,6 +116,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
       cvars: template,
       buildHash,
       strictBuild: cvars.getNumber("sv_strictBuild", 1) === 1,
+      maxClients,
       log: matchLog(log, DEFAULT_MATCH),
     }),
     ticks: new TickHistogram(),
@@ -144,7 +146,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
           name: m.name,
           map: m.match.mapName,
           players: m.match.sessionCount,
-          maxClients: MATCH_MAX_CLIENTS,
+          maxClients: m.match.maxClients,
         })),
       }),
       metrics: () => {
@@ -195,6 +197,15 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     buildHash,
     matches: list.map((m) => ({ name: m.name, map: m.match.mapName })),
   });
+  // After `listening`, which scripts wait for as the first two lines.
+  if (main.match.maxClients !== maxClients) {
+    log("warn", "max_clients_clamped", {
+      match: main.name,
+      requested: maxClients,
+      maxClients: main.match.maxClients,
+      why: "every snapshot must fit 1100 B until the byte-budget scheduler (D-034, D-046)",
+    });
+  }
 
   const stopConsole =
     options.console === undefined

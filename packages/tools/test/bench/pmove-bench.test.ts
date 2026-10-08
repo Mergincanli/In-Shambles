@@ -180,10 +180,24 @@ describe("pmove bench verdict", () => {
 });
 
 describe("pnpm bench entry, pmove part", () => {
+  // A short codec part: codec-bench.test.ts covers it.
   const run = (...args: string[]) =>
     spawnSync(
       process.execPath,
-      ["--import", "tsx", "bench/run.ts", "--calls", "1000", "--warmup", "1000", ...args],
+      [
+        "--import",
+        "tsx",
+        "bench/run.ts",
+        "--calls",
+        "1000",
+        "--warmup",
+        "1000",
+        "--codec-calls",
+        "1000",
+        "--codec-warmup",
+        "0",
+        ...args,
+      ],
       { cwd: fromRoot("packages", "tools"), encoding: "utf8" },
     );
 

@@ -10,13 +10,17 @@ import {
   createLoopbackPair,
   cvarHash16,
   degreesToU16,
+  ENTITY_FLAG_MASK,
   ENTITY_WORLD,
+  entityVelocity,
+  frameDigest,
   type MessageHandler,
   MSG_CMD,
   MSG_HELLO,
   MSG_INPUT,
   MSG_PING,
   MSG_READY,
+  MSG_SNAPSHOT,
   Mulberry32,
   PlayerState,
   PMF_GROUNDED,
@@ -30,8 +34,8 @@ import {
   refreshPmoveParams,
   registerPmoveCvars,
   registryCvarHash,
+  SNAP_FIT_MAX_PLAYERS,
   SNAP_FLAG_STARVED,
-  SNAP_FLAG_TELEPORT,
   sanitizeUserCmd,
   TICK_DT,
   TICK_RATE,
@@ -41,7 +45,13 @@ import {
   UserCmd,
 } from "@game/shared";
 import { describe, expect, it } from "vitest";
-import { MATCH_MAX_CLIENTS, Match, SPAWN_STAMINA } from "../../src/match/match";
+import {
+  effectiveMaxClients,
+  MATCH_DEFAULT_MAX_CLIENTS,
+  MATCH_MAX_CLIENTS,
+  Match,
+  SPAWN_STAMINA,
+} from "../../src/match/match";
 import { SESSION_ACTIVE, SESSION_CONNECTING, SESSION_WELCOMED } from "../../src/match/session";
 import { loadMap, TEST_BUILD, TestClient } from "./fixtures";
 
@@ -213,16 +223,50 @@ describe("match handshake", () => {
     ]);
   });
 
-  it("kicks a client past MATCH_MAX_CLIENTS with server full", () => {
+  it("admits sv_maxClients (default 32) and kicks the 33rd with server full (D-034)", () => {
     const match = newMatch();
-    for (let i = 0; i < MATCH_MAX_CLIENTS; i++) connect(match);
+    expect(match.maxClients).toBe(MATCH_DEFAULT_MAX_CLIENTS);
+    expect(MATCH_DEFAULT_MAX_CLIENTS).toBe(32);
+    for (let i = 0; i < 32; i++) expect(connect(match)).toBeInstanceOf(TestClient);
     const [clientEnd, serverEnd] = createLoopbackPair();
     const late = new TestClient(clientEnd);
     expect(match.connect(serverEnd)).toBeNull();
     late.poll();
     expect(late.kicks[0]?.reason).toBe("server full");
     expect(late.closed).toBe("server full");
-    expect(match.sessionCount).toBe(MATCH_MAX_CLIENTS);
+    expect(match.sessionCount).toBe(32);
+    expect(match.session(31)).toBeDefined();
+  });
+
+  it("clamps sv_maxClients to 1–37 until the byte-budget scheduler (D-034)", () => {
+    expect(MATCH_MAX_CLIENTS).toBe(64);
+    expect(SNAP_FIT_MAX_PLAYERS).toBe(37);
+    expect([0, 1, 16, 32, 37, 38, 64, 1000].map(effectiveMaxClients)).toEqual([
+      1, 1, 16, 32, 37, 37, 37, 37,
+    ]);
+    // A non-finite request is the default, not a match that refuses everyone.
+    expect([Number.NaN, Number.POSITIVE_INFINITY, -1.5, 37.9].map(effectiveMaxClients)).toEqual([
+      MATCH_DEFAULT_MAX_CLIENTS,
+      MATCH_DEFAULT_MAX_CLIENTS,
+      1,
+      37,
+    ]);
+    expect(
+      new Match({ cmap, world, buildHash: TEST_BUILD, maxClients: Number.NaN }).maxClients,
+    ).toBe(MATCH_DEFAULT_MAX_CLIENTS);
+    const full = new Match({ cmap, world, buildHash: TEST_BUILD, maxClients: MATCH_MAX_CLIENTS });
+    expect(full.maxClients).toBe(37);
+    for (let i = 0; i < 37; i++) connect(full);
+    const [, serverEnd] = createLoopbackPair();
+    expect(full.connect(serverEnd)).toBeNull();
+    const duel = new Match({ cmap, world, buildHash: TEST_BUILD, maxClients: 2 });
+    const left = connect(duel);
+    connect(duel);
+    expect(duel.connect(createLoopbackPair()[1])).toBeNull();
+    // Ids stay the lowest free below the cap: a freed id is reused.
+    left.transport.close("bye");
+    run(duel, null, 1);
+    expect(duel.connect(createLoopbackPair()[1])?.clientId).toBe(0);
   });
 
   it("kicks a client with another protocol version, saying why, and drops it", () => {
@@ -361,7 +405,10 @@ describe("match spawn and simulation", () => {
     const client = joined(match);
     const snap = client.lastSnapshot();
     expect(snap.serverTick).toBe(4);
-    expect(snap.flags).toBe(SNAP_FLAG_TELEPORT);
+    // The spawn steps the slot's teleport counter (D-035); no flag is set.
+    expect(snap.flags).toBe(0);
+    expect(snap.teleportSeq).toBe(1);
+    expect(snap.entities).toEqual([]);
     const o = spawnEntity?.origin ?? [0, 0, 0];
     const ps = snap.state;
     expect(Array.from(ps.origin)).toEqual([o[0], o[1], o[2] + TRACE_EPSILON]);
@@ -430,7 +477,6 @@ describe("match spawn and simulation", () => {
       pmove(local, cmd, world, params, TICK_DT, null, null);
       const snap = client.lastSnapshot();
       expect(snap.serverTick).toBe(t);
-      expect(snap.lastProcessedCmdTick).toBe(t);
       expect(snap.flags).toBe(0);
       expect(playerStateEquals(snap.state, local)).toBe(true);
     }
@@ -469,7 +515,7 @@ describe("match spawn and simulation", () => {
     expect(s?.queue.late).toBe(1);
   });
 
-  it("reports lastProcessedCmdTick, input buffer health and the cvar hash in snapshots", () => {
+  it("reports input buffer health and the cvar hash in full snapshots", () => {
     const match = newMatch();
     const client = joined(match);
     const t0 = client.lastSnapshot().serverTick;
@@ -478,8 +524,7 @@ describe("match spawn and simulation", () => {
     run(match, client, 1);
     let snap = client.lastSnapshot();
     expect(snap.serverTick).toBe(t0 + 1);
-    expect(snap.baselineTick).toBe(0);
-    expect(snap.lastProcessedCmdTick).toBe(t0 + 1);
+    expect(snap.header.baseBack).toBe(0);
     expect(snap.inputBufferHealth).toBe(3);
     expect(snap.cvarHash).toBe(cvarHash16(registryCvarHash(match.cvars)));
     run(match, client, 5);
@@ -495,13 +540,13 @@ describe("match spawn and simulation", () => {
     const match = newMatch();
     run(match, null, 1000);
     const client = joined(match);
-    const health = () => client.snapshots.map((m) => [m.flags, m.inputBufferHealth]);
+    const health = () => client.snapshots.map((m) => [m.flags, m.inputBufferHealth, m.teleportSeq]);
     run(match, client, 3);
     expect(health()).toEqual([
-      [SNAP_FLAG_TELEPORT, 0],
-      [SNAP_FLAG_STARVED, -1],
-      [SNAP_FLAG_STARVED, -2],
-      [SNAP_FLAG_STARVED, -3],
+      [0, 0, 1],
+      [SNAP_FLAG_STARVED, -1, 1],
+      [SNAP_FLAG_STARVED, -2, 1],
+      [SNAP_FLAG_STARVED, -3, 1],
     ]);
   });
 
@@ -542,6 +587,88 @@ describe("match spawn and simulation", () => {
     run(match, client, 1);
     expect(client.snapshots).toHaveLength(0);
     expect(match.session(0)?.stats.strikes).toBe(0);
+  });
+});
+
+describe("match snapshots (protocol v2, D-033–D-035)", () => {
+  it("lists every other active player as an entity, exactly as the world frame holds it", () => {
+    const match = newMatch();
+    const a = joined(match);
+    const b = joined(match);
+    // A third client past WELCOME but not READY is no entity yet.
+    const c = connect(match);
+    c.hello();
+    for (let i = 1; i <= 30; i++) {
+      const t = match.serverTick + 1;
+      a.input([cmdAt(t, 127, 0, 1000)]);
+      b.input([cmdAt(t, -127, BUTTON_JUMP, 40000)]);
+      run(match, null, 1);
+      a.poll();
+      b.poll();
+      c.poll();
+      const sa = a.lastSnapshot();
+      const sb = b.lastSnapshot();
+      expect([sa.serverTick, sb.serverTick]).toEqual([t, t]);
+      expect(sa.entities).toEqual([1]);
+      expect(sb.entities).toEqual([0]);
+      // Each receiver holds the frame the server encoded, as that receiver sees it.
+      expect(frameDigest(sa.frame, 0)).toBe(frameDigest(match.worldFrame, 0));
+      expect(frameDigest(sb.frame, 1)).toBe(frameDigest(match.worldFrame, 1));
+      expect(playerStateEquals(sa.state, match.session(0)?.player ?? new PlayerState())).toBe(true);
+      // b's entity in a's snapshot: its origin at 1/32 u and its velocity at 1 u/s.
+      const p1 = match.session(1)?.player ?? new PlayerState();
+      expect(sa.frame.originX[1]).toBe(p1.origin[0] * 32);
+      expect(sa.frame.entVelY[1]).toBe(entityVelocity(p1.velocity[1] * 16));
+      expect(sa.frame.flags[1]).toBe(p1.flags & ENTITY_FLAG_MASK);
+      expect([sa.frame.teleportSeq[1], sa.frame.team[1], sa.frame.stamp[1]]).toEqual([1, 0, t]);
+    }
+    expect(c.snapshots).toHaveLength(0);
+    expect(match.worldFrame.presentCount).toBe(2);
+    expect([a.bad, b.bad, c.bad]).toEqual([0, 0, 0]);
+  });
+
+  it("steps a slot's teleport counter on every spawn, across the players who take the slot", () => {
+    const match = newMatch();
+    const first = joined(match);
+    const other = joined(match);
+    expect(first.lastSnapshot().teleportSeq).toBe(1);
+    expect(match.session(0)?.serial).toBe(1);
+    first.transport.close("bye");
+    run(match, other, 2);
+    expect(other.lastSnapshot().entities).toEqual([]);
+    const second = joined(match);
+    expect(match.session(0)?.serial).toBe(2);
+    expect(second.lastSnapshot().teleportSeq).toBe(2);
+    run(match, other, 1);
+    expect(other.lastSnapshot().frame.teleportSeq[0]).toBe(2);
+    expect(match.worldFrame.serial[0]).toBe(2);
+    expect(match.worldFrame.serial[1]).toBe(1);
+  });
+
+  it("fits the full snapshot of a 37-player match in 1100 B", () => {
+    const match = new Match({ cmap, world, buildHash: TEST_BUILD, maxClients: 37 });
+    const clients: TestClient[] = [];
+    for (let i = 0; i < 37; i++) {
+      const cl = connect(match);
+      cl.hello();
+      clients.push(cl);
+    }
+    run(match, null, 1);
+    for (const cl of clients) cl.ready();
+    run(match, null, 2);
+    const sizes = new Set<number>();
+    for (const cl of clients) {
+      cl.poll();
+      expect(cl.lastSnapshot().entities).toHaveLength(36);
+      expect(cl.bad).toBe(0);
+    }
+    const t = (clients[0] as TestClient).transport;
+    t.onMessage((d, len) => {
+      if (d[0] === MSG_SNAPSHOT) sizes.add(len);
+    });
+    run(match, clients[0] as TestClient, 1);
+    // 86 + 199 + 7 + 36 × 213 bits.
+    expect([...sizes]).toEqual([995]);
   });
 });
 

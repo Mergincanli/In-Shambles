@@ -25,6 +25,7 @@ import {
   type CollisionWorld,
   copyPlayerState,
   createLoopbackPair,
+  frameDigest,
   type LoopbackEndpoint,
   Mulberry32,
   NET_PROFILE_LAN,
@@ -32,6 +33,7 @@ import {
   NetSimTransport,
   PlayerState,
   playerStateEquals,
+  SNAPSHOT_HISTORY,
   type Transport,
   type TransportStats,
   vec3,
@@ -51,13 +53,18 @@ import { loadCourse } from "../../src/scenarios/course";
  *
  * Clients that `record` keep what the M2 harness kept: the server's state of their player after
  * every tick, their first and final predictions of every tick, the ticks they reconciled with, a
- * per-frame log and their movement events. The others keep only their counters, so 64 clients
- * stay cheap.
+ * per-frame log and their movement events. They also check every frame their snapshot store takes
+ * against the frame the server encoded it from (`frameDigest`, as that client sees it; M3 design
+ * §5 "Harness"). The others keep only their counters, so 64 clients stay cheap.
  */
 
 export const HARNESS_BUILD = "net-harness";
 export const FRAME_HZ = 144;
-/** Clients one match holds; `addClient` refuses one the match has no free slot for. */
+/**
+ * Player slots of a match: the most clients a harness could hold. The match admits its
+ * `maxClients` (`sv_maxClients`: 32 by default, at most 37 until the D-046 scheduler, D-034), and
+ * `addClient` refuses one it has no free slot for.
+ */
 export const MAX_HARNESS_CLIENTS = MATCH_MAX_CLIENTS;
 
 /** Draws the gap before the next client frame (ms) from the client's seeded generator. */
@@ -197,6 +204,8 @@ export interface MultiHarnessOptions {
   readonly timeTicks?: boolean;
   /** The match's log (ignored by default). */
   readonly log?: MatchLog;
+  /** `sv_maxClients` for the match (its default, 32, when absent). */
+  readonly maxClients?: number;
 }
 
 export interface ClientOptions {
@@ -248,6 +257,13 @@ export class HarnessClient {
   readonly frames = new FrameLog();
   /** Every movement event the client filed (ClientSim.events), across frames, oldest first. */
   readonly events: { tick: number; type: number; value: number; jumped: boolean }[] = [];
+  /** `frameDigest` of the server's world frame after each tick, as this client sees it. */
+  readonly serverDigests = new Map<number, number>();
+  /** Stored frames checked against `serverDigests`, and the ticks whose frame differed. */
+  digestsChecked = 0;
+  readonly digestMismatches: number[] = [];
+  /** The tick of each store ring slot when it was last checked. */
+  private readonly checkedTicks = new Int32Array(SNAPSHOT_HISTORY);
   /** It called `leave`; its frames stop then (and once its session closed for any reason). */
   left = false;
 
@@ -388,7 +404,10 @@ export class HarnessClient {
     // Still in the match (a closed session leaves it at the next tick's poll) and spawned.
     if (s === null || this.harness.match.session(s.clientId) !== s || s.spawnTick < 0) return;
     const tick = this.harness.match.serverTick;
-    if (this.record) this.server.set(tick, copyPlayerState(new PlayerState(), s.player));
+    if (this.record) {
+      this.server.set(tick, copyPlayerState(new PlayerState(), s.player));
+      this.serverDigests.set(tick, frameDigest(this.harness.match.worldFrame, s.clientId));
+    }
     // A tick starves at most once, so the counter rising means this tick did.
     if (s.stats.starved > this.starvedSeen) {
       this.starvedSeen = s.stats.starved;
@@ -414,8 +433,25 @@ export class HarnessClient {
     h.at(h.now + this.frameInterval(), () => this.frame());
   }
 
+  /** Checks the frames the client's store took since the last frame against the server's. */
+  private checkStoredFrames(): void {
+    const ring = this.client.store.ring;
+    const self = this.client.connection.clientId;
+    for (let i = 0; i < SNAPSHOT_HISTORY; i++) {
+      const tick = ring.tickAt(i);
+      if (tick === 0 || tick === this.checkedTicks[i]) continue;
+      this.checkedTicks[i] = tick;
+      const frame = ring.get(tick);
+      const want = this.serverDigests.get(tick);
+      if (frame === null || want === undefined) continue;
+      this.digestsChecked++;
+      if (frameDigest(frame, self) !== want) this.digestMismatches.push(tick);
+    }
+  }
+
   private recordAfterFrame(): void {
     const c = this.client;
+    this.checkStoredFrames();
     const ev = c.events;
     for (let i = 0; i < ev.count; i++) {
       this.events.push({
@@ -546,6 +582,7 @@ export class MultiHarness {
       world: this.course.world,
       buildHash: HARNESS_BUILD,
       log: options.log,
+      ...(options.maxClients === undefined ? {} : { maxClients: options.maxClients }),
     });
     const host: LoopHost = {
       now: () => this.now,
@@ -562,14 +599,13 @@ export class MultiHarness {
 
   /**
    * Adds a client now: it connects at once and its first frame comes one frame gap later. Refused
-   * while the match holds 64 sessions, clients and raw endpoints alike, as the match counts them:
-   * a session that left stays until its close has crossed the link and a tick polled it, so a
-   * rejoin into its slot waits for `match.session(id) === undefined` first.
+   * while the match holds its `maxClients` sessions, clients and raw endpoints alike, as the match
+   * counts them: a session that left stays until its close has crossed the link and a tick polled
+   * it, so a rejoin into its slot waits for `match.session(id) === undefined` first.
    */
   addClient(options: ClientOptions): HarnessClient {
-    if (this.match.sessionCount >= MAX_HARNESS_CLIENTS) {
-      throw new Error(`a match holds ${MAX_HARNESS_CLIENTS} clients`);
-    }
+    const cap = this.match.maxClients;
+    if (this.match.sessionCount >= cap) throw new Error(`a match holds ${cap} clients`);
     const c = new HarnessClient(this, this.clients.length, options, this.course);
     this.clients.push(c);
     return c;
@@ -577,7 +613,7 @@ export class MultiHarness {
 
   /**
    * Adds a raw endpoint now (no HELLO is sent: the test sends what it wants). Not capped here: past
-   * the match's 64 it gets the match's own "server full" KICK and a null session.
+   * the match's `maxClients` it gets the match's own "server full" KICK and a null session.
    */
   addRaw(admin = false): RawClient {
     const [clientEnd, serverEnd] = createLoopbackPair();

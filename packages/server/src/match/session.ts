@@ -32,10 +32,12 @@ export class Session {
   /** The cmd simulated last tick, repeated (attack cleared) when the next one is missing. */
   readonly lastCmd = new UserCmd();
   readonly stats = new SessionStats();
-  /** The tick the player spawned on (−1 before READY); that tick's snapshot carries TELEPORT. */
+  /** The tick the player spawned on (−1 before READY). */
   spawnTick = -1;
   /** SNAP_FLAG_* bits for this tick's snapshot. */
   snapFlags = 0;
+  /** The slot's connect counter when this client took it (u16, wrapping): the entity's serial. */
+  serial = 0;
   /** The client's nonce from HELLO. */
   nonce = 0;
   buildHash = "";

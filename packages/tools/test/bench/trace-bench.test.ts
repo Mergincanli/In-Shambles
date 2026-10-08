@@ -322,11 +322,24 @@ describe("trace bench verdict", () => {
 });
 
 describe("pnpm bench entry", () => {
-  // A short pmove part: pmove-bench.test.ts covers it.
+  // Short pmove and codec parts: pmove-bench.test.ts and codec-bench.test.ts cover them.
   const run = (...args: string[]) =>
     spawnSync(
       process.execPath,
-      ["--import", "tsx", "bench/run.ts", "--pmove-ticks", "20", "--pmove-warmup", "0", ...args],
+      [
+        "--import",
+        "tsx",
+        "bench/run.ts",
+        "--pmove-ticks",
+        "20",
+        "--pmove-warmup",
+        "0",
+        "--codec-calls",
+        "1000",
+        "--codec-warmup",
+        "0",
+        ...args,
+      ],
       { cwd: fromRoot("packages", "tools"), encoding: "utf8" },
     );
 

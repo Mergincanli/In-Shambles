@@ -13,8 +13,6 @@ import {
   type CloseHandler,
   CmdMsg,
   decodeCmd,
-  decodeSnapshot,
-  encodeSnapshot,
   findNetProfile,
   MAX_QUEUED_UNRELIABLE,
   MAX_UNRELIABLE_BYTES,
@@ -24,15 +22,14 @@ import {
   MSG_SNAPSHOT,
   type NetProfile,
   type NetSimTransport,
-  type PlayerState,
-  SNAP_FLAG_TELEPORT,
-  SnapshotMsg,
+  PlayerState,
   type Transport,
   type TransportStats,
   type UserCmd,
 } from "@game/shared";
 import { describe, expect, it } from "vitest";
 import { NetHarness } from "./harness";
+import { HandSnapshot } from "./snapshots";
 
 // The ClientSim paths the NET acceptance runs rarely reach (M2 design §2): the render offset at a
 // visible size and its snaps, the hard resync after a long stall, the CVARS re-request, the
@@ -43,6 +40,8 @@ class TapTransport implements Transport {
   /** Returns the bytes to deliver (the same or rewritten), or null to drop the message. */
   receive: (d: Uint8Array, len: number, reliable: boolean) => Uint8Array | null = (d) => d;
   send: (d: Uint8Array, len: number, reliable: boolean) => void = () => {};
+  /** Hands an unreliable message to the client now, as if it had just arrived (a reorder). */
+  inject: (d: Uint8Array) => void = () => {};
   constructor(private readonly inner: Transport) {}
   sendUnreliable(d: Uint8Array, len: number): void {
     this.send(d, len, false);
@@ -53,6 +52,7 @@ class TapTransport implements Transport {
     this.inner.sendReliable(d, len);
   }
   onMessage(cb: MessageHandler): void {
+    this.inject = (d) => cb(d, d.length, false);
     this.inner.onMessage((d, len, reliable) => {
       const out = this.receive(d, len, reliable);
       if (out !== null) cb(out, out === d ? len : out.length, reliable);
@@ -121,6 +121,8 @@ describe("render offset", () => {
     bump(h, 20);
     h.run(600);
     expect(h.totals().corrections).toBe(1);
+    // The spawn snapshot seeded the teleport counter, and nothing changed it since (D-035).
+    expect(h.client.teleports).toBe(0);
     const i = firstOffsetFrame(h, from);
     expect(i).toBeGreaterThan(from);
     const f = h.frames;
@@ -153,30 +155,87 @@ describe("render offset", () => {
     expect(jump).toBeGreaterThan(h.client.settings.teleportDist);
   });
 
-  it("snaps on a snapshot's teleport flag, however short the move", () => {
+  /**
+   * Bumps the server's player 20 u and, from the bumped tick on, rewrites every snapshot to carry
+   * the next teleport counter (D-035). `edit` sees each snapshot's tick and its (rewritten) bytes
+   * and returns what to deliver, null to drop it.
+   */
+  function counterStep(
+    edit: (tick: number, bump: number, d: Uint8Array) => Uint8Array | null = (_, __, d) => d,
+  ) {
     const { h, tap } = tapped(new NeutralInput());
     h.runTicks(120);
     const from = h.frames.offset.length;
     const tick = bump(h, 20);
     const r = new BitReader();
     const w = new BitWriter(MAX_UNRELIABLE_BYTES);
-    const m = new SnapshotMsg();
+    const m = new HandSnapshot(0);
     tap.receive = (d, len, reliable) => {
       if (reliable || d[0] !== MSG_SNAPSHOT) return d;
       r.reset(d, len);
-      if (!decodeSnapshot(r, m) || m.serverTick !== tick) return d;
-      m.flags |= SNAP_FLAG_TELEPORT;
-      w.reset();
-      encodeSnapshot(w, m);
-      return w.bytes.slice(0, w.byteLength);
+      if (!m.decode(r)) return d;
+      const t = m.header.serverTick;
+      if (t < tick) return edit(t, tick, d.slice(0, len));
+      m.frame.teleportSeq[0] = (m.header.teleportSeq + 1) & 0xff;
+      m.encode(w);
+      return edit(t, tick, w.bytes.slice(0, w.byteLength));
     };
-    h.run(600);
-    expect(h.totals().corrections).toBe(1);
+    return { h, tap, from };
+  }
+
+  function expectSnapped(h: NetHarness, from: number): void {
     const f = h.frames;
     expect(Math.max(...f.offset.slice(from))).toBe(0);
     let jump = 0;
     for (let j = from + 1; j < f.time.length; j++) jump = Math.max(jump, step(f, j));
     expect(jump).toBeGreaterThan(15);
+  }
+
+  it("snaps on a change of the snapshot's teleport counter, however short the move", () => {
+    // The bump's own snapshot snaps; the later ones carry the same counter and don't.
+    const { h, from } = counterStep();
+    h.run(600);
+    expect(h.totals().corrections).toBe(1);
+    expect(h.client.teleports).toBe(1);
+    expectSnapped(h, from);
+  });
+
+  it("still snaps when the snapshot of the jump is lost (D-035)", () => {
+    const { h, from } = counterStep((t, tick, d) => (t === tick ? null : d));
+    h.run(600);
+    expect(h.client.teleports).toBe(1);
+    expectSnapped(h, from);
+  });
+
+  it("ignores the previous counter on a reordered older snapshot (D-035)", () => {
+    // The snapshot before the jump arrives right after the jump's: stored (its ring slot is free),
+    // stale to prediction, so the watched counter must not step back (and snap twice).
+    let held: Uint8Array | null = null;
+    let heldStored = false;
+    const { h, tap, from } = counterStep((t, tick, d) => {
+      if (t === tick - 1) {
+        held = d;
+        return null;
+      }
+      if (t === tick && held !== null) {
+        tap.inject(d);
+        const stored = h.client.store.stored;
+        tap.inject(held);
+        heldStored = h.client.store.stored === stored + 1;
+        return null;
+      }
+      return d;
+    });
+    h.run(600);
+    expect(heldStored).toBe(true);
+    expect(h.client.teleports).toBe(1);
+    expectSnapped(h, from);
+    // A later small correction eases as usual: the counter in hand is still the new one.
+    const later = h.frames.offset.length;
+    bump(h, 20);
+    h.run(600);
+    expect(h.client.teleports).toBe(1);
+    expect(firstOffsetFrame(h, later)).toBeGreaterThan(later);
   });
 });
 
@@ -378,16 +437,13 @@ describe("ClientSim recovery paths", () => {
     match.tick = () => {};
     const server = match.session(0)?.transport as Transport;
     const w = new BitWriter(MAX_UNRELIABLE_BYTES);
-    const m = new SnapshotMsg();
+    const m = new HandSnapshot(0);
+    const ps = new PlayerState();
+    const teleportSeq = c.store.header.teleportSeq;
     const send = (tick: number, health: number) => {
-      m.serverTick = tick;
-      m.lastProcessedCmdTick = tick;
-      m.inputBufferHealth = health;
-      m.cvarHash = p.hashFor(tick);
-      m.flags = 0;
-      if (!p.stateAt(tick, m.state)) m.state.origin.set(p.state.origin);
-      w.reset();
-      encodeSnapshot(w, m);
+      if (!p.stateAt(tick, ps)) ps.origin.set(p.state.origin);
+      m.local(tick, ps, { health, cvarHash: p.hashFor(tick), teleportSeq });
+      m.encode(w);
       server.sendUnreliable(w.bytes, w.byteLength);
     };
     // The real server's last snapshots land first.

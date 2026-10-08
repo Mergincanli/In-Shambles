@@ -14,7 +14,6 @@ import {
   decodePong,
   decodePrint,
   decodeReady,
-  decodeSnapshot,
   decodeWelcome,
   encodeCmd,
   encodeCvars,
@@ -25,7 +24,6 @@ import {
   encodePong,
   encodePrint,
   encodeReady,
-  encodeSnapshot,
   encodeWelcome,
   HelloMsg,
   InputMsg,
@@ -33,7 +31,6 @@ import {
   PingMsg,
   PongMsg,
   PrintMsg,
-  SnapshotMsg,
   WelcomeMsg,
 } from "../../src/net/messages";
 import {
@@ -49,9 +46,27 @@ import {
   MSG_READY,
   MSG_SNAPSHOT,
   MSG_WELCOME,
+  SNAP_BUDGET_BITS,
+  SNAP_FLAG_SPECTATOR,
+  SNAP_FLAG_STARVED,
 } from "../../src/net/protocol";
+import {
+  decodeSnapshotBody,
+  decodeSnapshotHeader,
+  ENTITY_NEW_BITS,
+  encodeSnapshot,
+  SNAP_FULL_FIXED_BITS,
+  SnapshotHeader,
+} from "../../src/net/snapshot";
+import {
+  ENTITY_EVENT_SLOTS,
+  FRAME_SLOTS,
+  playerStateToSlot,
+  WorldFrame,
+} from "../../src/net/worldFrame";
 import type { Mulberry32 } from "../../src/rng/mulberry32";
-import type { PlayerState } from "../../src/sim/playerState";
+import { PMEV_JUMP, PMEV_LAND, PMEV_NONE } from "../../src/sim/events";
+import { PlayerState } from "../../src/sim/playerState";
 import type { UserCmd } from "../../src/sim/usercmd";
 import { TICK_MAX } from "../../src/time";
 
@@ -87,6 +102,114 @@ export function randomState(rng: Mulberry32, ps: PlayerState): PlayerState {
   ps.waterLevel = intIn(rng, 0, 3);
   ps.stamina = intIn(rng, 0, 0xffff);
   return ps;
+}
+
+/**
+ * The receiver of the random live snapshots the codec tests make: any id works, one in the middle
+ * puts records on both sides of it.
+ */
+export const SNAP_SELF = 9;
+
+/** The most other players a live full snapshot holds within SNAP_BUDGET_BITS (39). */
+export const LIVE_FULL_MAX_OTHERS = Math.floor(
+  (SNAP_BUDGET_BITS - SNAP_FULL_FIXED_BITS) / ENTITY_NEW_BITS,
+);
+
+const eventState = new PlayerState();
+
+/** Random canonical event slots for slot `s` (kinds 0–3, empty slots last and zero, JUMP 0). */
+function randomEvents(rng: Mulberry32, f: WorldFrame, s: number): void {
+  const e = s * ENTITY_EVENT_SLOTS;
+  const n = intIn(rng, 0, 2);
+  for (let i = 0; i < ENTITY_EVENT_SLOTS; i++) {
+    const kind = i < n ? intIn(rng, 1, PMEV_LAND) : PMEV_NONE;
+    f.evKind[e + i] = kind;
+    f.evValue[e + i] = kind === PMEV_NONE || kind === PMEV_JUMP ? 0 : intIn(rng, 0, 255);
+  }
+}
+
+/** Random entity fields for slot `s` (present with `stamp`), every one within the record's range. */
+export function randomEntity(rng: Mulberry32, f: WorldFrame, s: number, stamp: number): void {
+  f.setPresent(s, stamp);
+  f.serial[s] = intIn(rng, 0, 0xffff);
+  f.originX[s] = intIn(rng, -524288, 524288);
+  f.originY[s] = intIn(rng, -524288, 524288);
+  f.originZ[s] = intIn(rng, -524288, 524288);
+  f.entVelX[s] = intIn(rng, -32767, 32767);
+  f.entVelY[s] = intIn(rng, -32767, 32767);
+  f.entVelZ[s] = intIn(rng, -32767, 32767);
+  f.yaw[s] = intIn(rng, 0, 0xffff);
+  f.pitch[s] = intIn(rng, -PITCH_LIMIT_U16, PITCH_LIMIT_U16);
+  f.flags[s] = intIn(rng, 0, 0x3ff);
+  f.team[s] = intIn(rng, 0, 2);
+  f.teleportSeq[s] = intIn(rng, 0, 255);
+  f.eventSeq[s] = intIn(rng, 0, 255);
+  randomEvents(rng, f, s);
+}
+
+/**
+ * A random frame of tick `tick` for receiver `selfId` (−1: spectator): the receiver's slot with a
+ * random quantized state and teleportSeq, and `others` other random present slots.
+ */
+export function randomFrame(
+  rng: Mulberry32,
+  f: WorldFrame,
+  tick: number,
+  selfId: number,
+  others: number,
+): WorldFrame {
+  f.clear();
+  if (selfId >= 0) {
+    f.setPresent(selfId, tick);
+    playerStateToSlot(f, selfId, randomState(rng, eventState));
+    f.teleportSeq[selfId] = intIn(rng, 0, 255);
+    f.team[selfId] = intIn(rng, 0, 2);
+  }
+  let left = others;
+  // A random subset of the other slots, in a random order of picks.
+  while (left > 0) {
+    const s = rng.nextInt(FRAME_SLOTS);
+    if (s === selfId || f.present[s] === 1) continue;
+    randomEntity(rng, f, s, tick);
+    left--;
+  }
+  return f;
+}
+
+/** A snapshot header and frame, as the SNAPSHOT codec takes them. */
+export class SnapshotParts {
+  readonly hdr = new SnapshotHeader();
+  readonly frame = new WorldFrame();
+  /** The receiver (−1 for a spectator snapshot). */
+  get selfId(): number {
+    return (this.hdr.flags & SNAP_FLAG_SPECTATOR) !== 0 ? -1 : SNAP_SELF;
+  }
+}
+
+export function encodeSnapshotParts(w: BitWriter, m: SnapshotParts): boolean {
+  return encodeSnapshot(w, m.hdr, m.frame, null, m.selfId);
+}
+
+/** Header then body, as receiver SNAP_SELF (a spectator snapshot has none). */
+export function decodeSnapshotParts(r: BitReader, m: SnapshotParts): boolean {
+  return decodeSnapshotHeader(r, m.hdr) && decodeSnapshotBody(r, m.hdr, null, SNAP_SELF, m.frame);
+}
+
+/** Random valid parts: live (starved or not) or spectator, up to the most records that fit. */
+export function randomSnapshot(rng: Mulberry32, m: SnapshotParts): SnapshotParts {
+  const h = m.hdr;
+  h.serverTick = intIn(rng, 1, TICK_MAX);
+  h.baseBack = 0;
+  const kind = rng.nextInt(5);
+  h.flags = kind === 0 ? SNAP_FLAG_SPECTATOR : kind === 1 ? SNAP_FLAG_STARVED : 0;
+  h.cvarHash = intIn(rng, 0, 0xffff);
+  h.inputBufferHealth = intIn(rng, -128, 127);
+  const spectator = kind === 0;
+  const max = spectator ? 24 : 16;
+  const others =
+    rng.nextInt(10) === 0 ? (spectator ? 64 : LIVE_FULL_MAX_OTHERS) : intIn(rng, 0, max);
+  randomFrame(rng, m.frame, h.serverTick, spectator ? -1 : SNAP_SELF, others);
+  return m;
 }
 
 export function randomCmdFields(rng: Mulberry32, c: UserCmd): void {
@@ -292,18 +415,12 @@ export const MESSAGE_KINDS: readonly MessageKind[] = [
   kind(
     MSG_SNAPSHOT,
     "SNAPSHOT",
-    () => new SnapshotMsg(),
+    () => new SnapshotParts(),
     (rng, m) => {
-      m.serverTick = tick(rng);
-      m.baselineTick = 0;
-      m.lastProcessedCmdTick = tick(rng);
-      m.inputBufferHealth = intIn(rng, -128, 127);
-      m.cvarHash = intIn(rng, 0, 0xffff);
-      m.flags = intIn(rng, 0, 3);
-      randomState(rng, m.state);
+      randomSnapshot(rng, m);
     },
-    encodeSnapshot,
-    decodeSnapshot,
+    encodeSnapshotParts,
+    decodeSnapshotParts,
   ),
   kind(
     MSG_PING,

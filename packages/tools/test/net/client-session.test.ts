@@ -24,19 +24,25 @@ import {
   encodePong,
   encodeSnapshot,
   findNetProfile,
+  MATCH_MAX_CLIENTS,
   MAX_RELIABLE_BYTES,
+  MSG_WELCOME,
   PlayerState,
   PMEV_JUMP,
   PMEV_LAND,
   PMF_GROUNDED,
   PongMsg,
-  SnapshotMsg,
+  SNAP_FLAG_SPECTATOR,
+  slotToPlayerState,
+  type Transport,
   UserCmd,
   WelcomeMsg,
+  type WorldFrame,
 } from "@game/shared";
 import { describe, expect, it } from "vitest";
 import { loadCourse } from "../../src/scenarios/course";
 import { HARNESS_BUILD, NetHarness } from "./harness";
+import { HandSnapshot } from "./snapshots";
 
 // The client's session outside the NET acceptance runs: the handshake states, refusals, kicks and
 // malformed packets (M2 design §1 connection.ts), and the scripted inputs (scriptedInput.ts).
@@ -243,6 +249,27 @@ describe("client session", () => {
     expect(throws.connection.closeReason).toBe("could not load map movement_lab: no such file");
   });
 
+  it("refuses a WELCOME whose client id is past the 64 slots (D-034)", () => {
+    const { client, serverEnd, now } = bareClient();
+    const match = new Match({ cmap: course.cmap, world: course.world, buildHash: HARNESS_BUILD });
+    // The match's WELCOME with its client id byte (after type and version) set to 64.
+    const send = serverEnd.sendReliable.bind(serverEnd);
+    serverEnd.sendReliable = (d, len) => {
+      if (d[0] === MSG_WELCOME) d[3] = MATCH_MAX_CLIENTS;
+      send(d, len);
+    };
+    match.connect(serverEnd, true);
+    client.connect();
+    for (let i = 0; i < 10; i++) {
+      now.t += 10;
+      match.tick();
+      client.frame();
+    }
+    expect(client.state).toBe(CONN_CLOSED);
+    expect(client.connection.closeReason).toBe("server gave client id 64 (max 63)");
+    expect(client.mapRequest).toBeNull();
+  });
+
   it("reports the server's kick", () => {
     const { client, serverEnd, now } = bareClient("other-build");
     const match = new Match({ cmap: course.cmap, world: course.world, buildHash: HARNESS_BUILD });
@@ -262,9 +289,9 @@ describe("client session", () => {
     client.connect();
     const w = new BitWriter(MAX_RELIABLE_BYTES);
     // A snapshot before WELCOME is out of state; on the reliable channel it is on the wrong one.
-    const snap = new SnapshotMsg();
-    snap.state.stamina = 100;
-    encodeSnapshot(w, snap);
+    const ps = new PlayerState();
+    ps.stamina = 100;
+    new HandSnapshot(0).local(1, ps).encode(w);
     serverEnd.sendUnreliable(w.bytes, w.byteLength);
     serverEnd.sendReliable(w.bytes, w.byteLength);
     w.reset();
@@ -278,6 +305,61 @@ describe("client session", () => {
     expect(client.stats.totals[STAT_STRIKES]).toBe(4);
     expect(client.state).toBe(CONN_CONNECTING);
     expect(client.predictor.latestTick).toBe(-1);
+  });
+
+  it("strikes and drops a spectator snapshot on a live connection (demo files only, D-033)", () => {
+    const h = new NetHarness({ input: new NeutralInput() });
+    h.runTicks(60);
+    const c = h.client;
+    const strikes = c.stats.totals[STAT_STRIKES] as number;
+    // Every player of the next tick, no local block: valid bytes, refused by a live connection.
+    const m = new HandSnapshot(-1);
+    const tick = h.match.serverTick + 1;
+    m.header.serverTick = tick;
+    m.header.flags = SNAP_FLAG_SPECTATOR;
+    m.frame.clear();
+    m.frame.setPresent(0, tick);
+    const w = new BitWriter(MAX_RELIABLE_BYTES);
+    expect(m.encode(w)).toBe(true);
+    h.match.tick = () => {};
+    const server = h.match.session(0)?.transport as Transport;
+    server.sendUnreliable(w.bytes, w.byteLength);
+    h.run(50);
+    expect(c.stats.totals[STAT_STRIKES]).toBe(strikes + 1);
+    expect(c.store.spectatorDropped).toBe(1);
+    expect(c.store.ring.has(tick)).toBe(false);
+    expect(c.predictor.snapshotTick).toBeLessThan(tick);
+    expect(c.active).toBe(true);
+  });
+
+  it("drops a duplicate or older snapshot without a strike (D-033)", () => {
+    const h = new NetHarness({ input: new NeutralInput() });
+    h.runTicks(120);
+    h.match.tick = () => {};
+    h.run(50);
+    const c = h.client;
+    const strikes = c.stats.totals[STAT_STRIKES] as number;
+    const [stale, stored, snapTick] = [c.store.stale, c.store.stored, c.predictor.snapshotTick];
+    const newest = c.store.newestTick;
+    expect(newest).toBe(snapTick);
+    const server = h.match.session(0)?.transport as Transport;
+    const w = new BitWriter(MAX_RELIABLE_BYTES);
+    // The newest snapshot again, byte for byte as the client holds it.
+    expect(encodeSnapshot(w, c.store.header, c.store.newest as WorldFrame, null, 0)).toBe(true);
+    server.sendUnreliable(w.bytes, w.byteLength);
+    // A snapshot 64 ticks older: its ring slot holds the newer tick.
+    const ps = new PlayerState();
+    slotToPlayerState(c.store.newest as WorldFrame, 0, ps);
+    const old = new HandSnapshot(0).local(newest - 64, ps, {
+      teleportSeq: c.store.header.teleportSeq,
+    });
+    expect(old.encode(w)).toBe(true);
+    server.sendUnreliable(w.bytes, w.byteLength);
+    h.run(50);
+    expect(c.stats.totals[STAT_STRIKES]).toBe(strikes);
+    expect([c.store.stale, c.store.stored]).toEqual([stale + 2, stored]);
+    expect(c.predictor.snapshotTick).toBe(snapTick);
+    expect(c.active).toBe(true);
   });
 
   it("closes when the server's transport closes", () => {

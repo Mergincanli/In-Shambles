@@ -12,7 +12,8 @@ import {
   decodeKick,
   decodePong,
   decodePrint,
-  decodeSnapshot,
+  decodeSnapshotBody,
+  decodeSnapshotHeader,
   decodeWelcome,
   encodeCmd,
   encodeHello,
@@ -30,13 +31,16 @@ import {
   MSG_SNAPSHOT,
   MSG_WELCOME,
   PingMsg,
+  PlayerState,
   PongMsg,
   PrintMsg,
   peekMessageType,
-  SnapshotMsg,
+  SnapshotHeader,
+  slotToPlayerState,
   type Transport,
   type UserCmd,
   WelcomeMsg,
+  WorldFrame,
 } from "@game/shared";
 
 /** A committed greybox course, decoded with hash verification (content/maps). */
@@ -47,6 +51,40 @@ export function loadMap(name: string): Cmap {
 
 export const TEST_BUILD = "test-build";
 
+/** A decoded v2 snapshot (D-033) as the receiver holds it: the header, the frame, its own state. */
+export class TestSnapshot {
+  readonly header = new SnapshotHeader();
+  readonly frame = new WorldFrame();
+  /** The receiver's state, from its slot (the local block). */
+  readonly state = new PlayerState();
+
+  get serverTick(): number {
+    return this.header.serverTick;
+  }
+  get flags(): number {
+    return this.header.flags;
+  }
+  get inputBufferHealth(): number {
+    return this.header.inputBufferHealth;
+  }
+  get cvarHash(): number {
+    return this.header.cvarHash;
+  }
+  get teleportSeq(): number {
+    return this.header.teleportSeq;
+  }
+  /** The ids of the other players the snapshot lists, ascending. */
+  get entities(): number[] {
+    const ids: number[] = [];
+    for (let s = 0; s < this.frame.present.length; s++) {
+      if (this.frame.present[s] === 1 && s !== this.clientId) ids.push(s);
+    }
+    return ids;
+  }
+
+  constructor(readonly clientId: number) {}
+}
+
 /**
  * A scripted client on any transport (one end of a loopback pair, or a real WebSocket in the Node
  * server tests): encodes what a test sends and decodes, into fresh copies, everything the match
@@ -54,7 +92,7 @@ export const TEST_BUILD = "test-build";
  */
 export class TestClient {
   readonly welcomes: WelcomeMsg[] = [];
-  readonly snapshots: SnapshotMsg[] = [];
+  readonly snapshots: TestSnapshot[] = [];
   readonly pongs: PongMsg[] = [];
   readonly cvars: CvarsMsg[] = [];
   readonly prints: PrintMsg[] = [];
@@ -126,7 +164,7 @@ export class TestClient {
     this.transport.poll();
   }
 
-  lastSnapshot(): SnapshotMsg {
+  lastSnapshot(): TestSnapshot {
     const s = this.snapshots.at(-1);
     if (s === undefined) throw new Error("no snapshot yet");
     return s;
@@ -142,9 +180,14 @@ export class TestClient {
       ok = decodeWelcome(r, m);
       if (ok) this.welcomes.push(m);
     } else if (type === MSG_SNAPSHOT) {
-      const m = new SnapshotMsg();
-      ok = decodeSnapshot(r, m);
-      if (ok) this.snapshots.push(m);
+      // Decoded as the client WELCOME named (none yet: refused as bad).
+      const id = this.welcomes.at(-1)?.clientId ?? -1;
+      const m = new TestSnapshot(id);
+      ok = decodeSnapshotHeader(r, m.header) && decodeSnapshotBody(r, m.header, null, id, m.frame);
+      if (ok) {
+        slotToPlayerState(m.frame, id, m.state);
+        this.snapshots.push(m);
+      }
     } else if (type === MSG_PONG) {
       const m = new PongMsg();
       ok = decodePong(r, m);

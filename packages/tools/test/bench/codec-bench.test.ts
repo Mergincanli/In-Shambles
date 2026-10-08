@@ -1,5 +1,12 @@
 import { spawnSync } from "node:child_process";
-import { copyPlayerState, PlayerState, playerStateEquals, quantizePlayerState } from "@game/shared";
+import {
+  copyPlayerState,
+  PlayerState,
+  playerStateEquals,
+  quantizePlayerState,
+  slotToPlayerState,
+  type WorldFrame,
+} from "@game/shared";
 import { describe, expect, it } from "vitest";
 import {
   buildCodecWorkload,
@@ -25,7 +32,7 @@ function fakeResult(nsPerSnapshot: number, gcs: number, failures = 0): CodecBenc
     calls: 1,
     nsPerSnapshot,
     nsPerInput: 1,
-    snapshotBytes: 42,
+    snapshotBytes: 436,
     inputBytes: 55,
     failures,
     gcs,
@@ -34,28 +41,34 @@ function fakeResult(nsPerSnapshot: number, gcs: number, failures = 0): CodecBenc
 }
 
 describe("codec bench workload", () => {
-  it("holds quantized states of moving players, as the match sends them", () => {
-    expect(workload.snapshots.length).toBe(CODEC_CASES);
+  it("holds 16-player frames of quantized, moving players, a snapshot per receiver", () => {
+    expect(workload.headers.length).toBe(CODEC_CASES);
     expect(workload.inputs.length).toBe(CODEC_CASES);
+    expect(workload.frames.length).toBe(CODEC_CASES / 16);
     let moving = 0;
     const origins = new Set<number>();
-    for (const m of workload.snapshots) {
-      const s = m.state;
-      const q = quantizePlayerState(copyPlayerState(new PlayerState(), s));
-      expect(playerStateEquals(q, s)).toBe(true);
-      if (Math.abs(s.velocity[0] as number) + Math.abs(s.velocity[1] as number) > 100) moving++;
-      origins.add(s.origin[0] as number);
+    const ps = new PlayerState();
+    for (let c = 0; c < CODEC_CASES; c++) {
+      const f = workload.frames[workload.frameOf[c] as number] as WorldFrame;
+      expect(f.presentCount).toBe(16);
+      slotToPlayerState(f, workload.receiver[c] as number, ps);
+      const q = quantizePlayerState(copyPlayerState(new PlayerState(), ps));
+      expect(playerStateEquals(q, ps)).toBe(true);
+      if (Math.abs(ps.velocity[0] as number) + Math.abs(ps.velocity[1] as number) > 100) moving++;
+      origins.add(ps.origin[0] as number);
     }
+    expect(new Set(workload.receiver).size).toBe(16);
     expect(moving / CODEC_CASES).toBeGreaterThan(0.5);
     expect(origins.size).toBeGreaterThan(CODEC_CASES / 2);
   });
 
-  it("round-trips every case in 42 B snapshots and 55 B inputs", () => {
+  it("round-trips every case in 436 B full v2 snapshots and 55 B inputs", () => {
     const s = new CodecBenchState();
     runSnapshotCodec(workload, s, CODEC_CASES);
     runInputCodec(workload, s, CODEC_CASES);
     expect(s.failures).toBe(0);
-    expect(s.snapshotBytes).toBe(42 * CODEC_CASES);
+    // 86 + 199 + 7 + 15 × 213 bits.
+    expect(s.snapshotBytes).toBe(436 * CODEC_CASES);
     expect(s.inputBytes).toBe(55 * CODEC_CASES);
   });
 
@@ -79,7 +92,7 @@ describe("codec bench verdict", () => {
       expect(meetsCodecBudget(ns)).toBe(verdict === "PASS");
       const report = formatCodecBench(fakeResult(ns, 2));
       expect(report).toContain(
-        `SNAPSHOT (42 B) encode+decode: ${ns.toFixed(1)} ns, budget 30000 ns: ${verdict}`,
+        `SNAPSHOT, full v2 of 16 players (436 B) encode+decode: ${ns.toFixed(1)} ns, budget 30000 ns: ${verdict}`,
       );
       expect(report).toContain("GCs during the codec loops: 2 (expect 0)");
     }

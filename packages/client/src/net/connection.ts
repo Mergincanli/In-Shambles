@@ -8,7 +8,7 @@ import {
   decodeKick,
   decodePong,
   decodePrint,
-  decodeSnapshot,
+  decodeSnapshotHeader,
   decodeWelcome,
   encodeCmd,
   encodeHello,
@@ -19,6 +19,7 @@ import {
   INPUT_MAX_CMDS,
   InputMsg,
   KickMsg,
+  MATCH_MAX_CLIENTS,
   MAX_RELIABLE_BYTES,
   MSG_CVARS,
   MSG_KICK,
@@ -31,14 +32,16 @@ import {
   PROTOCOL_VERSION,
   PrintMsg,
   peekMessageType,
-  SnapshotMsg,
+  SnapshotHeader,
   TICK_RATE,
   type Transport,
   type UserCmd,
   WelcomeMsg,
+  type WorldFrame,
 } from "@game/shared";
 import type { ClientClock } from "./clock";
 import type { CmdRing } from "./predictor";
+import { SnapshotStore, STORE_STALE, STORE_STORED } from "./snapshotStore";
 import {
   type NetStats,
   STAT_BYTES_IN,
@@ -66,8 +69,11 @@ export interface ConnectionHandler {
   onWelcome(m: WelcomeMsg): string | null;
   /** The map WELCOME named is loaded: READY may go (D-031). */
   mapReady(): boolean;
-  /** A SNAPSHOT that decoded, in CONN_SPAWNING or CONN_ACTIVE. `m` is reused. */
-  onSnapshot(m: SnapshotMsg): void;
+  /**
+   * A SNAPSHOT that decoded and was stored, in CONN_SPAWNING or CONN_ACTIVE: its header and the
+   * frame the store holds for its tick (both reused; read the local slot with slotToPlayerState).
+   */
+  onSnapshot(h: SnapshotHeader, frame: WorldFrame): void;
   /** A CVARS that decoded, from WELCOME on. `m` is reused. */
   onCvars(m: CvarsMsg): void;
   onPrint(level: number, text: string): void;
@@ -80,7 +86,8 @@ export interface ConnectionHandler {
  * (HELLO → WELCOME → clock-sync pings → READY → first snapshot), the decoding and channel check
  * of everything the server sends, and the encoding of what the client sends. Like the server, it
  * drops a packet that doesn't decode, arrives on the wrong channel or doesn't fit the state, and
- * counts a strike. INPUT, SNAPSHOT, PING and PONG allocate nothing.
+ * counts a strike. Snapshots go into the `SnapshotStore` (protocol v2, D-033); a spectator one is
+ * struck and dropped (demo files only, D-044). INPUT, SNAPSHOT, PING and PONG allocate nothing.
  */
 export class Connection {
   state = CONN_IDLE;
@@ -91,7 +98,10 @@ export class Connection {
   private readonly reader = new BitReader();
   private readonly hello = new HelloMsg();
   private readonly welcome = new WelcomeMsg();
-  private readonly snapshot = new SnapshotMsg();
+  /** The frames received, by tick (M3 design §2.3). */
+  readonly store = new SnapshotStore();
+  /** A snapshot's header read outside CONN_SPAWNING/CONN_ACTIVE, to tell junk from a late one. */
+  private readonly outOfState = new SnapshotHeader();
   private readonly ping = new PingMsg();
   private readonly pong = new PongMsg();
   private readonly cvars = new CvarsMsg();
@@ -237,9 +247,18 @@ export class Connection {
     r.reset(d, len);
     // Each message has its channel (docs/05 §3.3); one on the other channel is dropped.
     if (type === MSG_SNAPSHOT) {
-      if (reliable || !decodeSnapshot(r, this.snapshot)) this.strike();
-      else if (state === CONN_SPAWNING || state === CONN_ACTIVE)
-        this.handler.onSnapshot(this.snapshot);
+      if (reliable) {
+        this.strike();
+      } else if (state === CONN_SPAWNING || state === CONN_ACTIVE) {
+        const store = this.store;
+        const result = store.receive(r, this.clientId);
+        if (result === STORE_STORED)
+          this.handler.onSnapshot(store.header, store.lastStored as WorldFrame);
+        else if (result !== STORE_STALE) this.strike();
+      } else if (!decodeSnapshotHeader(r, this.outOfState)) {
+        // Before the session (or after it) the body can't be read: its receiver isn't known.
+        this.strike();
+      }
     } else if (type === MSG_PONG) {
       if (reliable || !decodePong(r, this.pong)) this.strike();
       else if (state >= CONN_SYNCING) this.clock.onPong(this.pong.pingId);
@@ -275,6 +294,12 @@ export class Connection {
     }
     if (m.tickRate !== TICK_RATE) {
       this.disconnect(`server ticks at ${m.tickRate} Hz, this client at ${TICK_RATE}`);
+      return;
+    }
+    // Client id = slot = entity id (D-034): one past the slots could never be a snapshot's
+    // receiver, so every snapshot would be struck and the session would never go live.
+    if (m.clientId >= MATCH_MAX_CLIENTS) {
+      this.disconnect(`server gave client id ${m.clientId} (max ${MATCH_MAX_CLIENTS - 1})`);
       return;
     }
     const refusal = this.handler.onWelcome(m);

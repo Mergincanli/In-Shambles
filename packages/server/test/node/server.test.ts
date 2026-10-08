@@ -90,7 +90,7 @@ describe("Node server (in process, real WebSocket)", () => {
       body: {
         buildHash: server.buildHash,
         protocol: PROTOCOL_VERSION,
-        matches: [{ name: "main", map: "arena_greybox", players: 1, maxClients: 64 }],
+        matches: [{ name: "main", map: "arena_greybox", players: 1, maxClients: 32 }],
       },
     });
     const metrics = (await httpJson(port, "/metrics")).body as {
@@ -103,6 +103,35 @@ describe("Node server (in process, real WebSocket)", () => {
     expect(metrics.matches.main.serverTick).toBeGreaterThan(0);
     expect(metrics.matches.main.players).toBe(1);
     expect(metrics.matches.main.snapshots).toBeGreaterThan(0);
+  });
+
+  it("reports the effective sv_maxClients in /status, clamped to 37 with a warning (D-034)", async () => {
+    const statusOf = async (port: number) =>
+      ((await httpJson(port, "/status")).body as { matches: { maxClients: number }[] }).matches[0]
+        ?.maxClients;
+    {
+      const { server, lines, port } = await start(["--set", "sv_maxClients=4"]);
+      expect(server.matches.main?.match.maxClients).toBe(4);
+      expect(await statusOf(port)).toBe(4);
+      expect(lines.some((l) => l.ev === "max_clients_clamped")).toBe(false);
+      await server.stop();
+    }
+    const { server, lines, port } = await start(["--set", "sv_maxClients=64"]);
+    expect(server.cvars.get("sv_maxClients")).toBe(64);
+    expect(server.matches.main?.match.maxClients).toBe(37);
+    expect(await statusOf(port)).toBe(37);
+    expect(lines.slice(0, 3).map((l) => l.ev)).toEqual([
+      "server_ok",
+      "listening",
+      "max_clients_clamped",
+    ]);
+    expect(lines.find((l) => l.ev === "max_clients_clamped")).toMatchObject({
+      lvl: "warn",
+      match: "main",
+      requested: 64,
+      maxClients: 37,
+    });
+    await expect(start(["--set", "sv_maxClients=65"])).rejects.toThrow(/sv_maxClients/);
   });
 
   it("shuts down gracefully: KICK, then close 1001, then a shutdown line", async () => {

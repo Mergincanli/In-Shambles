@@ -46,7 +46,9 @@ import {
   decodeInput,
   decodePing,
   decodePong,
-  decodeSnapshot,
+  decodeSnapshotBody,
+  decodeSnapshotHeader,
+  ENTITY_NEW_BITS,
   encodeHello,
   encodeInput,
   encodePing,
@@ -88,6 +90,7 @@ import {
   PongMsg,
   peekMessageType,
   playerStateEquals,
+  playerStateToSlot,
   pmove,
   pointContents,
   positionContents,
@@ -97,9 +100,11 @@ import {
   registerPmoveCvars,
   rotatedBoxPlanes,
   SNAP_FLAG_STARVED,
-  SnapshotMsg,
+  SNAP_FULL_FIXED_BITS,
+  SnapshotHeader,
   SURF_LADDER,
   sanitizeUserCmd,
+  slotToPlayerState,
   snapOrigin,
   TICK_DT,
   TraceResult,
@@ -110,6 +115,7 @@ import {
   UserCmd,
   type Vec3,
   vec3,
+  WorldFrame,
   wedgePlanes,
 } from "@game/shared";
 import { HoldInput, HopForward, StrafeHop } from "../../src/scenarios/bots";
@@ -497,8 +503,20 @@ function runStrafeBot(n: number): void {
 
 const codecWriter = new BitWriter(MAX_UNRELIABLE_BYTES);
 const codecReader = new BitReader();
-const snapSent = new SnapshotMsg();
-const snapGot = new SnapshotMsg();
+/** A 16-player world frame (D-033): each SNAPSHOT is one receiver's view of it. */
+const CODEC_PLAYERS = 16;
+const snapHeader = new SnapshotHeader();
+const snapFrame = new WorldFrame();
+const snapGotHeader = new SnapshotHeader();
+const snapGotFrame = new WorldFrame();
+const snapState = new PlayerState();
+const snapGotState = new PlayerState();
+for (let p = 0; p < CODEC_PLAYERS; p++) {
+  snapFrame.setPresent(p, 1);
+  snapState.origin[0] = p * 64;
+  playerStateToSlot(snapFrame, p, snapState);
+}
+snapHeader.serverTick = 1;
 const inputSent = new InputMsg();
 const inputGot = new InputMsg();
 const pingSent = new PingMsg();
@@ -509,11 +527,33 @@ const pongGot = new PongMsg();
 /**
  * Packets the decoders must refuse, as a server sees from a broken or hostile client: random
  * bytes behind an INPUT, SNAPSHOT or PONG type byte, and valid messages with a u32 tick set to
- * 2^32 − 1 (a value that would box if a decoder stored it before checking it). Built once.
+ * 2^32 − 1 (a value that would box if a decoder stored it before checking it) or, for SNAPSHOT,
+ * one field inside an entity record set out of range, so the decoder refuses it after reading
+ * whole records: an id past 63, then a later record's team 3, pitch past ±16201 or event kind 15.
+ * Built once.
  */
 const HOSTILE_COUNT = 64;
 const hostile: Uint8Array[] = [];
 const hostileTypes = [MSG_INPUT, MSG_SNAPSHOT, MSG_PONG];
+/** Bit offset of field `field` in entity record `k` (docs/05 §3.6: records start at 292). */
+const recordBit = (k: number, field: number) => SNAP_FULL_FIXED_BITS + k * ENTITY_NEW_BITS + field;
+/** [bit offset, width, value] of each record-level SNAPSHOT corruption, in turn. */
+const SNAPSHOT_CORRUPTIONS: readonly (readonly [number, number, number])[] = [
+  [recordBit(0, 0), 16, 0xffff], // id
+  [recordBit(7, 171), 2, 3], // team
+  [recordBit(11, 145), 16, 0x7fff], // pitch
+  [recordBit(14, 189), 4, 15], // first event kind
+];
+let snapshotCorruption = 0;
+/** Overwrites `width` bits at bit `offset` of `bytes` with `value` (LSB-first, as BitWriter). */
+function patchBits(bytes: Uint8Array, offset: number, width: number, value: number): void {
+  for (let b = 0; b < width; b++) {
+    const bit = offset + b;
+    const mask = 1 << (bit & 7);
+    const byte = bytes[bit >> 3] as number;
+    bytes[bit >> 3] = ((value >>> b) & 1) === 1 ? byte | mask : byte & ~mask;
+  }
+}
 for (let i = 0; i < HOSTILE_COUNT; i++) {
   const type = hostileTypes[i % 3] as number;
   if (i < HOSTILE_COUNT / 2) {
@@ -528,25 +568,36 @@ for (let i = 0; i < HOSTILE_COUNT; i++) {
     inputSent.count = 1;
     encodeInput(codecWriter, inputSent);
   } else if (type === MSG_SNAPSHOT) {
-    encodeSnapshot(codecWriter, snapSent);
+    encodeSnapshot(codecWriter, snapHeader, snapFrame, null, 3);
   } else {
     encodePong(codecWriter, pongSent);
   }
   const bytes = codecWriter.bytes.slice(0, codecWriter.byteLength);
-  // INPUT lastSnapshotTick and PONG serverTick at byte 3; SNAPSHOT serverTick at byte 1 or
-  // lastProcessedCmdTick at byte 9.
-  const at = type === MSG_SNAPSHOT ? ((i & 1) === 0 ? 1 : 9) : 3;
-  bytes.fill(0xff, at, at + 4);
+  if (type === MSG_SNAPSHOT && (i & 1) === 1) {
+    const c = SNAPSHOT_CORRUPTIONS[snapshotCorruption++ % SNAPSHOT_CORRUPTIONS.length] as readonly [
+      number,
+      number,
+      number,
+    ];
+    patchBits(bytes, c[0], c[1], c[2]);
+  } else {
+    // INPUT lastSnapshotTick and PONG serverTick at byte 3, SNAPSHOT serverTick at byte 1.
+    const at = type === MSG_SNAPSHOT ? 1 : 3;
+    bytes.fill(0xff, at, at + 4);
+  }
   hostile.push(bytes);
 }
 /** Hostile packets refused (all of them, when the decoders work). */
 const codecRejected = new Int32Array(1);
 
 /**
- * The per-tick messages (D-026): SNAPSHOT (a quantized state with fractional origin and velocity),
- * INPUT with 1–4 cmds, PING and PONG, each encoded, dispatched on its type byte and decoded,
- * then one hostile packet, which must be refused without allocating either. Outcomes: snapshots,
- * inputs, pings and pongs that came back equal; `codecRejected` counts the refusals.
+ * The per-tick messages (D-026, D-033): SNAPSHOT (a full v2 snapshot of a 16-player frame whose
+ * players take quantized states with fractional origin and velocity, written into the frame as the
+ * match captures them, for a rotating receiver; decoded header then body as the client's store
+ * does), INPUT with 1–4 cmds, PING and PONG, each encoded, dispatched on its type byte and
+ * decoded, then one hostile packet, which must be refused without allocating either. Outcomes:
+ * snapshots (the receiver's state back exactly), inputs, pings and pongs that came back equal;
+ * `codecRejected` counts the refusals.
  */
 function runCodec(n: number): void {
   const w = codecWriter;
@@ -556,7 +607,7 @@ function runCodec(n: number): void {
     const kind = i & 3;
     w.reset();
     if (kind === 0) {
-      const s = snapSent.state;
+      const s = snapState;
       s.origin[0] = e[0];
       s.origin[1] = e[1];
       s.origin[2] = e[2];
@@ -570,12 +621,18 @@ function runCodec(n: number): void {
       s.waterLevel = i;
       s.stamina = i & 4095;
       quantizePlayerState(s);
-      snapSent.serverTick = i;
-      snapSent.lastProcessedCmdTick = i;
-      snapSent.inputBufferHealth = (i & 15) - 8;
-      snapSent.cvarHash = i & 0xffff;
-      snapSent.flags = i & 3;
-      encodeSnapshot(w, snapSent);
+      const self = (i >> 2) & (CODEC_PLAYERS - 1);
+      const tick = i + 1;
+      // Each player's slot gets this tick's stamp; the receiver's (and one other) a new state.
+      for (let p = 0; p < CODEC_PLAYERS; p++) snapFrame.setPresent(p, tick);
+      playerStateToSlot(snapFrame, self, s);
+      playerStateToSlot(snapFrame, (self + 5) & (CODEC_PLAYERS - 1), s);
+      snapFrame.teleportSeq[self] = i & 0xff;
+      snapHeader.serverTick = tick;
+      snapHeader.inputBufferHealth = (i & 15) - 8;
+      snapHeader.cvarHash = i & 0xffff;
+      snapHeader.flags = i & 1;
+      encodeSnapshot(w, snapHeader, snapFrame, null, self);
     } else if (kind === 1) {
       inputSent.packetSeq = i & 0xffff;
       inputSent.lastSnapshotTick = i;
@@ -603,8 +660,13 @@ function runCodec(n: number): void {
     r.reset(w.bytes, w.byteLength);
     const type = peekMessageType(w.bytes, w.byteLength);
     if (type === MSG_SNAPSHOT) {
-      if (decodeSnapshot(r, snapGot) && playerStateEquals(snapGot.state, snapSent.state)) {
-        outcomes[0] = (outcomes[0] as number) + 1;
+      const self = (i >> 2) & (CODEC_PLAYERS - 1);
+      if (
+        decodeSnapshotHeader(r, snapGotHeader) &&
+        decodeSnapshotBody(r, snapGotHeader, null, self, snapGotFrame)
+      ) {
+        slotToPlayerState(snapGotFrame, self, snapGotState);
+        if (playerStateEquals(snapGotState, snapState)) outcomes[0] = (outcomes[0] as number) + 1;
       }
     } else if (type === MSG_INPUT) {
       if (decodeInput(r, inputGot) && inputGot.count === inputSent.count) {
@@ -626,7 +688,8 @@ function runCodec(n: number): void {
       hType === MSG_INPUT
         ? decodeInput(r, inputGot)
         : hType === MSG_SNAPSHOT
-          ? decodeSnapshot(r, snapGot)
+          ? decodeSnapshotHeader(r, snapGotHeader) &&
+            decodeSnapshotBody(r, snapGotHeader, null, 3, snapGotFrame)
           : decodePong(r, pongGot);
     if (!accepted) codecRejected[0] = (codecRejected[0] as number) + 1;
   }
@@ -695,17 +758,20 @@ function runTransport(n: number): void {
 }
 
 // The match tick (D-027): a real Match on movement_lab and one client over a loopback pair, past
-// HELLO and READY at setup. Each call sends an INPUT with four redundant cmds (a strafing circle
-// with jumps and attack), skips six in 64 so the starved repeat runs past the redundancy, pings
-// now and then, runs one match tick and decodes what came back. A tick is far heavier than the
-// calls above, so a run is n / 10 ticks, after a longer warm-up.
+// HELLO and READY at setup, plus a bystander that only joined (so every snapshot carries an entity
+// record and the world frame two players, D-033). Each call sends an INPUT with four redundant cmds
+// (a strafing circle with jumps and attack), skips six in 64 so the starved repeat runs past the
+// redundancy, pings now and then, runs one match tick and decodes what came back. A tick is far
+// heavier than the calls above, so a run is n / 10 ticks, after a longer warm-up.
 class MatchRig {
   readonly match: Match;
   readonly client: LoopbackEndpoint;
+  readonly bystander: LoopbackEndpoint;
   readonly writer = new BitWriter(MAX_RELIABLE_BYTES);
   readonly reader = new BitReader();
   readonly input = new InputMsg();
-  readonly snap = new SnapshotMsg();
+  readonly snapHeader = new SnapshotHeader();
+  readonly snapFrame = new WorldFrame();
   readonly pong = new PongMsg();
   readonly ping = new PingMsg();
   /** Warm-up calls left: the first runs eight times as long (see runMatch). */
@@ -718,16 +784,22 @@ class MatchRig {
     this.client = client;
     this.match.connect(server, true);
     client.onMessage((d, len) => this.receive(d, len));
+    const [bystander, bystanderServer] = createLoopbackPair();
+    this.bystander = bystander;
+    this.match.connect(bystanderServer);
+    bystander.onMessage(() => {});
     const hello = new HelloMsg();
     hello.buildHash = "alloc";
     this.writer.reset();
     encodeHello(this.writer, hello);
     client.sendReliable(this.writer.bytes, this.writer.byteLength);
+    bystander.sendReliable(this.writer.bytes, this.writer.byteLength);
     this.match.tick();
     client.poll();
     this.writer.reset();
     encodeReady(this.writer);
     client.sendReliable(this.writer.bytes, this.writer.byteLength);
+    bystander.sendReliable(this.writer.bytes, this.writer.byteLength);
     this.match.tick();
     client.poll();
   }
@@ -735,9 +807,15 @@ class MatchRig {
   private receive(d: Uint8Array, len: number): void {
     this.reader.reset(d, len);
     const type = peekMessageType(d, len);
-    if (type === MSG_SNAPSHOT && decodeSnapshot(this.reader, this.snap)) {
+    const h = this.snapHeader;
+    if (
+      type === MSG_SNAPSHOT &&
+      decodeSnapshotHeader(this.reader, h) &&
+      decodeSnapshotBody(this.reader, h, null, 0, this.snapFrame) &&
+      this.snapFrame.present[1] === 1
+    ) {
       outcomes[0] = (outcomes[0] as number) + 1;
-      if ((this.snap.flags & SNAP_FLAG_STARVED) !== 0) outcomes[1] = (outcomes[1] as number) + 1;
+      if ((h.flags & SNAP_FLAG_STARVED) !== 0) outcomes[1] = (outcomes[1] as number) + 1;
     } else if (type === MSG_PONG && decodePong(this.reader, this.pong)) {
       outcomes[2] = (outcomes[2] as number) + 1;
     }
@@ -786,12 +864,14 @@ function runMatch(n: number): void {
     }
     match.tick();
     client.poll();
+    rig.bystander.poll();
   }
 }
 
 // Prediction and reconciliation (M2 design §5, D-027/D-028): the real ClientSim on a fractional
 // fake clock, 144 Hz frames, against a real Match over a loopback pair, with the strafe-jump
-// circuit bot. The link is impaired so every client path runs:
+// circuit bot and a second player that only joined (so the snapshot store decodes an entity
+// record every snapshot, D-033). The link is impaired so every client path runs:
 // - every 256 server ticks the client's next six INPUT packets are dropped, so the server starves
 //   past the 4× redundancy and the client corrects (snapshots compared, states adopted, ticks
 //   re-simulated, corrections logged and moved into the render offset);
@@ -875,6 +955,8 @@ class PredictRig {
   readonly match: Match;
   readonly client: ClientSim;
   readonly transport: ImpairedTransport;
+  /** A second player that only joined, so the client's snapshots carry an entity record. */
+  readonly bystander: LoopbackEndpoint;
   /** [0] fake now (ms), [1] server tick accumulator (ms). */
   readonly time = new Float64Array(2);
   readonly out = vec3();
@@ -893,6 +975,18 @@ class PredictRig {
     const [clientEnd, serverEnd] = createLoopbackPair();
     this.match.connect(serverEnd, true);
     this.transport = new ImpairedTransport(clientEnd);
+    const [bystander, bystanderServer] = createLoopbackPair();
+    this.bystander = bystander;
+    this.match.connect(bystanderServer);
+    bystander.onMessage(() => {});
+    const w = new BitWriter(MAX_RELIABLE_BYTES);
+    const hello = new HelloMsg();
+    hello.buildHash = "alloc";
+    encodeHello(w, hello);
+    bystander.sendReliable(w.bytes, w.byteLength);
+    w.reset();
+    encodeReady(w);
+    bystander.sendReliable(w.bytes, w.byteLength);
     const time = this.time;
     this.client = new ClientSim({
       transport: this.transport,
@@ -927,6 +1021,7 @@ function runPredict(n: number): void {
       time[1] = (time[1] as number) - SERVER_TICK_MS;
       link.release(match.serverTick + 1);
       match.tick();
+      rig.bystander.poll();
       const t = match.serverTick;
       link.tick = t;
       if ((t & 255) === 0) link.dropLeft = 6;

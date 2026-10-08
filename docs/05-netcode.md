@@ -42,20 +42,21 @@
 ## 2. Topology and sessions
 
 - **Dedicated server:** Node process (`packages/server`) running 1..N matches; one match = one tick loop.
-- **M3 Node server** (`packages/server/src/node`, `src/transport`; D-029, D-030): one process, one port (`sv_port`, default 28700) and, until several matches per process arrive (D-047), one match named `main` on `sv_map`. Settings come from `server.cfg`, then the command line (`docs/06` §8). Clients connect with a WebSocket to `ws://<host>:<port>/`; any other path, or a query string, gets HTTP 404 before a socket opens. The same port answers `GET /status` (`{buildHash, protocol, matches:[{name, map, players, maxClients}]}`) and `GET /metrics` (JSON). Shutdown (SIGINT/SIGTERM) KICKs every client "server shutting down", closes its socket with 1001 and exits 0. The match code is the Worker's, unchanged (D-027).
+- **M3 Node server** (`packages/server/src/node`, `src/transport`; D-029, D-030): one process, one port (`sv_port`, default 28700) and, until several matches per process arrive (D-047), one match named `main` on `sv_map`. Settings come from `server.cfg`, then the command line (`docs/06` §8). Clients connect with a WebSocket to `ws://<host>:<port>/`; any other path, or a query string, gets HTTP 404 before a socket opens. The same port answers `GET /status` (`{buildHash, protocol, matches:[{name, map, players, maxClients}]}`, `maxClients` the players the match admits, below) and `GET /metrics` (JSON). Shutdown (SIGINT/SIGTERM) KICKs every client "server shutting down", closes its socket with 1001 and exits 0. The match code is the Worker's, unchanged (D-027).
 - **Connecting a browser** (D-031): the page plays on the local Worker server by default; `?connect=ws://host[:port]` (the port defaults to the server's 28700; or the console's `connect <address>`, which reloads the page with it) opens a WebSocket to a dedicated server instead, and `?net_profile=<name>` starts the client's net simulator at that profile. Every compiled map ships with the client as a file (`client/src/app/maps.ts`); on a dedicated server the client loads the one WELCOME names, checks its content hash against WELCOME's, and only then sends READY. A refused or failed connection, a map this build doesn't have or one with another hash ends the session with a reason the page shows (`disconnected: could not connect to the server`, `… the server runs version …`).
 - **Local/offline:** the *same* server code runs in a **Web Worker** in the browser. The transport is `PortTransport` (postMessage with transferable ArrayBuffers, §3.1), and the net simulator can inject latency and loss even locally.
 - **Connection lifecycle:**
   1. `HELLO`: protocol version, build hash, client nonce.
-  2. `WELCOME`: client id, tick rate, current server tick, map id + content hash, replicated cvar block, match rules (match rules join WELCOME in a later protocol version; v1 has none, §3.6).
+  2. `WELCOME`: client id, tick rate, current server tick, map id + content hash, replicated cvar block, match rules (match rules join WELCOME in a later protocol version; v2 has none, §3.6).
   3. Clock sync: 5 × `PING`/`PONG`, median RTT.
   4. The client loads the map (if it has not yet: on a dedicated server, the one WELCOME names, D-031), then sends `READY` once the clock sync is done too.
   5. The client starts as a spectator; it joins a team and picks a loadout through reliable messages.
+- **Players per match** (D-034, design: "Cap 64, default 32"): a match has 64 slots (`MATCH_MAX_CLIENTS`; client id = slot = entity id, 0–63) and admits `sv_maxClients` players (default 32, 1–64), clamped to 37 until the byte-budget scheduler (D-046) so every snapshot fits 1100 B by construction (§4.2). A connection takes the lowest free id below that cap at once (before HELLO); with none free it is KICKed "server full". The Worker's match keeps the default.
 - **M2 handshake on the server** (`packages/server/src/match/match.ts`, D-027):
   - `HELLO`: the version is read first from HELLO's frozen first 3 B (§3.2). Another protocol version gets a `KICK` that says why, and the connection closes. So does a build hash other than the server's while `sv_strictBuild` is 1 (the Worker, the Node bundle; the KICK names both builds); at 0 (the Node server run from source, D-031) that client gets its `WELCOME` and a `PRINT` warning naming both builds. A HELLO that doesn't decode gets a strike and a `KICK`.
   - `WELCOME` carries the newest tick simulated as `serverTick`; `PONG` does too. Clock-sync `PING`s are answered from WELCOME on, and so are console `CMD`s.
   - `READY` spawns the player at once (M2 has no spectator step) at the map's first `info_player_start`: at rest, facing its yaw (`degreesToU16`), pitch 0, full stamina, grounded when the ground trace finds walkable ground. The origin is the entity's raised by `TRACE_EPSILON` to the D-017 rest height, floor + 1/32 u, so a fresh spawn behaves like a player that has landed: with its feet exactly on the floor it would meet a steep wedge's toe as a wall (D-023, "Steep toes").
-  - The spawn state is the player's state at the tick that handled READY; that tick's snapshot carries the teleport flag, and simulation starts on the next tick. Until the client's first cmd arrives, the server repeats a neutral cmd (no move, the spawn yaw), which is what the client predicts with (D-028).
+  - The spawn state is the player's state at the tick that handled READY; the spawn steps the slot's 8-bit teleport counter (`teleportSeq`, kept per slot across the players who take it; the snapshot header carries the receiver's and every entity record its player's, D-035), and simulation starts on the next tick. Until the client's first cmd arrives, the server repeats a neutral cmd (no move, the spawn yaw), which is what the client predicts with (D-028).
   - The Worker's one client is admin: it may change replicated cvars through `CMD` (§3.5).
 - **Timeouts:** no packet for 5 s → disconnect (M3, with the Node transports; M2's match closes a session only on a kick or a transport close, D-027). Reconnect within 60 s restores the slot (later).
 
@@ -124,12 +125,12 @@ Every transport can be wrapped by `NetSimTransport` (`shared/src/net/netsim.ts`:
 | C→S | `LOADOUT`, `TEAM`, `CHAT` | reliable | gear, team, chat | later |
 | S→C | `WELCOME`, `CVARS` | reliable | session setup, replicated cvars | v1 (M2) |
 | S→C | `MAP` | reliable | map change | later |
-| S→C | `SNAPSHOT` | unreliable | world state for a tick | v1 (M2) |
+| S→C | `SNAPSHOT` | unreliable | world state for a tick: the local player and, since v2, every other player (D-033) | v1 (M2) |
 | S→C | `PONG` | unreliable | clock/RTT reply | v1 (M2) |
 | S→C | `PRINT`, `KICK` | reliable | console output; disconnect with a reason | v1 (M2) |
 | S→C | `EVENTS` | reliable | kill feed, hit confirms, damage taken, round state, chat | later |
 
-The exact v1 layouts are in §3.6.
+The exact layouts are in §3.6.
 
 ### 3.4 UserCmd and the INPUT message
 Each UserCmd (~12 bytes):
@@ -168,17 +169,17 @@ The `INPUT` packet carries:
 - **On the server** the match checks the registry's `version` at the start of every tick, after polling. When it moved, the pmove parameters are refreshed; when the replicated block's hash also changed, every client past WELCOME gets `CVARS` with `effectiveTick` = that tick, whose snapshot already carries the new hash. A change to a non-replicated cvar, or a set to the current value, sends nothing.
 - **Changing a replicated cvar from a client:** a console `set`, `reset` or `toggle` on a `REPLICATED` cvar is not applied locally; the client sends it as `CMD`, the server applies it to its own registry (with its CHEAT and LATCH rules) and replies with `PRINT`, and the `CVARS` broadcast updates every mirror. Changing cvars needs the session's admin flag: the Worker's one client has it; who may on the Node server is decided in M3. A non-admin gets a `PRINT` error and nothing changes. `CMD cvars` is open to everyone and resends the current block with the tick it took effect (the client's recovery when its snapshot hash stays different).
 
-### 3.6 Protocol v1 layout (`PROTOCOL_VERSION` = 1, D-026)
+### 3.6 Protocol v2 layout (`PROTOCOL_VERSION` = 2, D-026, D-033)
 
-Every message starts with the `u8` type: 1 `HELLO`, 2 `WELCOME`, 3 `READY`, 4 `INPUT`, 5 `SNAPSHOT`, 6 `PING`, 7 `PONG`, 8 `CVARS`, 9 `CMD`, 10 `PRINT`, 11 `KICK` (0 is never a message). Fields follow in this order, LSB-first, and the last byte is zero-padded. Ticks are written in 32 bits but must be ≤ `TICK_MAX` (2^30 − 1). "short ASCII" is a u6 length + 7 bits per printable char (0x20–0x7e, at most 63); "text" is a u10 length + 8 bits per Latin-1 char (printable, plus tab and newline; at most 1023).
+Every message starts with the `u8` type: 1 `HELLO`, 2 `WELCOME`, 3 `READY`, 4 `INPUT`, 5 `SNAPSHOT`, 6 `PING`, 7 `PONG`, 8 `CVARS`, 9 `CMD`, 10 `PRINT`, 11 `KICK` (0 is never a message). Fields follow in this order, LSB-first, and the last byte is zero-padded. Ticks are written in 32 bits but must be ≤ `TICK_MAX` (2^30 − 1). "short ASCII" is a u6 length + 7 bits per printable char (0x20–0x7e, at most 63); "text" is a u10 length + 8 bits per Latin-1 char (printable, plus tab and newline; at most 1023). v2 changed only `SNAPSHOT` (D-033): v1's carried the local player alone (335 bits, 42 B), with `baselineTick`, `lastProcessedCmdTick` and a teleport flag; every other layout is v1's.
 
 | Msg | Channel | Fields after the type byte (bits) | Size |
 |---|---|---|---|
 | `HELLO` C→S | reliable | protocolVersion 16 (with the type byte, frozen for every version, §3.2), buildHash (short ASCII), nonce 32 | ≤ 63 B |
-| `WELCOME` S→C | reliable | protocolVersion 16, clientId 8, tickRate 8 (1–255), serverTick 32, mapName (short ASCII), mapHash lo 32 + hi 32 (the cmap `contentHash`), cvar block (§3.5) | ≈ 0.5 KB with the M2 cvars |
+| `WELCOME` S→C | reliable | protocolVersion 16, clientId 8 (the slot, below 64 since v2: the client refuses more, D-034), tickRate 8 (1–255), serverTick 32, mapName (short ASCII), mapHash lo 32 + hi 32 (the cmap `contentHash`), cvar block (§3.5) | ≈ 0.5 KB with the M2 cvars |
 | `READY` C→S | reliable | none | 1 B |
 | `INPUT` C→S | unreliable | packetSeq 16, lastSnapshotTick 32, count 3 (1–4), newestTick 32; per cmd, newest first: tickBack 8 (not for the first cmd), buttons 16, forward 8, right 8, up 8 (i8 each, ±127), yaw 16, pitch 16 (±16201), weaponSlot 8 (0–7) | 55 B for 4 cmds |
-| `SNAPSHOT` S→C | unreliable | serverTick 32, baselineTick 32 (0 = full; must be 0 in M2), lastProcessedCmdTick 32, inputBufferHealth i8, cvarHash 16, flags 8 (bit 0 starved, bit 1 teleport; the rest must be 0), then the player state below | 335 bits, 42 B |
+| `SNAPSHOT` S→C | unreliable | the snapshot header below, the player state below (the local block; not when spectator), entityCount 7 (0–63; 0–64 when spectator), then an entity record per other present player, below | 292 bits + 213 per other player: 37 B alone, 862 B at 32 players; ≤ 1100 B |
 | `PING` C→S | unreliable | pingId 16 | 3 B |
 | `PONG` S→C | unreliable | pingId 16, serverTick 32 | 7 B |
 | `CVARS` S→C | reliable | effectiveTick 32, blockHash 32, cvar block (§3.5) | ≈ 0.5 KB |
@@ -199,6 +200,39 @@ Every message starts with the `u8` type: 1 `HELLO`, 2 `WELCOME`, 3 `READY`, 4 `I
 | waterLevel | 2 | 0–3 |
 | stamina | 16 | hundredths |
 
+**Snapshot header** (`shared/src/net/snapshot.ts`, 86 bits with the type byte, 70 when spectator):
+
+| Field | Bits | Encoding and decode check |
+|---|---|---|
+| type | 8 | 5 |
+| serverTick | 32 | 1 … `TICK_MAX` |
+| baseBack | 6 | serverTick − the baseline's tick; 0 = full. A delta (1–63) is refused until D-038 |
+| flags | 8 | bit 0 starved; bit 2 spectator (every player, no local block: demo files only, D-044; a live connection drops and strikes it); bit 3 deferred list, refused until D-046; bit 1 (v1's teleport flag) and bits 4–7 must be 0; spectator with starved is refused |
+| cvarHash | 16 | low 16 bits of the replicated cvar hash (§3.5) |
+| inputBufferHealth | 8 | i8 (§8.2); not when spectator |
+| teleportSeq | 8 | the receiver's teleport counter (D-035); not when spectator |
+
+**Entity record** (a player other than the receiver; entity id = client id), the full ("new") form, 213 bits:
+
+| Field | Bits | Encoding and decode check |
+|---|---|---|
+| id | 16 | < 64 (`MATCH_MAX_CLIENTS`); ids strictly ascending; never the receiver's own, unless spectator |
+| removed | 1 | 0: a removal needs a baseline (refused until D-038) |
+| new | 1 | 1: a full body follows (the delta body is refused until D-038) |
+| origin x, y, z | 3 × 21 | signed, 1/32 u; within ±524288 (±16384 u) |
+| velocity x, y, z | 3 × 16 | signed, 1 u/s (the 1/16 u/s velocity rounded half up, clamped); within ±32767 (−32768 is refused) |
+| yaw | 16 | u16 angle units |
+| pitch | 16 | u16 angle units; within ±16201 |
+| flags | 10 | `PMF_*` bits within `ENTITY_FLAG_MASK` (all but bits 5 and 6, which only the owner's prediction reads: refused) |
+| team | 2 | 0 none, 1, 2 (D-034); 3 is refused |
+| teleportSeq | 8 | the player's teleport counter (D-035) |
+| eventSeq | 8 | movement events so far (wrapping) |
+| events | 2 × 12 | kind 4 (0 none, 1 step, 2 jump, 3 land; 4–15 refused) + value 8 (0 when empty and for a jump; an empty first slot needs an empty second) |
+
+- **Size:** a live snapshot is at most `MAX_SNAPSHOT_BYTES` (1100 B, §4.3); the encoder refuses more and so does the decoder. Full snapshots of a 37-player match (the cap until D-046, D-034) take 995 B; at most 39 other players fit. A spectator snapshot (demo files only) is at most 2048 B: all 64 players take 1714 B.
+- **Canonical:** a packet the decoder accepts re-encodes to the same bytes, and decodes to the frame it was encoded from, as its receiver holds it: its own slot from the local block (with the header's teleportSeq), each record's slot with the snapshot's tick as its stamp, every other slot absent (M3 design §2.2).
+- **Forms that join within v2** (nothing is released between): the delta local block and delta entity records against a baseline (`baseBack` > 0), and removals, with D-038; the deferred-id list (`flags` bit 3) and pending slots with D-046. Until then the decoder refuses them.
+
 INPUT, SNAPSHOT, PING and PONG encode and decode without allocating, refused packets included: decoders read a tick as two u16 halves and reject it past `TICK_MAX` before it becomes a number V8 would box. The text and cvar-block fields of the reliable messages allocate (rare). A decoder that accepts a packet re-encodes it to the same bytes (NET-01).
 
 ## 4. State encoding and quantization
@@ -217,19 +251,21 @@ Because both client and server quantize identically, a correctly predicted state
 The origin is not simply rounded: pmove snaps it to the nearest clear 1/32 u grid point (`snapOrigin`, D-017), because plain rounding drifts a player sliding along a slope or angled wall into solid. The snap is deterministic and tests world brushes only, so it predicts like everything else. The codec still sends the plain 1/32 u value.
 
 ### 4.2 Snapshot layout
-- **Header:**
-  - `serverTick` (u32), `baselineTick` (u32; 0 = full)
-  - `lastProcessedCmdTick` (u32, for this client)
-  - `inputBufferHealth` (i8, §8.2)
+- **Header** (protocol v2, D-033; widths in §3.6):
+  - `serverTick` (u32), `baseBack` (u6: serverTick − the baseline's tick; 0 = full)
+  - `flags` (u8: starved, spectator; a deferred list with D-046)
   - `cvarHash` (u16)
-  - `flags` (u8: starved, teleport)
-- **M2 (v1) sends only this header and the local player's full movement state** (the §3.6 layout). The local player block below, the combat state, the entity list and delta coding join with M3 and later, with a protocol version bump.
+  - `inputBufferHealth` (i8, §8.2) and `teleportSeq` (u8: the receiver's teleport counter, D-035)
+  - v1 also carried `lastProcessedCmdTick`. v2 drops it: a cmd's tick is the server tick it is simulated on (D-027), so it always equalled `serverTick`, and no client read it. It returns if cmd ticks ever decouple from server ticks.
+- **M2 (v1) sent only the header and the local player's full movement state.** Since M3 (v2) a snapshot also lists every other player. Every snapshot is full until delta coding (D-038, M3); the combat state joins in a later milestone, with a protocol version bump.
 - **Local player block:** the full authoritative `PlayerState` (`docs/03` §6) plus the combat state (ammo, weapon state, zoom, bleeding, wounds), delta-coded against the baseline.
-- **Entities:** count, then per entity:
-  - `id` (u16), `removed` bit
-  - field bitmask
+- **Entities:** count (u7), then per entity, ids strictly ascending:
+  - `id` (u16; a player's entity id is its client id, < 64, D-034; the receiver itself is never listed), `removed` bit, `new` bit (a full body follows)
+  - field bitmask (delta records, D-038)
   - changed fields only (delta vs. the client's acked baseline; full state if the entity is new to that client)
-- **Entity kinds:** players (`origin`, `vel`, `yaw`/`pitch`, `stance` flags, `weapon`, `animation` params, team, `eventSeq` + last 2 events), projectiles, dropped items, flags/objectives.
+- **Entity kinds:** players (`origin`, `vel`, `yaw`/`pitch`, `stance` flags, `weapon`, `animation` params, team, `eventSeq` + last 2 events), projectiles, dropped items, flags/objectives. M3's player records carry origin (1/32 u), velocity (1 u/s, enough for ≤ 2 ticks of extrapolation, INFERRED), yaw, pitch, the movement flags but the two only the owner's prediction reads, team, the teleport counter and `eventSeq` + the last 2 movement events (§3.6).
+- **Players per match** (D-034, design: "Cap 64, default 32"): 64 slots (`MATCH_MAX_CLIENTS`, client ids 0–63); a match admits `sv_maxClients` (default 32, `docs/06` §8), clamped to 37 until the byte-budget scheduler (D-046, §4.3), so every snapshot fits 1100 B by construction (a full one of 37 players is 995 B).
+- **Frames:** server and client hold snapshot state as a `WorldFrame` (`shared/src/net/worldFrame.ts`): every slot as typed arrays in wire units, with per-slot presence and the server tick its state belongs to. The server encodes each client's snapshot from the frame it captures at the end of the tick; the client decodes into a ring of the last 64 frames by tick (`client/src/net/snapshotStore.ts`) and predicts from its own slot of the newest, bit for bit.
 
 ### 4.3 Delta compression
 - The server keeps the last 64 snapshots per client. The baseline is the newest snapshot the client acked (`lastSnapshotTick`).
@@ -266,7 +302,7 @@ The client predicts with, stores and sends the sanitized cmd. The server sanitiz
 - **Compare** with `playerStateEquals` (exact, on quantized states). A snapshot older than the newest one held is stale and ignored.
 - **Correction:** adopt `S_A`, re-simulate `A+1 … latest` from the stored cmds with the parameters in force at each tick, count it, add the distance the newest predicted origin moved, and keep the predicted and server states in a log ring of 32 (the field diff is built only when the log is read, so a correction allocates nothing). The client console's `net_corrections` prints it (`docs/06` §6).
 - **Hard resync:** when `A` is no longer in the rings (more than 127 ticks behind the newest prediction) or is ahead of it, the state is adopted as the newest tick and the clock re-anchors (§8.3), filling the gap with the last cmd, attack cleared. A backlog after a stall is one event: the client re-anchors once per poll, after it, from the newest snapshot, and a clock step asked for earlier in that poll is dropped.
-- **Render offset:** around each poll the drawn position (§1.3) is taken before and after; any change of the predicted path (a correction, a parameter resync, a re-anchor, a clock step) adds old − new to the offset, which decays linearly to 0 over `cl_correctionSmoothMs` (100); a new offset adds to what remains and restarts the decay. A teleport flag on the snapshot, or a jump longer than `cl_teleportDist` (64 u), drops the offset instead. The client cvars are listed in `docs/06` §7.
+- **Render offset:** around each poll the drawn position (§1.3) is taken before and after; any change of the predicted path (a correction, a parameter resync, a re-anchor, a clock step) adds old − new to the offset, which decays linearly to 0 over `cl_correctionSmoothMs` (100); a new offset adds to what remains and restarts the decay. A change of the snapshot's teleport counter (D-035: compared with the newest snapshot's, so a lost snapshot can't hide a spawn), or a jump longer than `cl_teleportDist` (64 u), drops the offset instead. The client cvars are listed in `docs/06` §7.
 - **Starvation without dilation:** each INPUT carries the last 4 cmds; the server's repeat of a missing cmd keeps jump as it was, so a lost cmd costs at most a small correction. NET-04 (M2 basic) measures it on every profile.
 
 ## 6. Remote entity interpolation
@@ -316,7 +352,8 @@ The loop is driven by a monotonic clock with an accumulator. **Never `setInterva
 - `startMatchLoop(match, host)` re-arms with `schedule` after every wake. A wake runs the ticks due since the loop started (tick k is due at start + k × 1000 / 60 ms; minus the ticks already run or dropped), so wake jitter never adds up; at most 5 per wake, and if more were due it drops them with one warning, leaving less than a tick owed. The due count and the re-arm delay use the same expression, so a wake exactly on time always runs its tick. An early wake runs nothing and re-arms for the next due tick.
 - Step 1's queue (`InputQueue`) has 64 slots indexed `tick & 63`, each remembering its tick. It drops and counts duplicates (4× redundancy makes most cmds arrive several times; a copy arriving after its tick was simulated is still a duplicate), late cmds (for a tick already simulated with a repeat), and cmds 64 or more ticks past the next tick to simulate.
 - Step 2's repeat copies the client's last simulated cmd with attack cleared and its tick set to the current one, flags the snapshot as starved and counts it. Jump stays as it was, so a repeat never makes a phantom jump.
-- Every cmd simulated goes through `sanitizeUserCmd`. The snapshot carries `lastProcessedCmdTick` = the tick simulated and `inputBufferHealth` = newest cmd tick received − that tick, clamped to i8 (§8.2).
+- Every cmd simulated goes through `sanitizeUserCmd`. The snapshot of the tick carries `inputBufferHealth` = newest cmd tick received − that tick, clamped to i8 (§8.2). (v1's `lastProcessedCmdTick` always equalled the tick and was dropped in v2, D-033.)
+- After simulating, the match captures its world frame (every active player's state, connect serial and teleport counter) and encodes each active client's full snapshot from it (D-033, D-034).
 - A tick allocates nothing in steady state (the native-ESM `match` workload, `docs/10` §4).
 
 ### 8.2 Input buffer and time dilation (keeps inputs arriving "just in time")
