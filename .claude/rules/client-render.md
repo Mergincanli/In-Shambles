@@ -11,7 +11,7 @@ paths:
 - **Read-only consumer.** Rendering, HUD and audio read *interpolated* state and events. They never mutate simulation state or call sim functions with side effects.
 - **One coordinate conversion.** Z-up inches → Three.js Y-up meters only via `render/space.ts`. No ad-hoc axis swaps elsewhere.
 - **Per-frame discipline.**
-  - No allocations in the frame loop. Reuse `Vector3`/`Matrix4`/`Quaternion` scratch objects.
+  - No allocations in the frame loop. Reuse `Vector3`/`Matrix4`/`Quaternion` scratch objects. `pnpm test:long` checks it (`packages/client/long/view-frame-allocation.long.ts`); run it after touching the frame loop.
   - Pool FX, decals and audio voices.
   - Dispose geometries, materials and textures when unloading maps.
 - **Mouse look is immediate.** Apply mouse deltas to the camera every frame. UserCmds sample angles per tick. Never smooth or accelerate raw input unless the player enables it.

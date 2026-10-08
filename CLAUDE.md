@@ -32,7 +32,7 @@ We copy exactly **two things** from Urban Terror 4.x (UrT):
    - If code and docs disagree, stop and ask.
    - When a decision changes, update the doc in the same change and add an entry to `docs/11-decision-log.md`.
 7. **Numbers are labeled** FACT (sourced), INFERRED or ESTIMATE. Never upgrade an ESTIMATE to FACT. ESTIMATEs are tuned through cvars, not hard-coded.
-8. **Tests prove it.** Add or adjust tests with every change. Run `pnpm typecheck && pnpm lint && pnpm test` before saying "done".
+8. **Tests prove it.** Add or adjust tests with every change. Run `pnpm typecheck && pnpm lint && pnpm test` before saying "done", plus `pnpm test:long` when the change touches a hot path (sim, codecs, server tick, prediction, rendering).
 9. **Small steps.** Plan first and get approval for anything bigger than a small fix. Do one milestone at a time; never start the next one unasked.
 10. **Performance budgets are requirements** (`docs/10-testing-and-performance.md`). No per-frame or per-tick allocations in hot paths.
 
@@ -130,7 +130,7 @@ Until their milestone, these are stubs that print "added in M#": `bots` (M3); `m
 - Behavior matches the relevant spec section. Deviations are documented in the decision log.
 - Tests added or updated; `pnpm typecheck && pnpm lint && pnpm test` passes.
 - Networked behavior verified under at least the `wan-100-loss1` profile for gameplay changes.
-- No new per-tick/per-frame allocations in hot paths. Budgets in `docs/10` still met.
+- No new per-tick/per-frame allocations in hot paths (`pnpm test:long` passes). Budgets in `docs/10` still met.
 - Docs updated: roadmap status, decision log if anything changed, handoff at session end.
 
 ## Never
