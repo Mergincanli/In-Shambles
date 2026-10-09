@@ -1,4 +1,5 @@
-import { PlayerState, TEAM_NONE, type Transport, UserCmd } from "@game/shared";
+import { PlayerState, SNAPSHOT_HISTORY, TEAM_NONE, type Transport, UserCmd } from "@game/shared";
+import type { SentState } from "./history";
 import { InputQueue } from "./inputQueue";
 
 /** Waiting for HELLO. */
@@ -19,13 +20,16 @@ export class SessionStats {
   /** Packets dropped as malformed, unexpected for the state, or on the wrong channel. */
   strikes = 0;
   snapshots = 0;
+  /** Snapshots sent without a baseline (the first, and whenever no usable ack was held; D-038). */
+  fullSnapshots = 0;
 }
 
 /**
  * One connected client (M2 design §1): its transport, handshake state, player, input queue,
- * counters and admin flag. Fixed shape; everything per-tick is preallocated here.
+ * counters and admin flag, and what it was sent and acked (`SentState`, D-038). Fixed shape;
+ * everything per-tick is preallocated here.
  */
-export class Session {
+export class Session implements SentState {
   state = SESSION_CONNECTING;
   readonly player = new PlayerState();
   readonly queue = new InputQueue();
@@ -40,6 +44,12 @@ export class Session {
   serial = 0;
   /** TEAM_*: TEAM_NONE until READY assigns one (D-034; cosmetic until M7). */
   team = TEAM_NONE;
+  /** The ticks of the last 64 snapshots sent, by `tick & 63` (0: none, or its encode failed). */
+  readonly sentTicks = new Int32Array(SNAPSHOT_HISTORY);
+  /** The newest snapshot tick sent, 0 before the first. */
+  newestSent = 0;
+  /** The newest valid tick the client acked: the next snapshot's baseline, 0 for a full one. */
+  ackTick = 0;
   /** The client's nonce from HELLO. */
   nonce = 0;
   buildHash = "";

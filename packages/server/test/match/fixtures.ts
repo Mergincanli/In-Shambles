@@ -73,6 +73,10 @@ export class TestSnapshot {
   get teleportSeq(): number {
     return this.header.teleportSeq;
   }
+  /** 0 for a full snapshot, else serverTick − the baseline's tick (D-038). */
+  get baseBack(): number {
+    return this.header.baseBack;
+  }
   /** The ids of the other players the snapshot lists, ascending. */
   get entities(): number[] {
     const ids: number[] = [];
@@ -99,6 +103,8 @@ export class TestClient {
   readonly kicks: KickMsg[] = [];
   /** Packets that did not decode (the match must never send one). */
   bad = 0;
+  /** Deltas whose baseline this client never decoded (the match must never send one). */
+  noBaseline = 0;
   closed: string | null = null;
   private readonly w = new BitWriter(MAX_RELIABLE_BYTES);
   private readonly r = new BitReader();
@@ -180,10 +186,21 @@ export class TestClient {
       ok = decodeWelcome(r, m);
       if (ok) this.welcomes.push(m);
     } else if (type === MSG_SNAPSHOT) {
-      // Decoded as the client WELCOME named (none yet: refused as bad).
+      // Decoded as the client WELCOME named (none yet: refused as bad); a delta against the
+      // frame this client decoded for its baseline tick (D-038).
       const id = this.welcomes.at(-1)?.clientId ?? -1;
       const m = new TestSnapshot(id);
-      ok = decodeSnapshotHeader(r, m.header) && decodeSnapshotBody(r, m.header, null, id, m.frame);
+      ok = decodeSnapshotHeader(r, m.header);
+      let base: WorldFrame | null = null;
+      if (ok && m.header.baseBack !== 0) {
+        const tick = m.header.serverTick - m.header.baseBack;
+        base = this.snapshots.findLast((x) => x.serverTick === tick)?.frame ?? null;
+        if (base === null) {
+          this.noBaseline++;
+          return;
+        }
+      }
+      ok = ok && decodeSnapshotBody(r, m.header, base, id, m.frame);
       if (ok) {
         slotToPlayerState(m.frame, id, m.state);
         this.snapshots.push(m);

@@ -89,7 +89,7 @@ export interface BotNumbers {
   readonly kbDownPeak: number;
   readonly kbUpPerS: number;
   readonly snapshotBytes: { readonly p50: number; readonly p95: number; readonly max: number };
-  /** Share of the snapshots that were deltas (0 until D-038). */
+  /** Share of the snapshots that were deltas (D-038). */
   readonly deltaShare: number;
   /** The remote interpolation delay over the 1 s samples, ticks (D-037). */
   readonly interpDelay: { readonly mean: number; readonly max: number };

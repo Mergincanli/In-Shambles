@@ -14,6 +14,7 @@ import {
   ENTITY_WORLD,
   entityEventValue,
   entityVelocity,
+  type FrameRing,
   frameDigest,
   type MessageHandler,
   MSG_CMD,
@@ -56,6 +57,25 @@ import {
   WorldFrame,
 } from "@game/shared";
 import { describe, expect, it } from "vitest";
+import {
+  type DeltaServer,
+  runDeltaSequence,
+  ServerSide,
+  StoreModel,
+} from "../../../shared/test/helpers/deltaSequence";
+import {
+  ACK_AHEAD,
+  ACK_AHEAD_STRIKES,
+  ACK_FULL,
+  ACK_IGNORED,
+  ACK_TAKEN,
+  acceptAck,
+  baselineTick,
+  markSent,
+  markUnsent,
+  type SentState,
+  WorldHistory,
+} from "../../src/match/history";
 import {
   effectiveMaxClients,
   MATCH_DEFAULT_MAX_CLIENTS,
@@ -684,6 +704,119 @@ describe("match snapshots (protocol v2, D-033–D-035)", () => {
   });
 });
 
+describe("match delta snapshots (D-038)", () => {
+  /** Ticks `n` times; each tick `a` and `b` send a cmd for it, `a` acking `ack()`. */
+  function play(match: Match, a: TestClient, b: TestClient, n: number, ack: () => number): void {
+    for (let i = 0; i < n; i++) {
+      const t = match.serverTick + 1;
+      a.input([cmdAt(t, 127, i % 40 === 0 ? BUTTON_JUMP : 0, (i * 900) & 0xffff)], ack());
+      b.input([cmdAt(t, -127, 0, 30000)]);
+      run(match, null, 1);
+      a.poll();
+      b.poll();
+    }
+  }
+
+  it("sends full snapshots until an ack arrives, then deltas against it: baseBack = T − ackTick", () => {
+    const match = newMatch();
+    const a = joined(match);
+    const b = joined(match);
+    // a acks the snapshot 4 ticks back (an RTT), b never acks.
+    const spawned = a.snapshots[0]?.serverTick ?? 0;
+    const playFrom = match.serverTick + 1;
+    play(match, a, b, 120, () => Math.max(0, match.serverTick - 3));
+    const session = match.session(0);
+    for (const snap of a.snapshots) {
+      const t = snap.serverTick;
+      // Full until the INPUT read during tick t acks a tick a was sent (t − 4 ≥ its spawn tick).
+      expect(snap.baseBack, `tick ${t}`).toBe(t >= playFrom && t - 4 >= spawned ? 4 : 0);
+    }
+    expect(a.snapshots.filter((x) => x.baseBack > 0).length).toBeGreaterThan(100);
+    expect(b.snapshots.every((x) => x.baseBack === 0)).toBe(true);
+    expect(session?.ackTick).toBe(match.serverTick - 4);
+    // Every delta decoded against a's own frame of its baseline to the frame the server encoded.
+    expect(frameDigest(a.lastSnapshot().frame, 0)).toBe(frameDigest(match.worldFrame, 0));
+    expect(playerStateEquals(a.lastSnapshot().state, session?.player ?? new PlayerState())).toBe(
+      true,
+    );
+    expect([a.bad, a.noBaseline, b.bad, match.metrics.strikes]).toEqual([0, 0, 0, 0]);
+    expect(session?.stats.fullSnapshots).toBe(a.snapshots.filter((x) => x.baseBack === 0).length);
+    expect(match.metrics.fullSnapshots).toBe(
+      (session?.stats.fullSnapshots ?? 0) + (match.session(1)?.stats.fullSnapshots ?? 0),
+    );
+  });
+
+  it("keeps the newest valid ack: a reordered older ack never lowers it, ack 0 asks for a full one", () => {
+    const match = newMatch();
+    const a = joined(match);
+    const b = joined(match);
+    play(match, a, b, 20, () => match.serverTick);
+    const t = match.serverTick;
+    expect(match.session(0)?.ackTick).toBe(t - 1);
+    play(match, a, b, 1, () => t - 10);
+    expect(match.session(0)?.ackTick).toBe(t - 1);
+    expect(a.lastSnapshot().baseBack).toBe(2);
+    play(match, a, b, 1, () => 0);
+    expect(match.session(0)?.ackTick).toBe(0);
+    expect(a.lastSnapshot().baseBack).toBe(0);
+    play(match, a, b, 1, () => match.serverTick);
+    expect(a.lastSnapshot().baseBack).toBe(1);
+    expect(match.metrics.strikes).toBe(0);
+  });
+
+  it("strikes an ack past the newest snapshot sent (+2) and ignores it", () => {
+    const match = newMatch();
+    const a = joined(match);
+    const b = joined(match);
+    play(match, a, b, 10, () => match.serverTick);
+    const ack = match.session(0)?.ackTick;
+    play(match, a, b, 1, () => match.serverTick + 1);
+    expect(match.session(0)?.stats.strikes).toBe(2);
+    expect(match.session(0)?.ackTick).toBe(ack);
+    expect(a.lastSnapshot().baseBack).toBe(2);
+    expect(match.metrics.strikes).toBe(2);
+  });
+
+  it("goes back to full snapshots once the acked tick is more than 63 ticks old", () => {
+    const match = newMatch();
+    const a = joined(match);
+    const b = joined(match);
+    play(match, a, b, 10, () => match.serverTick);
+    const ack = match.session(0)?.ackTick ?? 0;
+    // The acks are lost from here: the baseline ages, and 64 ticks after it the snapshot is full.
+    play(match, a, b, 70, () => ack);
+    const aged = a.snapshots.filter((x) => x.serverTick > ack + 1);
+    expect(aged).toHaveLength(70);
+    for (const x of aged) {
+      expect(x.baseBack, `tick ${x.serverTick}`).toBe(
+        x.serverTick - ack <= 63 ? x.serverTick - ack : 0,
+      );
+    }
+    expect(match.session(0)?.stats.strikes).toBe(0);
+  });
+
+  it("codes a player who left as removed and a new player in the slot as new, in deltas", () => {
+    const match = newMatch();
+    const a = joined(match);
+    let b = joined(match);
+    play(match, a, b, 10, () => match.serverTick);
+    b.transport.close("bye");
+    play(match, a, b, 3, () => match.serverTick);
+    expect(a.lastSnapshot().entities).toEqual([]);
+    expect(a.lastSnapshot().baseBack).toBeGreaterThan(0);
+    b = joined(match);
+    // The rejoined client's first snapshot is full, whatever the slot's previous player acked.
+    expect(b.snapshots.map((x) => x.baseBack)).toEqual([0]);
+    play(match, a, b, 3, () => match.serverTick);
+    const last = a.lastSnapshot();
+    expect(last.baseBack).toBeGreaterThan(0);
+    expect(last.entities).toEqual([1]);
+    expect(last.frame.teleportSeq[1]).toBe(2);
+    expect(frameDigest(last.frame, 0)).toBe(frameDigest(match.worldFrame, 0));
+    expect([a.bad, a.noBaseline, b.bad]).toEqual([0, 0, 0]);
+  });
+});
+
 describe("match spawns, teams, events and respawns (D-034, D-035)", () => {
   const arena = loadMap("arena_greybox");
   const arenaWorld = buildCollisionWorld(arena);
@@ -1120,5 +1253,144 @@ describe("match under hostile traffic", () => {
     expect(match.cvarHash).toBe(hash);
     expect(match.cvars.get("pm_gravity")).toBe(800);
     for (const c of targets) expect(c.bad).toBe(0);
+  });
+});
+
+// NET-02, the server's rule (M3 design §2.3, D-038): the match's ack validation and baseline choice
+// (`match/history.ts`, the code `Match` runs per INPUT and per snapshot) one rule at a time, then
+// through NET-02 (a)'s seeded world sequence (`shared/test/helpers/deltaSequence.ts`), where it
+// must make exactly the choices of the design's model (`ServerSide`) that the shared unit tests.
+// The match legs, the real `Match` and real clients, are NET-02 (b) in packages/tools; the match's
+// own deltas are "match delta snapshots" above.
+
+function sentState(): SentState {
+  return { sentTicks: new Int32Array(64), newestSent: 0, ackTick: 0 };
+}
+
+/** A history holding ticks 1…`upTo` (empty frames: the rules look at ticks only). */
+function historyUpTo(upTo: number): WorldHistory {
+  const h = new WorldHistory();
+  for (let t = 1; t <= upTo; t++) {
+    h.frameFor(t).clear();
+    h.stored(t);
+  }
+  return h;
+}
+
+/** The match's rule as the world-sequence driver sees a server. */
+class MatchRule implements DeltaServer {
+  readonly world = new WorldHistory();
+  readonly state = sentState();
+  strikes = 0;
+  get history(): FrameRing {
+    return this.world.ring;
+  }
+  get ackTick(): number {
+    return this.state.ackTick;
+  }
+  get newestSent(): number {
+    return this.state.newestSent;
+  }
+  onAck(ack: number, t: number): void {
+    if (acceptAck(this.state, ack, t, this.world) === ACK_AHEAD) this.strikes += ACK_AHEAD_STRIKES;
+  }
+  baseline(t: number): number {
+    return baselineTick(this.state, t, this.world);
+  }
+  sent(t: number): void {
+    markSent(this.state, t);
+  }
+  unsend(t: number): void {
+    markUnsent(this.state, t);
+  }
+}
+
+describe("NET-02: the match's ack validation and baseline choice (M3 design §2.3, D-038)", () => {
+  it.each([
+    ["0: asks for a full snapshot, dropping the baseline", 0, ACK_FULL, 0, 0],
+    ["the newest sent: taken", 100, ACK_TAKEN, 100, 0],
+    ["past the newest sent: ignored, struck", 101, ACK_AHEAD, 90, ACK_AHEAD_STRIKES],
+    ["far past it (a forged tick): ignored, struck", 0xffffffff, ACK_AHEAD, 90, ACK_AHEAD_STRIKES],
+    ["older than the baseline (a reordered INPUT): ignored", 80, ACK_IGNORED, 90, 0],
+    ["equal to the baseline (a duplicate): ignored", 90, ACK_IGNORED, 90, 0],
+    ["never sent (a gap in the sent ring): ignored", 95, ACK_IGNORED, 90, 0],
+  ])("%s", (_name, ack, code, ackAfter, strikes) => {
+    // Ticks 1…100 sent but 95, the baseline at 90; the INPUT is read during tick 101.
+    const s = sentState();
+    for (let t = 1; t <= 100; t++) if (t !== 95) markSent(s, t);
+    s.ackTick = 90;
+    const got = acceptAck(s, ack, 101, historyUpTo(100));
+    const struck = got === ACK_AHEAD ? ACK_AHEAD_STRIKES : 0;
+    expect([got, s.ackTick, struck]).toEqual([code, ackAfter, strikes]);
+  });
+
+  it("takes an ack up to 63 ticks back and no further, and only while the history holds it", () => {
+    const s = sentState();
+    for (let t = 1; t <= 100; t++) markSent(s, t);
+    const history = historyUpTo(100);
+    expect(acceptAck(s, 101 - 64, 101, history)).toBe(ACK_IGNORED);
+    expect(acceptAck(s, 101 - 63, 101, history)).toBe(ACK_TAKEN);
+    expect(s.ackTick).toBe(38);
+    // A newer one raises it, an older valid one never lowers it.
+    expect(acceptAck(s, 60, 101, history)).toBe(ACK_TAKEN);
+    expect(acceptAck(s, 50, 101, history)).toBe(ACK_IGNORED);
+    expect(s.ackTick).toBe(60);
+    // A sent tick the history no longer holds (a fresh history: nothing held) is ignored.
+    expect(acceptAck(s, 70, 101, new WorldHistory())).toBe(ACK_IGNORED);
+    expect(s.ackTick).toBe(60);
+  });
+
+  it("codes against the acked tick while it is usable: baseBack = T − ackTick, else full", () => {
+    const s = sentState();
+    const history = historyUpTo(121);
+    for (let t = 1; t <= 120; t++) markSent(s, t);
+    expect(baselineTick(s, 121, history)).toBe(0);
+    acceptAck(s, 110, 121, history);
+    expect(baselineTick(s, 121, history)).toBe(110);
+    // Still usable 63 ticks on, full from 64 (the history then no longer holds it either). Each
+    // tick's frame is captured before its snapshot's baseline is chosen.
+    for (let t = 122; t <= 174; t++) {
+      markSent(s, t - 1);
+      history.frameFor(t).clear();
+      history.stored(t);
+      expect(baselineTick(s, t, history)).toBe(t <= 173 ? 110 : 0);
+    }
+    // Ack 0 drops it at once.
+    acceptAck(s, 140, 160, history);
+    expect(baselineTick(s, 160, history)).toBe(140);
+    acceptAck(s, 0, 160, history);
+    expect(baselineTick(s, 160, history)).toBe(0);
+  });
+
+  it("never takes a tick whose encode failed: it was not sent, and its slot names no older tick", () => {
+    const s = sentState();
+    const history = historyUpTo(101);
+    for (let t = 1; t <= 99; t++) markSent(s, t);
+    acceptAck(s, 99, 100, history);
+    // Tick 100's encode failed: nothing went out, so its ack is past the newest sent (struck) and
+    // its slot, which held tick 36, names nothing.
+    markUnsent(s, 100);
+    expect(s.sentTicks[100 & 63]).toBe(0);
+    expect(acceptAck(s, 100, 101, history)).toBe(ACK_AHEAD);
+    expect([s.newestSent, s.ackTick, baselineTick(s, 101, history)]).toEqual([99, 99, 99]);
+    // Once 101 went out, an ack of 100 is not past the newest sent but still never sent: ignored.
+    markSent(s, 101);
+    expect(acceptAck(s, 100, 102, history)).toBe(ACK_IGNORED);
+  });
+
+  it("makes the model's choices through NET-02 (a)'s world sequence, every frame matching", () => {
+    // Past the sequence's first lost-ack phase (ticks 2000–2090), so a baseline ages out.
+    const ticks = 3000;
+    const real = new MatchRule();
+    const run = runDeltaSequence(new StoreModel(), ticks, real);
+    const model = runDeltaSequence(new StoreModel(), ticks, new ServerSide());
+    expect(run.failures.slice(0, 5)).toEqual([]);
+    expect(run.matched).toBeGreaterThan(ticks * 0.8);
+    expect(run.deltas).toBeGreaterThan(ticks * 0.5);
+    expect(run.fullsAfterValidAck).toBeGreaterThan(0);
+    expect(real.strikes).toBeGreaterThan(0);
+    // The driver refuses an encode now and then: both rules unsend it alike.
+    expect(run.unsent).toBe(3);
+    expect({ ...run, failures: [] }).toEqual({ ...model, failures: [] });
   });
 });

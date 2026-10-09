@@ -6,7 +6,7 @@ import { fromRoot } from "../src/paths";
 // The `pnpm bench` CLI part by part (docs/10 §4.4), the long tier's (D-032): each part's report
 // after the one before it, with that part's counts raised, and every refused count exiting 2. Each
 // case is a `node --import tsx bench/run.ts` child. `pnpm test` keeps one end-to-end smoke of all
-// four parts with tiny counts (`packages/tools/test/bench/trace-bench.test.ts`) and the
+// five parts with tiny counts (`packages/tools/test/bench/trace-bench.test.ts`) and the
 // workloads' and verdicts' unit tests.
 
 describe("pnpm bench entry", () => {
@@ -18,6 +18,10 @@ describe("pnpm bench entry", () => {
         "--import",
         "tsx",
         "bench/run.ts",
+        "--build-ticks",
+        "20",
+        "--build-warmup",
+        "0",
         "--pmove-ticks",
         "20",
         "--pmove-warmup",
@@ -58,6 +62,10 @@ describe("pnpm bench entry, pmove part", () => {
         "--import",
         "tsx",
         "bench/run.ts",
+        "--build-ticks",
+        "20",
+        "--build-warmup",
+        "0",
         "--calls",
         "1000",
         "--warmup",
@@ -97,6 +105,10 @@ describe("pnpm bench entry, codec part", () => {
         "--import",
         "tsx",
         "bench/run.ts",
+        "--build-ticks",
+        "20",
+        "--build-warmup",
+        "0",
         "--calls",
         "1000",
         "--warmup",
@@ -136,6 +148,10 @@ describe("pnpm bench entry, interp part", () => {
         "--import",
         "tsx",
         "bench/run.ts",
+        "--build-ticks",
+        "20",
+        "--build-warmup",
+        "0",
         "--calls",
         "1000",
         "--warmup",
@@ -164,5 +180,48 @@ describe("pnpm bench entry, interp part", () => {
   it("rejects bad interp counts with exit code 2", () => {
     expect(run("--interp-frames", "0").status).toBe(2);
     expect(run("--interp-warmup", "1.5").status).toBe(2);
+  }, 30_000);
+});
+
+describe("pnpm bench entry, snapshot build part", () => {
+  const run = (...args: string[]) =>
+    spawnSync(
+      process.execPath,
+      [
+        "--import",
+        "tsx",
+        "bench/run.ts",
+        "--calls",
+        "1000",
+        "--warmup",
+        "0",
+        "--pmove-ticks",
+        "20",
+        "--pmove-warmup",
+        "0",
+        "--codec-calls",
+        "1000",
+        "--codec-warmup",
+        "0",
+        "--interp-frames",
+        "1000",
+        "--interp-warmup",
+        "0",
+        ...args,
+      ],
+      { cwd: fromRoot("packages", "tools"), encoding: "utf8" },
+    );
+
+  it("prints the snapshot build report after the interp report, and exits 0", () => {
+    const out = run("--build-ticks", "2000", "--build-warmup", "1000");
+    expect(out.status, out.stderr).toBe(0);
+    expect(out.stdout).toMatch(/interp frame: 1000 frames[\s\S]*snapshot build: 2000 ticks of 16/);
+    expect(out.stdout).toMatch(/per client \(\d+ B, 100\.0% deltas\): [\d.]+ ns, budget 50000 ns/);
+    expect(out.stdout).toMatch(/failed encodes: 0/);
+  }, 30_000);
+
+  it("rejects bad snapshot build counts with exit code 2", () => {
+    expect(run("--build-ticks", "0").status).toBe(2);
+    expect(run("--build-warmup", "1.5").status).toBe(2);
   }, 30_000);
 });

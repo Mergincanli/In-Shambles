@@ -14,6 +14,12 @@ import {
   runPmoveBench,
 } from "./pmove.bench";
 import {
+  buildSnapshotBuildWorkload,
+  buildStrictFailure,
+  formatSnapshotBuildBench,
+  runSnapshotBuildBench,
+} from "./snapshotBuild.bench";
+import {
   buildTraceWorkload,
   formatTraceBench,
   loadMovementLab,
@@ -22,7 +28,8 @@ import {
 } from "./trace.bench";
 
 // `pnpm bench`: sim microbenchmarks against the docs/10 §4.4 budgets (the interp frame is
-// reported against its estimate). Timings vary by machine, so a miss only fails the run with
+// reported against its estimate): BVH traces, pmove, the snapshot and INPUT codecs, the remote
+// interpolation frame and the server's snapshot build. Timings vary by machine, so a miss only fails the run with
 // --strict.
 const { values } = parseArgs({
   options: {
@@ -38,6 +45,9 @@ const { values } = parseArgs({
     // interp: receiver frames per case.
     "interp-frames": { type: "string", default: "200000" },
     "interp-warmup": { type: "string", default: "50000" },
+    // snapshot build: server ticks of 16 clients each.
+    "build-ticks": { type: "string", default: "20000" },
+    "build-warmup": { type: "string", default: "5000" },
   },
 });
 
@@ -49,6 +59,8 @@ const codecCalls = Number(values["codec-calls"]);
 const codecWarmup = Number(values["codec-warmup"]);
 const interpFrames = Number(values["interp-frames"]);
 const interpWarmup = Number(values["interp-warmup"]);
+const buildTicks = Number(values["build-ticks"]);
+const buildWarmup = Number(values["build-warmup"]);
 const positive = (x: number) => Number.isInteger(x) && x >= 1;
 const nonNegative = (x: number) => Number.isInteger(x) && x >= 0;
 if (
@@ -59,10 +71,12 @@ if (
   !positive(codecCalls) ||
   !nonNegative(codecWarmup) ||
   !positive(interpFrames) ||
-  !nonNegative(interpWarmup)
+  !nonNegative(interpWarmup) ||
+  !positive(buildTicks) ||
+  !nonNegative(buildWarmup)
 ) {
   console.error(
-    "--calls, --pmove-ticks, --codec-calls and --interp-frames must be positive integers, --warmup, --pmove-warmup, --codec-warmup and --interp-warmup non-negative ones",
+    "--calls, --pmove-ticks, --codec-calls, --interp-frames and --build-ticks must be positive integers, --warmup, --pmove-warmup, --codec-warmup, --interp-warmup and --build-warmup non-negative ones",
   );
   process.exit(2);
 }
@@ -81,12 +95,20 @@ console.log(formatCodecBench(codecResult));
 console.log("");
 const interpResult = await runInterpBench(loadArena(), interpFrames, interpWarmup);
 console.log(formatInterpBench(interpResult));
+console.log("");
+const buildResult = await runSnapshotBuildBench(
+  buildSnapshotBuildWorkload(),
+  buildTicks,
+  buildWarmup,
+);
+console.log(formatSnapshotBuildBench(buildResult));
 if (
   values.strict &&
   (strictFailure(result) ||
     pmoveStrictFailure(pmoveResult) ||
     codecStrictFailure(codecResult) ||
-    interpStrictFailure(interpResult))
+    interpStrictFailure(interpResult) ||
+    buildStrictFailure(buildResult))
 ) {
   process.exitCode = 1;
 }

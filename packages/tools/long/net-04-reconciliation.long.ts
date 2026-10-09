@@ -20,6 +20,7 @@ import {
   SEED,
   worstStep,
 } from "../test/net/reconciliation";
+import { expectSixteen, runSixteen } from "../test/net/sixteenClients";
 
 // NET-04, the M2 basic version (docs/05 §14, M2 design §5), its long tier (D-032): the runs of
 // `packages/tools/test/net/net-04-reconciliation.test.ts` that `pnpm test` leaves out, with the
@@ -31,7 +32,9 @@ import {
 // - the onset runs: 144 Hz turning into browser hitches or a slow host 15 s into the circuit, lan
 //   included;
 // - lan with 60 fps hitches, where gaps past the lead resync until the lead has learned them.
-// M3 increment 9 adds the 16-client legs here.
+// And the 16-client legs (M3 design §5, increment 9; `sixteenClients.ts` says what they check):
+// seed 1 on wan-150-loss2 for 30 s (the M3 baseline's run, which the design gave the fast tier
+// and D-032's placement rule moved here), seeds 5 and 7 on wan-100-loss1 for 60 s.
 
 describe("NET-04 (M2 basic): reconciliation on every profile", () => {
   it.each(LOSSY_CASES.filter(([, seed]) => seed !== SEED))(
@@ -106,4 +109,18 @@ describe("NET-04 (M2 basic): browser-like frame timing", () => {
       h.client.settings.inputBuffer + BUFFER_MEAN_ABOVE_TARGET,
     );
   });
+});
+
+describe("NET-04: 16 clients on arena_greybox over delta snapshots", () => {
+  it.each([
+    ["wan-150-loss2", 1, 30],
+    ["wan-100-loss1", 5, 60],
+    ["wan-100-loss1", 7, 60],
+  ])(
+    "%s, seed %i, %i s: corrections rare and small, every snapshot reconciled",
+    (name, seed, s) => {
+      console.log(expectSixteen(runSixteen(name, seed, s)));
+    },
+    60_000,
+  );
 });

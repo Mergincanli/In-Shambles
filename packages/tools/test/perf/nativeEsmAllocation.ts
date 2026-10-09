@@ -1087,9 +1087,11 @@ function runTransport(n: number): void {
 // The match tick (D-027): a real Match on movement_lab and one client over a loopback pair, past
 // HELLO and READY at setup, plus a bystander that only joined (so every snapshot carries an entity
 // record and the world frame two players, D-033). Each call sends an INPUT with four redundant cmds
-// (a strafing circle with jumps and attack), skips six in 64 so the starved repeat runs past the
-// redundancy, pings now and then, runs one match tick and decodes what came back. A tick is far
-// heavier than the calls above, so a run is n / 10 ticks, after a longer warm-up.
+// (a strafing circle with jumps and attack) acking the newest snapshot the client's store holds,
+// so the match codes deltas against its history (D-038); skips six in 64 so the starved repeat
+// runs past the redundancy, pings now and then, runs one match tick and decodes what came back
+// with the client's real SnapshotStore. A tick is far heavier than the calls above, so a run is
+// n / 10 ticks, after a longer warm-up.
 class MatchRig {
   readonly match: Match;
   readonly client: LoopbackEndpoint;
@@ -1097,8 +1099,7 @@ class MatchRig {
   readonly writer = new BitWriter(MAX_RELIABLE_BYTES);
   readonly reader = new BitReader();
   readonly input = new InputMsg();
-  readonly snapHeader = new SnapshotHeader();
-  readonly snapFrame = new WorldFrame();
+  readonly store = new SnapshotStore();
   readonly pong = new PongMsg();
   readonly ping = new PingMsg();
   /** Warm-up calls left: the first runs eight times as long (see runMatch). */
@@ -1134,15 +1135,15 @@ class MatchRig {
   private receive(d: Uint8Array, len: number): void {
     this.reader.reset(d, len);
     const type = peekMessageType(d, len);
-    const h = this.snapHeader;
+    const store = this.store;
     if (
       type === MSG_SNAPSHOT &&
-      decodeSnapshotHeader(this.reader, h) &&
-      decodeSnapshotBody(this.reader, h, null, 0, this.snapFrame) &&
-      this.snapFrame.present[1] === 1
+      store.receive(this.reader, 0) === STORE_STORED &&
+      (store.lastStored as WorldFrame).present[1] === 1
     ) {
       outcomes[0] = (outcomes[0] as number) + 1;
-      if ((h.flags & SNAP_FLAG_STARVED) !== 0) outcomes[1] = (outcomes[1] as number) + 1;
+      if ((store.header.flags & SNAP_FLAG_STARVED) !== 0) outcomes[1] = (outcomes[1] as number) + 1;
+      if (store.header.baseBack !== 0) extra[0] = (extra[0] as number) + 1;
     } else if (type === MSG_PONG && decodePong(this.reader, this.pong)) {
       outcomes[2] = (outcomes[2] as number) + 1;
     }
@@ -1176,7 +1177,7 @@ function runMatch(n: number): void {
     const newest = match.serverTick + 3;
     if ((i & 63) < 58) {
       input.packetSeq = i & 0xffff;
-      input.lastSnapshotTick = match.serverTick;
+      input.lastSnapshotTick = rig.store.ackTick;
       input.count = 4;
       for (let k = 0; k < 4; k++) fillMatchCmd(input.cmds[k] as UserCmd, newest - k);
       w.reset();
@@ -1192,6 +1193,191 @@ function runMatch(n: number): void {
     match.tick();
     client.poll();
     rig.bystander.poll();
+  }
+}
+
+// Several sessions in one match with delta snapshots (M3 design §5 "Allocation", D-038): a real
+// Match on arena_greybox and MM_CLIENTS raw clients over loopback pairs, each decoding with the
+// client's real SnapshotStore and acking its newest stored tick k + 1 ticks late (client k), so
+// every session codes against a different baseline of the shared history; each drops one INPUT in
+// 16 at its own phase and runs a strafing circle with jumps. Every 4096 ticks one client (in turn)
+// disconnects and a new one takes its freed slot (HELLO, READY: a fresh session with a full first
+// snapshot), from a pool of loopback pairs made at setup. Every stored frame is compared with the
+// server's frame of its tick field by field (a digest's uint32 would box). A tick costs about four
+// match ticks, so a run is n / 40 ticks (2e4 player-ticks for n = 2e5) after a warm-up 8 times as
+// long (1.6e5 player-ticks, the design's): several real sessions in one match take V8 longer to
+// settle than one (the 16-session view-frame guard needed its full warm-up in increment 7).
+const MM_CLIENTS = 4;
+const MM_RECONNECT_TICKS = 4096;
+const MM_POOL = 24;
+const MM_ACK_SLOTS = 8;
+
+class MultiClient {
+  endpoint: LoopbackEndpoint | null = null;
+  readonly store = new SnapshotStore();
+  readonly reader = new BitReader();
+  /** The store's ackTick after each tick, by `tick & 7`: client k acks k + 1 ticks late. */
+  readonly acks = new Int32Array(MM_ACK_SLOTS);
+  /** The id WELCOME gave (the slot it reconnects into). */
+  id = -1;
+  /** 0 playing, 1 HELLO sent (READY next tick), 2 closed (reconnect next tick). */
+  phase = 0;
+  readonly onMessage: MessageHandler = (d, len) => this.receive(d, len);
+
+  constructor(
+    readonly index: number,
+    private readonly rig: MatchMultiRig,
+  ) {}
+
+  private receive(d: Uint8Array, len: number): void {
+    if (peekMessageType(d, len) !== MSG_SNAPSHOT) return;
+    const r = this.reader;
+    r.reset(d, len);
+    const store = this.store;
+    if (store.receive(r, this.id) !== STORE_STORED) return;
+    const got = store.lastStored as WorldFrame;
+    const cur = this.rig.match.history.get(store.header.serverTick);
+    if (cur !== null && sameFrame(got, cur, this.id)) outcomes[0] = (outcomes[0] as number) + 1;
+    else extra[0] = (extra[0] as number) + 1;
+    if (store.header.baseBack !== 0) outcomes[1] = (outcomes[1] as number) + 1;
+  }
+}
+
+class MatchMultiRig {
+  readonly match: Match;
+  readonly clients: MultiClient[] = [];
+  readonly writer = new BitWriter(MAX_RELIABLE_BYTES);
+  readonly input = new InputMsg();
+  readonly hello = new HelloMsg();
+  /** Loopback pairs for the reconnects, made at setup: [client end, server end] per entry. */
+  private readonly pool: LoopbackEndpoint[] = [];
+  warmup = 1;
+
+  constructor() {
+    const course = loadCourse("arena_greybox");
+    this.match = new Match({ cmap: course.cmap, world: course.world, buildHash: "alloc" });
+    this.hello.buildHash = "alloc";
+    for (let i = 0; i < MM_POOL; i++) {
+      const [c, s] = createLoopbackPair();
+      this.pool.push(c, s);
+    }
+    for (let k = 0; k < MM_CLIENTS; k++) {
+      const c = new MultiClient(k, this);
+      this.clients.push(c);
+      this.join(c, k);
+    }
+    // HELLO, then READY, then the first snapshot.
+    this.match.tick();
+    for (const c of this.clients) this.ready(c);
+    this.match.tick();
+    for (const c of this.clients) (c.endpoint as LoopbackEndpoint).poll();
+  }
+
+  /** Connects `c` on a pooled pair (a fresh one when the pool ran dry) and sends HELLO. */
+  join(c: MultiClient, id: number): void {
+    let client = this.pool.shift();
+    let server = this.pool.shift();
+    if (client === undefined || server === undefined) [client, server] = createLoopbackPair();
+    c.endpoint = client;
+    c.id = id;
+    c.store.reset();
+    c.acks.fill(0);
+    client.onMessage(c.onMessage);
+    this.match.connect(server);
+    const w = this.writer;
+    w.reset();
+    encodeHello(w, this.hello);
+    client.sendReliable(w.bytes, w.byteLength);
+    c.phase = 1;
+  }
+
+  ready(c: MultiClient): void {
+    const w = this.writer;
+    w.reset();
+    encodeReady(w);
+    (c.endpoint as LoopbackEndpoint).sendReliable(w.bytes, w.byteLength);
+    c.phase = 0;
+  }
+}
+
+let matchMultiRig: MatchMultiRig | null = null;
+
+/** Whether `got` holds what `cur` does as receiver `self` sees it (what frameDigest hashes). */
+function sameFrame(got: WorldFrame, cur: WorldFrame, self: number): boolean {
+  for (let s = 0; s < FRAME_SLOTS; s++) {
+    if (got.present[s] !== cur.present[s] || got.stamp[s] !== cur.stamp[s]) return false;
+    if (cur.present[s] !== 1) continue;
+    if (s !== self) {
+      if (!entityEquals(got, s, cur, s)) return false;
+    } else if (
+      got.originX[s] !== cur.originX[s] ||
+      got.originY[s] !== cur.originY[s] ||
+      got.originZ[s] !== cur.originZ[s] ||
+      got.vel16X[s] !== cur.vel16X[s] ||
+      got.vel16Y[s] !== cur.vel16Y[s] ||
+      got.vel16Z[s] !== cur.vel16Z[s] ||
+      got.yaw[s] !== cur.yaw[s] ||
+      got.pitch[s] !== cur.pitch[s] ||
+      got.flags[s] !== cur.flags[s] ||
+      got.ground1[s] !== cur.ground1[s] ||
+      got.waterLevel[s] !== cur.waterLevel[s] ||
+      got.stamina[s] !== cur.stamina[s] ||
+      got.teleportSeq[s] !== cur.teleportSeq[s]
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Outcomes: stored frames equal to the server's, deltas stored, reconnects; `extra[0]` stored
+ * frames that differed from the server's (must stay 0).
+ */
+function runMatchMulti(n: number): void {
+  if (matchMultiRig === null) matchMultiRig = new MatchMultiRig();
+  const rig = matchMultiRig;
+  const match = rig.match;
+  const w = rig.writer;
+  const input = rig.input;
+  const clients = rig.clients;
+  const ticks = rig.warmup-- > 0 ? (n / 40) * 8 : n / 40;
+  for (let i = 0; i < ticks; i++) {
+    const next = match.serverTick + 1;
+    for (let k = 0; k < MM_CLIENTS; k++) {
+      const c = clients[k] as MultiClient;
+      const end = c.endpoint as LoopbackEndpoint;
+      if (c.phase === 2) {
+        // The old session is gone from the match by now (its close was read last tick).
+        rig.join(c, c.id);
+        continue;
+      }
+      if (c.phase === 1) {
+        rig.ready(c);
+        continue;
+      }
+      if (next % MM_RECONNECT_TICKS === 0 && ((next / MM_RECONNECT_TICKS) & 3) === k) {
+        end.close("reconnect");
+        c.phase = 2;
+        outcomes[2] = (outcomes[2] as number) + 1;
+        continue;
+      }
+      if (((next + k * 5) & 15) === 0) continue;
+      input.packetSeq = next & 0xffff;
+      input.lastSnapshotTick = c.acks[(next - 1 - k) & (MM_ACK_SLOTS - 1)] as number;
+      input.count = 4;
+      for (let j = 0; j < 4; j++) fillMatchCmd(input.cmds[j] as UserCmd, next + 2 - j);
+      w.reset();
+      encodeInput(w, input);
+      end.sendUnreliable(w.bytes, w.byteLength);
+    }
+    match.tick();
+    const t = match.serverTick;
+    for (let k = 0; k < MM_CLIENTS; k++) {
+      const c = clients[k] as MultiClient;
+      (c.endpoint as LoopbackEndpoint).poll();
+      c.acks[t & (MM_ACK_SLOTS - 1)] = c.store.ackTick;
+    }
   }
 }
 
@@ -1567,6 +1753,7 @@ const WORKLOADS: Record<string, (n: number) => void> = {
   deltaCodec: runDeltaCodec,
   interp: runInterp,
   match: runMatch,
+  matchMulti: runMatchMulti,
   pmove: runPmove,
   pmoveModes: runPmoveModes,
   pmoveBasics: runPmoveBasics,

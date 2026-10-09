@@ -34,6 +34,7 @@ import {
   PMF_GROUNDED,
   PongMsg,
   SNAP_FLAG_SPECTATOR,
+  SnapshotHeader,
   slotToPlayerState,
   type Transport,
   UserCmd,
@@ -345,8 +346,9 @@ describe("client session", () => {
     expect(newest).toBe(snapTick);
     const server = h.match.session(0)?.transport as Transport;
     const w = new BitWriter(MAX_RELIABLE_BYTES);
-    // The newest snapshot again, byte for byte as the client holds it.
-    expect(encodeSnapshot(w, c.store.header, c.store.newest as WorldFrame, null, 0)).toBe(true);
+    // The newest snapshot again, as the client holds it (re-encoded full: its baseline is moot).
+    const again = Object.assign(new SnapshotHeader(), c.store.header, { baseBack: 0 });
+    expect(encodeSnapshot(w, again, c.store.newest as WorldFrame, null, 0)).toBe(true);
     server.sendUnreliable(w.bytes, w.byteLength);
     // A snapshot 64 ticks older: its ring slot holds the newer tick.
     const ps = new PlayerState();

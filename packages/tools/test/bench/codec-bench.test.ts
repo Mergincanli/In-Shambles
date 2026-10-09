@@ -22,9 +22,20 @@ import {
   runInputCodec,
   runSnapshotCodec,
 } from "../../bench/codec.bench";
+import { PMOVE_PLAYERS } from "../../bench/pmove.bench";
+import {
+  BUILD_FRAMES,
+  type BuildBenchResult,
+  BuildBenchState,
+  buildSnapshotBuildWorkload,
+  buildStrictFailure,
+  formatSnapshotBuildBench,
+  runSnapshotBuild,
+} from "../../bench/snapshotBuild.bench";
 
-// Keeps the codec part of `pnpm bench` compiling and its workload honest; timings are not
-// asserted (machine variance), only the cases, the round trips and the verdict logic.
+// Keeps the codec and snapshot build parts of `pnpm bench` compiling and their workloads honest
+// (docs/10 §4.4; the snapshot build since M3 increment 9); timings are not asserted (machine
+// variance), only the cases, the round trips and the verdict logic.
 
 const workload = buildCodecWorkload();
 
@@ -120,5 +131,55 @@ describe("codec bench verdict", () => {
     expect(codecStrictFailure(fakeResult(30_001, 0))).toBe(true);
     expect(codecStrictFailure(fakeResult(700, 1))).toBe(true);
     expect(codecStrictFailure(fakeResult(700, 0, 1))).toBe(true);
+  });
+});
+
+const buildWorkload = buildSnapshotBuildWorkload();
+
+describe("snapshot build bench workload", () => {
+  it("builds every client's snapshot as a delta 6–10 ticks back once the acks flow", () => {
+    expect(buildWorkload.frames).toHaveLength(BUILD_FRAMES);
+    const s = new BuildBenchState();
+    runSnapshotBuild(buildWorkload, s, 20);
+    expect(s.failures).toBe(0);
+    expect(s.snapshots).toBe(20 * PMOVE_PLAYERS);
+    // The first ack arrives on the 7th tick (6 back from the newest sent).
+    expect(s.deltas).toBeGreaterThan(10 * PMOVE_PLAYERS);
+    const before = s.bytes / s.snapshots;
+    const deltas = s.deltas;
+    runSnapshotBuild(buildWorkload, s, 600);
+    expect(s.failures).toBe(0);
+    expect(s.deltas - deltas).toBe(600 * PMOVE_PLAYERS);
+    for (const c of s.clients) {
+      const back = s.tick - 1 - c.ackTick;
+      expect(back).toBeGreaterThanOrEqual(6);
+      expect(back).toBeLessThanOrEqual(11);
+    }
+    // Deltas of 16 moving players: well under a full snapshot (436 B), more than the first ticks'.
+    const mean = s.bytes / s.snapshots;
+    expect(mean).toBeLessThan(436);
+    expect(mean).toBeLessThan(before);
+  });
+});
+
+describe("snapshot build bench verdict", () => {
+  const buildResult = (ns: number, gcs: number, failures = 0): BuildBenchResult => ({
+    ticks: 1,
+    nsPerBuild: ns,
+    bytes: 230.4,
+    deltaShare: 1,
+    failures,
+    gcs,
+  });
+
+  it("reports per client against the 50 µs budget; --strict fails on a miss, a GC or a failure", () => {
+    expect(formatSnapshotBuildBench(buildResult(5896.21, 0))).toContain(
+      "per client (230 B, 100.0% deltas): 5896.2 ns, budget 50000 ns: PASS (estimate 10000 ns)",
+    );
+    expect(formatSnapshotBuildBench(buildResult(60000, 0))).toContain("budget 50000 ns: FAIL");
+    expect(buildStrictFailure(buildResult(5000, 0))).toBe(false);
+    expect(buildStrictFailure(buildResult(60000, 0))).toBe(true);
+    expect(buildStrictFailure(buildResult(5000, 1))).toBe(true);
+    expect(buildStrictFailure(buildResult(5000, 0, 1))).toBe(true);
   });
 });

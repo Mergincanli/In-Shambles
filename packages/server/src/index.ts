@@ -4,6 +4,7 @@
  * stays out of it, so importing this never pulls in Node APIs.
  */
 export * from "./match/commands";
+export * from "./match/history";
 export * from "./match/host";
 export * from "./match/inputQueue";
 export * from "./match/loop";

@@ -232,10 +232,13 @@ describe.concurrent("a bots run", () => {
     expect(summary.bots.map((b) => b.behaviour)).toEqual(["route", "route", "route"]);
     for (const b of summary.bots) {
       expect(b.snapshots, `bot ${b.id}`).toBeGreaterThan(100);
-      // Two other players listed: 86 + 199 + 7 + 2 × 213 bits.
-      expect(b.snapshotBytes.max, `bot ${b.id}`).toBe(90);
-      // 60 snapshots/s of 90 B + 2 B framing ≈ 5.5 KB/s down.
-      expect(b.kbDownPerS, `bot ${b.id}`).toBeGreaterThan(4.5);
+      // Deltas against the acked frames (D-038) once the bots are in: at most the worst delta of
+      // two other players, 312 + 2 × 233 bits (98 B); measured about 30 B, 2.1 KB/s down, where
+      // full snapshots (90 B: 86 + 199 + 7 + 2 × 213 bits) would take 5.5 KB/s.
+      expect(b.deltaShare, `bot ${b.id}`).toBeGreaterThan(0.9);
+      expect(b.snapshotBytes.max, `bot ${b.id}`).toBeLessThanOrEqual(98);
+      expect(b.kbDownPerS, `bot ${b.id}`).toBeGreaterThan(1);
+      expect(b.kbDownPerS, `bot ${b.id}`).toBeLessThan(4.5);
       expect(b.kbUpPerS, `bot ${b.id}`).toBeGreaterThan(2);
     }
     expect(summary.server).toMatchObject({
@@ -249,8 +252,10 @@ describe.concurrent("a bots run", () => {
     const s = summary.server;
     if (s === null) throw new Error("no server section");
     expect(s.beforeBotsS).toBeGreaterThan(0);
-    expect(s.kbOutPerS).toBeGreaterThan(3 * 4.5);
-    expect(s.fullSnapshots).toBeLessThan(summary.bots.reduce((n, b) => n + b.snapshots, 0) * 1.1);
+    expect(s.kbOutPerS).toBeGreaterThan(3 * 1);
+    // Deltas once each bot's first ack arrived (D-038): the joins' full snapshots come before the
+    // bots' window (measured 0 in it), so at most a stray one per bot.
+    expect(s.fullSnapshots).toBeLessThanOrEqual(3);
     expect(summary.checks.find((c) => c.name === "server tick p99")?.judged).toBe(false);
     expect(summary.aggregate.mispredictions).toBe(0);
     // Each bot drew the two others interpolated and smooth (D-037), NET-05 judging most of its

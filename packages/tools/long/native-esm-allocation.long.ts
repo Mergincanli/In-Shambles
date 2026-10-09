@@ -6,7 +6,8 @@ import { fromRoot } from "../src/paths";
 // The per-tick paths (quantizePlayerState, snapOrigin, the state ring, copy/equals,
 // sanitizeUserCmd, the pmove params refresh and basics, whole pmove ticks in every M2 move mode,
 // the scenario runner and bots, the per-tick message codecs, delta snapshots through the client's
-// snapshot store, the transports, the server's match tick and the Node server's timing wrapper,
+// snapshot store, the transports, the server's match tick (one session, and several with delta
+// snapshots and reconnects) and the Node server's timing wrapper,
 // both ends of the WebSocket transport, the client's prediction and reconciliation, the remote
 // interpolation, and the BVH queries) must not allocate under native ES modules either, where V8
 // boxes a double returned by a call it doesn't inline or joined with a module constant in a
@@ -23,7 +24,8 @@ interface ChildResult {
   outcomes: number[];
   /**
    * wsTransport: the client end's outcomes; predict: [0] teleports; interp: [0] held; deltaCodec:
-   * [0] full snapshots stored.
+   * [0] full snapshots stored; match: [0] deltas stored; matchMulti: [0] stored frames that
+   * differed from the server's.
    */
   extra: number[];
   /** codec and deltaCodec: hostile packets the decoders refused. */
@@ -170,12 +172,25 @@ describe.concurrent("per-tick paths under native ES modules", () => {
     expect(r.clean, r.attempts.join("; ")).toBe(true);
   }, 30_000);
 
-  it("a match tick allocates nothing in steady state: inputs, starved repeats, pmove, snapshots, pongs (D-027)", async ({
+  it("a match tick allocates nothing in steady state: inputs, starved repeats, pmove, delta snapshots, pongs (D-027, D-038)", async ({
     expect,
   }) => {
     const r = await runChild("match");
-    // Snapshots decoded, starved snapshots among them, pongs.
+    // Snapshots stored, starved snapshots among them, pongs; all but the first snapshot deltas.
     for (const n of r.outcomes) expect(n).toBeGreaterThan(0);
+    expect(r.extra[0]).toBe((r.outcomes[0] as number) - 1);
+    expect(r.clean, r.attempts.join("; ")).toBe(true);
+  }, 30_000);
+
+  it("a match tick with several sessions allocates nothing: delta snapshots against rotating acks, lost inputs; a reconnect costs only its session (D-038)", async ({
+    expect,
+  }) => {
+    const r = await runChild("matchMulti");
+    // Stored frames equal to the server's, deltas among them, reconnects (each a full snapshot);
+    // none differed. A reconnect in the measured window allocates its session (about 17 KB).
+    for (const n of r.outcomes) expect(n).toBeGreaterThan(0);
+    expect(r.extra[0]).toBe(0);
+    expect(r.outcomes[1]).toBeGreaterThan(0.99 * (r.outcomes[0] as number));
     expect(r.clean, r.attempts.join("; ")).toBe(true);
   }, 30_000);
 

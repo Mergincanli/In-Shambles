@@ -22,12 +22,17 @@ import {
   TickWindow,
 } from "@game/server";
 import {
+  BitReader,
   type Cmap,
   type CollisionWorld,
   copyPlayerState,
   createLoopbackPair,
+  decodeInput,
   frameDigest,
+  InputMsg,
   type LoopbackEndpoint,
+  MSG_INPUT,
+  MSG_SNAPSHOT,
   Mulberry32,
   NET_PROFILE_LAN,
   type NetProfile,
@@ -38,6 +43,7 @@ import {
   type Transport,
   type TransportStats,
   vec3,
+  wsWireBytes,
 } from "@game/shared";
 import { loadCourse } from "../../src/scenarios/course";
 
@@ -56,7 +62,8 @@ import { loadCourse } from "../../src/scenarios/course";
  * every tick, their first and final predictions of every tick, the ticks they reconciled with, a
  * per-frame log and their movement events. They also check every frame their snapshot store takes
  * against the frame the server encoded it from (`frameDigest`, as that client sees it; M3 design
- * §5 "Harness"). The others keep only their counters, so 64 clients stay cheap.
+ * §5 "Harness"); `checkFrames` does only that. The others keep only their counters, so 64 clients
+ * stay cheap.
  */
 
 export const HARNESS_BUILD = "net-harness";
@@ -129,6 +136,14 @@ export class FrameLog {
 export class TrafficCounts {
   messages = 0;
   bytes = 0;
+  /**
+   * What the bytes would cost on a WebSocket, framing included (D-036, `wsWireBytes`): the
+   * client's frames (`masked`) carry a 4 B mask.
+   */
+  wireBytes = 0;
+
+  constructor(private readonly masked: boolean) {}
+
   /** By the leading type byte (0–255): messages, bytes and the largest message. */
   readonly messagesByType = new Float64Array(256);
   readonly bytesByType = new Float64Array(256);
@@ -138,6 +153,7 @@ export class TrafficCounts {
     const type = len > 0 ? (d[0] as number) : 0;
     this.messages++;
     this.bytes += len;
+    this.wireBytes += wsWireBytes(len, this.masked);
     this.messagesByType[type] = (this.messagesByType[type] as number) + 1;
     this.bytesByType[type] = (this.bytesByType[type] as number) + len;
     this.maxByType[type] = Math.max(this.maxByType[type] as number, len);
@@ -146,12 +162,30 @@ export class TrafficCounts {
 
 /**
  * The server's end of a session, counting what the match sends (`down`, before any loss on the
- * way) and what reaches it (`up`): the per-session bytes of NET-08 (payload only; WebSocket framing
- * is added by the test that judges bandwidth, D-036).
+ * way) and what reaches it (`up`): the per-session bytes of NET-08, as payload and with WebSocket
+ * framing (`wireBytes`, D-036). SNAPSHOTs are also split into full ones and deltas by their
+ * baseBack (D-038), and the ack of each INPUT that reaches the match can be watched (`onInputAck`)
+ * apart from what the match makes of it.
  */
 export class SessionTap implements Transport {
-  readonly down = new TrafficCounts();
-  readonly up = new TrafficCounts();
+  readonly down = new TrafficCounts(false);
+  readonly up = new TrafficCounts(true);
+  /** Full SNAPSHOTs sent (baseBack 0) and their bytes; the rest were deltas. */
+  fullSnapshots = 0;
+  fullSnapshotBytes = 0;
+  /** The largest full SNAPSHOT sent. */
+  maxFullSnapshot = 0;
+  /** The serverTick, baseBack and size of the last SNAPSHOT sent (0, −1 and 0 before the first). */
+  lastSnapshotTick = 0;
+  lastBaseBack = -1;
+  lastSnapshotBytes = 0;
+  /**
+   * Called with the `lastSnapshotTick` of each well-formed INPUT that reaches the match, just
+   * before the match reads it (during the poll of the tick after `match.serverTick`).
+   */
+  onInputAck: ((ack: number) => void) | null = null;
+  private readonly reader = new BitReader();
+  private readonly input = new InputMsg();
 
   /**
    * `held()` true keeps what arrived from the match's poll (the harness holds a stalled server's
@@ -162,11 +196,32 @@ export class SessionTap implements Transport {
     private readonly held: () => boolean = () => false,
   ) {}
 
-  // Counted only when the inner transport took the message (its own `sent` rose).
+  // Counted only when the inner transport took the message (its own `sent` rose); the last
+  // SNAPSHOT's fields are what the match handed over either way.
   sendUnreliable(d: Uint8Array, len: number): void {
+    const snapshot = len > 5 && d[0] === MSG_SNAPSHOT;
+    // type u8, serverTick u32 (low 16 bits first), then baseBack u6 in the low bits of byte 5
+    // (docs/05 §3.6).
+    const back = snapshot ? (d[5] as number) & 63 : 0;
+    if (snapshot) {
+      this.lastSnapshotTick =
+        ((d[1] as number) |
+          ((d[2] as number) << 8) |
+          ((d[3] as number) << 16) |
+          ((d[4] as number) << 24)) >>>
+        0;
+      this.lastBaseBack = back;
+      this.lastSnapshotBytes = len;
+    }
     const sent = this.inner.stats().sent;
     this.inner.sendUnreliable(d, len);
-    if (this.inner.stats().sent > sent) this.down.count(d, len);
+    if (this.inner.stats().sent === sent) return;
+    this.down.count(d, len);
+    if (snapshot && back === 0) {
+      this.fullSnapshots++;
+      this.fullSnapshotBytes += len;
+      this.maxFullSnapshot = Math.max(this.maxFullSnapshot, len);
+    }
   }
 
   sendReliable(d: Uint8Array, len: number): void {
@@ -178,6 +233,11 @@ export class SessionTap implements Transport {
   onMessage(cb: (d: Uint8Array, len: number, reliable: boolean) => void): void {
     this.inner.onMessage((d, len, reliable) => {
       this.up.count(d, len);
+      const watch = this.onInputAck;
+      if (watch !== null && !reliable && len > 0 && d[0] === MSG_INPUT) {
+        this.reader.reset(d, len);
+        if (decodeInput(this.reader, this.input)) watch(this.input.lastSnapshotTick);
+      }
       cb(d, len, reliable);
     });
   }
@@ -233,6 +293,11 @@ export interface ClientOptions {
   /** Keeps per-tick states, predictions and a frame log (see `HarnessClient`). Default false. */
   readonly record?: boolean;
   /**
+   * Checks every frame the client's store takes against the server's (`frameDigest`), as a
+   * recording client does, without recording anything else. Default: `record`.
+   */
+  readonly checkFrames?: boolean;
+  /**
    * Runs after each of the client's frames (NET-05 samples its remote interpolation here, as the
    * page does after `ClientSim.frame`).
    */
@@ -257,6 +322,7 @@ export class HarnessClient {
   /** When it joined (harness ms). */
   readonly joinedAt: number;
   readonly record: boolean;
+  readonly checkFrames: boolean;
   /** The server's state of the player after each tick, by tick (recording clients). */
   readonly server = new Map<number, PlayerState>();
   /** Server ticks that repeated a cmd because this client's had not arrived. */
@@ -270,7 +336,10 @@ export class HarnessClient {
   readonly frames = new FrameLog();
   /** Every movement event the client filed (ClientSim.events), across frames, oldest first. */
   readonly events: { tick: number; type: number; value: number; jumped: boolean }[] = [];
-  /** `frameDigest` of the server's world frame after each tick, as this client sees it. */
+  /**
+   * `frameDigest` of the server's world frame after each tick, as this client sees it (recording
+   * or frame-checking clients).
+   */
   readonly serverDigests = new Map<number, number>();
   /** Stored frames checked against `serverDigests`, and the ticks whose frame differed. */
   digestsChecked = 0;
@@ -302,6 +371,7 @@ export class HarnessClient {
     const h = harness;
     const seed = options.seed ?? clientSeed(h.seed, index);
     this.record = options.record ?? false;
+    this.checkFrames = options.checkFrames ?? this.record;
     this.onFrame = options.onFrame ?? null;
     this.joinedAt = h.now;
     this.profile = options.profile ?? NET_PROFILE_LAN;
@@ -421,8 +491,8 @@ export class HarnessClient {
     // Still in the match (a closed session leaves it at the next tick's poll) and spawned.
     if (s === null || this.harness.match.session(s.clientId) !== s || s.spawnTick < 0) return;
     const tick = this.harness.match.serverTick;
-    if (this.record) {
-      this.server.set(tick, copyPlayerState(new PlayerState(), s.player));
+    if (this.record) this.server.set(tick, copyPlayerState(new PlayerState(), s.player));
+    if (this.checkFrames) {
       this.serverDigests.set(tick, frameDigest(this.harness.match.worldFrame, s.clientId));
     }
     // A tick starves at most once, so the counter rising means this tick did.
@@ -446,6 +516,7 @@ export class HarnessClient {
     }
     const c = this.client;
     c.frame();
+    if (this.checkFrames) this.checkStoredFrames();
     if (this.record) this.recordAfterFrame();
     this.onFrame?.(this);
     h.at(h.now + this.frameInterval(), () => this.frame());
@@ -469,7 +540,6 @@ export class HarnessClient {
 
   private recordAfterFrame(): void {
     const c = this.client;
-    this.checkStoredFrames();
     const ev = c.events;
     for (let i = 0; i < ev.count; i++) {
       this.events.push({

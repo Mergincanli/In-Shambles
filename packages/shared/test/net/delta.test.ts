@@ -1,89 +1,24 @@
 import { describe, expect, it } from "vitest";
-import { BitReader, BitWriter } from "../../src/net/bitstream";
+import { BitWriter } from "../../src/net/bitstream";
 import { MAX_UNRELIABLE_BYTES } from "../../src/net/protocol";
-import {
-  decodeSnapshotBody,
-  decodeSnapshotHeader,
-  encodeSnapshot,
-  SnapshotHeader,
-} from "../../src/net/snapshot";
-import { FrameRing, frameDigest, WorldFrame } from "../../src/net/worldFrame";
+import { encodeSnapshot, SnapshotHeader } from "../../src/net/snapshot";
+import { frameDigest, type WorldFrame } from "../../src/net/worldFrame";
 import { Mulberry32 } from "../../src/rng/mulberry32";
 import {
   DELTA_SELF,
-  type DeltaStore,
   runDeltaSequence,
   ServerSide,
+  StoreModel,
   World,
 } from "../helpers/deltaSequence";
 
 // NET-02 (a), the unit (docs/05 §4.3, §14; M3 design §2.3 and §5, D-038), with the driver in
 // `helpers/deltaSequence.ts`. Shared cannot import the client, so the store here is a model of
-// `client/src/net/snapshotStore.ts`'s rules; `client/test/net/net-02-store.test.ts` runs the real
-// store through the same driver, and `snapshotStore.test.ts` pins its rules one by one.
+// `client/src/net/snapshotStore.ts`'s rules (`StoreModel`); `client/test/net/net-02-store.test.ts`
+// runs the real store through the same driver, and `snapshotStore.test.ts` pins its rules one by
+// one.
 
 const TICKS = 20_000;
-const MISSES_BEFORE_FULL = 8;
-
-/** The client's store rules (`SnapshotStore`): baseline lookup, drops, the 8-drop full request. */
-class StoreModel implements DeltaStore {
-  readonly ring = new FrameRing();
-  readonly header = new SnapshotHeader();
-  private spare = new WorldFrame();
-  private readonly reader = new BitReader();
-  newestTick = 0;
-  missRun = 0;
-  wantFull = false;
-  full = 0;
-  delta = 0;
-  stale = 0;
-  drops = 0;
-  bad = 0;
-
-  get ackTick(): number {
-    return this.wantFull ? 0 : this.newestTick;
-  }
-
-  receive(bytes: Uint8Array): WorldFrame | null {
-    const r = this.reader;
-    r.reset(bytes, bytes.length);
-    const h = this.header;
-    if (!decodeSnapshotHeader(r, h)) {
-      this.bad++;
-      return null;
-    }
-    const t = h.serverTick;
-    if (this.ring.tickAt(t) >= t) {
-      this.stale++;
-      return null;
-    }
-    let base: WorldFrame | null = null;
-    if (h.baseBack !== 0) {
-      base = this.ring.get(t - h.baseBack);
-      if (base === null) {
-        this.drops++;
-        if (++this.missRun >= MISSES_BEFORE_FULL) this.wantFull = true;
-        return null;
-      }
-    }
-    const f = this.spare;
-    if (!decodeSnapshotBody(r, h, base, DELTA_SELF, f)) {
-      this.bad++;
-      return null;
-    }
-    this.spare = this.ring.swapIn(t, f);
-    if (t > this.newestTick) this.newestTick = t;
-    this.missRun = 0;
-    if (base === null) {
-      this.full++;
-      this.wantFull = false;
-    } else {
-      this.delta++;
-    }
-    return f;
-  }
-}
-
 describe("NET-02: delta snapshots match the server's frames (docs/05 §4.3, §14; M3 design §2.3)", () => {
   it(`${TICKS} ticks of joins, leaves, reuse, teleports and bursts over lossy links and hostile acks`, () => {
     const store = new StoreModel();
@@ -115,7 +50,8 @@ describe("NET-02: delta snapshots match the server's frames (docs/05 §4.3, §14
   });
 
   it("a server-side miss (a tick never sent) is never a baseline, and ack 0 asks for a full one", () => {
-    // Checks of the server model (`ServerSide`) until the match's own rule lands (increment 9).
+    // Checks of the server model (`ServerSide`); `server/test/match/match.test.ts` runs the same
+    // rules on the match's own code (its NET-02 describe).
     const server = new ServerSide();
     const store = new StoreModel();
     const world = new World(new Mulberry32(7));

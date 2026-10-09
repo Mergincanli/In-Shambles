@@ -70,9 +70,18 @@ import {
   type Transport,
   UserCmd,
   WelcomeMsg,
-  WorldFrame,
+  type WorldFrame,
 } from "@game/shared";
 import { runServerCommand } from "./commands";
+import {
+  ACK_AHEAD,
+  ACK_AHEAD_STRIKES,
+  acceptAck,
+  baselineTick,
+  markSent,
+  markUnsent,
+  WorldHistory,
+} from "./history";
 import type { MatchLog } from "./host";
 import {
   SESSION_ACTIVE,
@@ -133,7 +142,7 @@ export class MatchMetrics {
   /** Strikes, all clients. */
   strikes = 0;
   snapshots = 0;
-  /** Snapshots sent without a baseline (every one until deltas, D-038). */
+  /** Snapshots sent without a baseline: a session's first, any without a usable ack (D-038). */
   fullSnapshots = 0;
   kicks = 0;
   /** CVARS messages sent (broadcasts and resends). */
@@ -168,11 +177,12 @@ function freeClientId(sessions: readonly Session[], cap: number): number {
  *    and tick = T (starved); sanitize; pmove, whose movement events join the slot's event history
  *    (the count and the two newest, as entities carry them). A player spawned this tick is not
  *    simulated: its spawn state is its state at T.
- * 4. Capture the world frame of T: every active player's state, serial, team, teleport counter
- *    and event history.
- * 5. Per active client: a full SNAPSHOT of T (protocol v2, D-033): its own state as the local block,
- *    every other active player as an entity record, inputBufferHealth = newest cmd tick received −
- *    T (clamped to i8), flagged STARVED.
+ * 4. Capture the world frame of T into the 64-tick world history every client's baseline comes
+ *    from: every active player's state, serial, team, teleport counter and event history.
+ * 5. Per active client: the SNAPSHOT of T (protocol v2, D-033, D-038): a delta against the frame of
+ *    the newest valid tick the client acked (`lastSnapshotTick` of its INPUTs), or a full one when
+ *    none is usable; its own state as the local block, every other active player as an entity
+ *    record, inputBufferHealth = newest cmd tick received − T (clamped to i8), flagged STARVED.
  * 6. Metrics.
  *
  * After warm-up a tick allocates nothing: messages decode into and encode from preallocated
@@ -193,8 +203,11 @@ export class Match {
   readonly spawns: SpawnRotation;
   /** Players admitted: `sv_maxClients` after `effectiveMaxClients`. */
   readonly maxClients: number;
-  /** Every active player at the last tick simulated, as snapshots are encoded from it (D-034). */
-  readonly worldFrame = new WorldFrame();
+  /**
+   * The world frames of the last 64 ticks (D-038): each snapshot is encoded from the newest, as a
+   * delta against the one its client acked.
+   */
+  readonly history = new WorldHistory();
 
   private readonly log: MatchLog;
   private readonly sessions: Session[] = [];
@@ -265,6 +278,14 @@ export class Match {
     if (!this.encodeWelcomeFor(0)) {
       throw new Error(`map ${cmap.name} or build ${this.buildHash} does not fit WELCOME`);
     }
+  }
+
+  /**
+   * Every active player at the last tick simulated, as snapshots are encoded from it (D-034); an
+   * empty frame before the first tick.
+   */
+  get worldFrame(): WorldFrame {
+    return this.history.frameFor(this.currentTick);
   }
 
   /** The last tick simulated (and snapshotted); 0 before the first `tick()`. */
@@ -377,7 +398,7 @@ export class Match {
     // Each message has its channel (docs/05 §3.3); one on the other channel is dropped.
     if (type === MSG_INPUT) {
       if (reliable || !decodeInput(r, this.input)) this.strike(s);
-      else if (s.state === SESSION_ACTIVE) this.queueInput(s);
+      else if (s.state === SESSION_ACTIVE) this.onInput(s);
     } else if (type === MSG_PING) {
       if (reliable || !decodePing(r, this.ping)) this.strike(s);
       else if (s.state !== SESSION_CONNECTING) this.sendPong(s);
@@ -396,8 +417,13 @@ export class Match {
     }
   }
 
-  private queueInput(s: Session): void {
+  /** INPUT: its cmds into the queue, its ack to the session's baseline (D-038). */
+  private onInput(s: Session): void {
     const m = this.input;
+    if (acceptAck(s, m.lastSnapshotTick, this.currentTick + 1, this.history) === ACK_AHEAD) {
+      s.stats.strikes += ACK_AHEAD_STRIKES;
+      this.metrics.strikes += ACK_AHEAD_STRIKES;
+    }
     const q = s.queue;
     for (let i = 0; i < m.count; i++) q.push(m.cmds[i] as UserCmd);
   }
@@ -609,11 +635,11 @@ export class Match {
   }
 
   /**
-   * The world frame of tick `t`: every active player (stamp t), its serial, team, teleport counter
-   * and event history.
+   * The world frame of tick `t` into the history: every active player (stamp t), its serial, team,
+   * teleport counter and event history.
    */
   private capture(t: number): void {
-    const f = this.worldFrame;
+    const f = this.history.frameFor(t);
     f.clear();
     const sessions = this.sessions;
     for (let i = 0; i < sessions.length; i++) {
@@ -632,26 +658,40 @@ export class Match {
       f.evKind[e + 1] = this.evKinds[e + 1] as number;
       f.evValue[e + 1] = this.evValues[e + 1] as number;
     }
+    this.history.stored(t);
   }
 
+  /**
+   * The snapshot of `t` for `s` (M3 design §2.3, D-038): a delta against the world frame of the
+   * client's acked tick while it is usable, else a full one. The tick counts as sent (ackable, a
+   * future baseline) only once the encode succeeded.
+   */
   private sendSnapshot(s: Session, t: number): void {
+    const history = this.history;
+    const b = baselineTick(s, t, history);
     const h = this.snapHeader;
     h.serverTick = t;
-    h.baseBack = 0;
+    h.baseBack = b === 0 ? 0 : t - b;
     h.flags = s.snapFlags;
     h.cvarHash = this.blockHash16;
     h.inputBufferHealth = Math.max(-128, Math.min(127, s.queue.newestTick - t));
     const w = this.writer;
     w.reset();
-    // Up to SNAP_FIT_MAX_PLAYERS every full snapshot fits 1100 B (D-034), so a failure is a bug.
-    if (!encodeSnapshot(w, h, this.worldFrame, null, s.clientId)) {
+    // Up to SNAP_FIT_MAX_PLAYERS every snapshot fits 1100 B (D-034), and a baseline is a frame
+    // this client was sent, so it holds the client: a failure is a bug.
+    if (!encodeSnapshot(w, h, history.frameFor(t), b === 0 ? null : history.get(b), s.clientId)) {
+      markUnsent(s, t);
       DEV_ASSERT(false, "SNAPSHOT did not encode", s.clientId);
       return;
     }
     s.transport.sendUnreliable(w.bytes, w.byteLength);
+    markSent(s, t);
     s.stats.snapshots++;
     this.metrics.snapshots++;
-    if (h.baseBack === 0) this.metrics.fullSnapshots++;
+    if (b === 0) {
+      s.stats.fullSnapshots++;
+      this.metrics.fullSnapshots++;
+    }
   }
 
   private sendPong(s: Session): void {

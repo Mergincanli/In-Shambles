@@ -40,7 +40,11 @@ import { HandSnapshot } from "./snapshots";
 // visible size and its snaps, the hard resync after a long stall, the CVARS re-request, the
 // per-frame tick cap and the lead cap while no snapshot arrives.
 
-/** Lets a test watch and rewrite what the client sends and receives. */
+/**
+ * Lets a test watch and rewrite what the client sends and receives. Its INPUTs ack tick 0, so the
+ * server keeps sending full snapshots (D-038), which a test can rewrite by hand without the
+ * client's stored baselines drifting from the server's.
+ */
 class TapTransport implements Transport {
   /** Returns the bytes to deliver (the same or rewritten), or null to drop the message. */
   receive: (d: Uint8Array, len: number, reliable: boolean) => Uint8Array | null = (d) => d;
@@ -51,6 +55,8 @@ class TapTransport implements Transport {
   inject: (d: Uint8Array) => void = () => {};
   constructor(private readonly inner: Transport) {}
   sendUnreliable(d: Uint8Array, len: number): void {
+    // INPUT: type u8, packetSeq u16, then lastSnapshotTick u32 in bytes 3–6 (docs/05 §3.6).
+    if (len >= 7 && d[0] === MSG_INPUT) d.fill(0, 3, 7);
     this.send(d, len, false);
     if (this.uplink(d, len, false)) this.inner.sendUnreliable(d, len);
   }

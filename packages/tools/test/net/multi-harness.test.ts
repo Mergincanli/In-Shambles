@@ -200,10 +200,15 @@ describe("MultiHarness: clients", () => {
     if (s === null) return;
     const down = c.tap.down;
     const up = c.tap.up;
-    // Every snapshot the match sent: alone in the match, a full v2 one is 37 B (292 bits).
+    // Every snapshot the match sent: alone in the match, a full v2 one is 37 B (292 bits); once
+    // the client's acks arrive the rest are deltas (D-038), 13 B (101 bits) while it stands still.
     expect(down.messagesByType[MSG_SNAPSHOT]).toBe(s.stats.snapshots);
-    expect(down.bytesByType[MSG_SNAPSHOT]).toBe(37 * s.stats.snapshots);
-    expect(down.maxByType[MSG_SNAPSHOT]).toBe(37);
+    expect(c.tap.fullSnapshots).toBe(s.stats.fullSnapshots);
+    expect(c.tap.fullSnapshotBytes).toBe(37 * c.tap.fullSnapshots);
+    expect(c.tap.maxFullSnapshot).toBe(37);
+    expect(c.tap.fullSnapshots).toBeLessThan(5);
+    expect(down.maxByType[MSG_SNAPSHOT]).toBeLessThanOrEqual(37);
+    expect(down.bytesByType[MSG_SNAPSHOT]).toBeLessThan(20 * s.stats.snapshots);
     expect(down.messagesByType[MSG_WELCOME]).toBe(1);
     // The totals are the server end's own counters.
     const end = c.tap.inner.stats();

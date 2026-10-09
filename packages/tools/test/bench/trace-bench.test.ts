@@ -290,13 +290,17 @@ describe("trace bench verdict", () => {
 describe("pnpm bench entry", () => {
   // One end-to-end smoke of the whole CLI with tiny counts (D-032). Each part's own run and the
   // refused counts are the long tier's (`packages/tools/long/bench-cli.long.ts`).
-  it("runs the trace, pmove and codec parts in order with tiny counts, and exits 0", () => {
+  it("runs the trace, pmove, codec, interp and snapshot build parts in order with tiny counts, and exits 0", () => {
     const out = spawnSync(
       process.execPath,
       [
         "--import",
         "tsx",
         "bench/run.ts",
+        "--build-ticks",
+        "20",
+        "--build-warmup",
+        "0",
         "--calls",
         "1000",
         "--warmup",
@@ -324,5 +328,7 @@ describe("pnpm bench entry", () => {
     expect(out.stdout).toMatch(/GCs during timed loops: \d+/);
     expect(out.stdout).toMatch(/failed round trips: 0/);
     expect(out.stdout).toMatch(/clean stream: [\d.]+ ns per frame \(estimate 20000 ns, reported\)/);
+    expect(out.stdout).toMatch(/per client \(\d+ B, [\d.]+% deltas\): [\d.]+ ns, budget 50000 ns/);
+    expect(out.stdout).toMatch(/failed encodes: 0/);
   }, 30_000);
 });

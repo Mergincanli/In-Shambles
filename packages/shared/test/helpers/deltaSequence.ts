@@ -1,6 +1,8 @@
-import { BitWriter } from "../../src/net/bitstream";
+import { BitReader, BitWriter } from "../../src/net/bitstream";
 import { MAX_UNRELIABLE_BYTES, SNAPSHOT_HISTORY } from "../../src/net/protocol";
 import {
+  decodeSnapshotBody,
+  decodeSnapshotHeader,
   ENTITY_NEW_BITS,
   encodeSnapshot,
   entityRecordBits,
@@ -26,9 +28,12 @@ import { intIn, mutateEntity, mutateLocal, randomEntity } from "./netMessages";
 // store, over impaired links both ways, and every stored frame must be the frame the server
 // encoded. The store is a parameter: `shared/test/net/delta.test.ts` runs a model of the client's
 // rules (shared cannot import the client), `client/test/net/net-02-store.test.ts` runs the real
-// `SnapshotStore` through the same driver. The server's rule (`ServerSide`: ack = the newest valid
-// acked tick; ahead, stale or unsent acks ignored; 0 asks for a full snapshot) is the design's and
-// is a model until the match's own lands in increment 9. The players stay below
+// `SnapshotStore` through the same driver. The server's rule is a parameter too: `ServerSide` (ack =
+// the newest valid acked tick; ahead acks ignored and struck, stale or unsent ones ignored; 0 asks
+// for a full snapshot) models the design's rule here, and
+// `server/test/match/match.test.ts` ("NET-02: the match's ack validation …") runs the match's own
+// (`match/history.ts`) through
+// the same sequence and checks that both make the same choices. The players stay below
 // SNAP_FIT_MAX_PLAYERS by id, so every snapshot fits 1100 B without the D-046 scheduler.
 
 /** The receiver's id. */
@@ -176,11 +181,29 @@ class Link {
   }
 }
 
+/** The server's side of one client, as the driver sees it (M3 design §2.3, D-038). */
+export interface DeltaServer {
+  /** The world frames by tick, the baselines' source. */
+  readonly history: FrameRing;
+  readonly ackTick: number;
+  readonly newestSent: number;
+  /** Strikes the acks earned (2 per ack past the newest snapshot sent). */
+  readonly strikes: number;
+  /** An INPUT's ack, applied during tick `t`. */
+  onAck(ack: number, t: number): void;
+  /** The baseline tick for a snapshot of `t`, or 0 for a full one. */
+  baseline(t: number): number;
+  sent(t: number): void;
+  /** Forgets that `t` was sent (a server-side encode failure: never a baseline). */
+  unsend(t: number): void;
+}
+
 /**
  * The server's side of one client (M3 design §2.3): its sent ring and the acked baseline. A model
- * of the rule increment 9 puts in the match; until then, assertions on it check the model.
+ * of the match's rule (`server/src/match/history.ts`), which the server's NET-02 test checks
+ * against it.
  */
-export class ServerSide {
+export class ServerSide implements DeltaServer {
   readonly history = new FrameRing();
   private readonly sentTicks = new Int32Array(SNAPSHOT_HISTORY);
   ackTick = 0;
@@ -209,12 +232,15 @@ export class ServerSide {
 
   sent(t: number): void {
     this.sentTicks[t & RING] = t;
-    this.newestSent = t;
+    if (t > this.newestSent) this.newestSent = t;
   }
 
-  /** Forgets that `t` was sent (a server-side encode failure: never a baseline). */
+  /**
+   * Forgets that `t` was sent (a server-side encode failure: never a baseline). The slot is
+   * cleared whatever it held, so tick t − 64 is not named by it either.
+   */
   unsend(t: number): void {
-    if (this.sentTicks[t & RING] === t) this.sentTicks[t & RING] = 0;
+    this.sentTicks[t & RING] = 0;
   }
 }
 
@@ -227,6 +253,71 @@ export interface DeltaStore {
   readonly ackTick: number;
   /** Stores the SNAPSHOT in `bytes` as receiver DELTA_SELF; the stored frame, or null. */
   receive(bytes: Uint8Array): WorldFrame | null;
+}
+
+/**
+ * Missed baselines in a row before the store asks for a full snapshot (the client's
+ * BASELINE_MISSES_BEFORE_FULL, design value; shared cannot import it).
+ */
+const BASELINE_MISSES_BEFORE_FULL_MODEL = 8;
+
+/** The client's store rules (`SnapshotStore`): baseline lookup, drops, the 8-drop full request. */
+export class StoreModel implements DeltaStore {
+  readonly ring = new FrameRing();
+  readonly header = new SnapshotHeader();
+  private spare = new WorldFrame();
+  private readonly reader = new BitReader();
+  newestTick = 0;
+  missRun = 0;
+  wantFull = false;
+  full = 0;
+  delta = 0;
+  stale = 0;
+  drops = 0;
+  bad = 0;
+
+  get ackTick(): number {
+    return this.wantFull ? 0 : this.newestTick;
+  }
+
+  receive(bytes: Uint8Array): WorldFrame | null {
+    const r = this.reader;
+    r.reset(bytes, bytes.length);
+    const h = this.header;
+    if (!decodeSnapshotHeader(r, h)) {
+      this.bad++;
+      return null;
+    }
+    const t = h.serverTick;
+    if (this.ring.tickAt(t) >= t) {
+      this.stale++;
+      return null;
+    }
+    let base: WorldFrame | null = null;
+    if (h.baseBack !== 0) {
+      base = this.ring.get(t - h.baseBack);
+      if (base === null) {
+        this.drops++;
+        if (++this.missRun >= BASELINE_MISSES_BEFORE_FULL_MODEL) this.wantFull = true;
+        return null;
+      }
+    }
+    const f = this.spare;
+    if (!decodeSnapshotBody(r, h, base, DELTA_SELF, f)) {
+      this.bad++;
+      return null;
+    }
+    this.spare = this.ring.swapIn(t, f);
+    if (t > this.newestTick) this.newestTick = t;
+    this.missRun = 0;
+    if (base === null) {
+      this.full++;
+      this.wantFull = false;
+    } else {
+      this.delta++;
+    }
+    return f;
+  }
 }
 
 /** What a run did. */
@@ -248,16 +339,23 @@ export interface DeltaRun {
   /** Fulls the server sent while it held an ack (the ack aged out of the window). */
   fullsAfterValidAck: number;
   hostile: number;
+  /** Ticks whose encode the driver refused: nothing went out and the server unsent them. */
+  unsent: number;
+  /** A hash of every snapshot's baseBack, in order: two server rules that agree give the same. */
+  baseBackHash: number;
 }
 
 /**
  * Runs `ticks` ticks of the seeded world through the server's encoder into `store`. The sequence
  * is the same for every store, so two stores that follow the same rules see the same packets.
  */
-export function runDeltaSequence(store: DeltaStore, ticks: number): DeltaRun {
+export function runDeltaSequence(
+  store: DeltaStore,
+  ticks: number,
+  server: DeltaServer = new ServerSide(),
+): DeltaRun {
   const rng = new Mulberry32(0xde17a);
   const world = new World(rng);
-  const server = new ServerSide();
   const down = new Link(new Mulberry32(0xd0));
   const up = new Link(new Mulberry32(0x0b));
   const w = new BitWriter(MAX_UNRELIABLE_BYTES);
@@ -275,6 +373,8 @@ export function runDeltaSequence(store: DeltaStore, ticks: number): DeltaRun {
     fullRequests: 0,
     fullsAfterValidAck: 0,
     hostile: 0,
+    unsent: 0,
+    baseBackHash: 0,
   };
   // Mismatches are collected and asserted once: an expect per tick dominated the run time.
   const failures = run.failures;
@@ -304,9 +404,12 @@ export function runDeltaSequence(store: DeltaStore, ticks: number): DeltaRun {
     world.capture(cur, t);
     server.history.store(t);
     // The server's snapshot: a delta against the acked baseline whenever it is valid, so baseBack
-    // is T − ackTick by construction here (increment 9 asserts it on the match's own rule).
+    // is T − ackTick (NET-02).
     const baseTick = server.baseline(t);
     if (server.ackTick > 0 && baseTick === 0) run.fullsAfterValidAck++;
+    if (baseTick !== 0 && baseTick !== server.ackTick) {
+      failures.push(`tick ${t}: baseBack ${t - baseTick} is not T − ackTick ${t - server.ackTick}`);
+    }
     const base = baseTick === 0 ? null : server.history.get(baseTick);
     hdr.serverTick = t;
     hdr.baseBack = baseTick === 0 ? 0 : t - baseTick;
@@ -315,8 +418,17 @@ export function runDeltaSequence(store: DeltaStore, ticks: number): DeltaRun {
     hdr.inputBufferHealth = 2;
     w.reset();
     if (!encodeSnapshot(w, hdr, cur, base, DELTA_SELF)) failures.push(`tick ${t}: did not encode`);
-    server.sent(t);
-    if (base !== null) {
+    run.baseBackHash = (Math.imul(run.baseBackHash, 31) + hdr.baseBack) | 0;
+    // Now and then the encode counts as failed (the match's commit-only-on-success rule, M3 design
+    // §2.3): nothing goes out and the tick is unsent, so it is never acked or a baseline.
+    const refused = t % 1000 === 333;
+    if (refused) {
+      server.unsend(t);
+      run.unsent++;
+    } else {
+      server.sent(t);
+    }
+    if (base !== null && !refused) {
       run.deltas++;
       run.deltaBytes += w.byteLength;
       run.fullEquivalentBytes +=
@@ -333,12 +445,14 @@ export function runDeltaSequence(store: DeltaStore, ticks: number): DeltaRun {
           );
       }
     }
-    down.send(t, {
-      bytes: w.bytes.slice(0, w.byteLength),
-      tick: t,
-      digest: frameDigest(cur, DELTA_SELF),
-      ack: 0,
-    });
+    if (!refused) {
+      down.send(t, {
+        bytes: w.bytes.slice(0, w.byteLength),
+        tick: t,
+        digest: frameDigest(cur, DELTA_SELF),
+        ack: 0,
+      });
+    }
     // Forced misses, alternating: the client loses its newest frame, or all of them while it
     // still acks the newest tick, so deltas miss their baseline until a newer one is stored or 8
     // misses in a row ask for a full snapshot.
