@@ -465,8 +465,10 @@ describe("ClientSim recovery paths", () => {
       h.run(10);
       maxInFlight = Math.max(maxInFlight, sim.inFlight());
     }
-    // The loopback end under it drops the older ~1500 snapshots before they reach the simulator.
-    expect(maxInFlight).toBeLessThanOrEqual(MAX_QUEUED_UNRELIABLE + 8);
+    // The loopback end under it drops the older ~1500 snapshots before they reach the simulator;
+    // on top of those, the client's INPUTs on the way out (since MAX_TICKS_PER_FRAME 8, D-039, up
+    // to 10 around the frame that ends the stall).
+    expect(maxInFlight).toBeLessThanOrEqual(MAX_QUEUED_UNRELIABLE + MAX_TICKS_PER_FRAME + 8);
     expect(h.totals().hardResyncs).toBe(1);
     const before = h.totals();
     h.run(2000);
@@ -541,7 +543,8 @@ describe("ClientSim recovery paths", () => {
     // lead.
     serverStalled = false;
     const before = h.totals();
-    // Holds of at most 30 ticks, each after 1 s above the band: about 8 s back from a 64-tick lead.
+    // Holds of at most 30 ticks, each once a full window sits target + 6 or more above (D-039),
+    // then −3% for the last two ticks: well within 8 s back from a 64-tick lead.
     h.run(8000);
     const after = h.totals();
     expect(after.hardResyncs).toBe(0);

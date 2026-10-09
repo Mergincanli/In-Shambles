@@ -47,6 +47,7 @@ import {
   STAT_CORRECTION_DIST,
   STAT_CORRECTION_MAX,
   STAT_CORRECTIONS,
+  STAT_DILATION,
   STAT_HARD_RESYNCS,
   STAT_PARAM_RESYNCS,
   STAT_SNAPSHOTS,
@@ -57,11 +58,12 @@ import {
 } from "./stats";
 
 /**
- * Prediction ticks one frame may run (docs/05 §8.1's catch-up cap, on the client; design). The
- * rest stays owed to later frames: the client's tick follows the server's clock, so time it drops
- * is lead lost for good.
+ * Prediction ticks one frame may run (docs/05 §8.1's catch-up cap, on the client; design,
+ * measured: D-039 raised it from 5, which a host at 8–12 fps could not keep up with). The rest
+ * stays owed to later frames: the client's tick follows the server's clock, so time it drops is
+ * lead lost for good.
  */
-export const MAX_TICKS_PER_FRAME = 5;
+export const MAX_TICKS_PER_FRAME = 8;
 /**
  * The clock never leads a snapshot by more than this many ticks (half the rings, and the server's
  * input queue horizon; design). The prediction also stops this far past the newest snapshot, so a
@@ -69,13 +71,14 @@ export const MAX_TICKS_PER_FRAME = 5;
  */
 export const MAX_LEAD_TICKS = 64;
 /**
- * A frame gap longer than this is a stall (a GC, a tab switch), not the frame rhythm (design):
- * the snapshots of the ticks it delayed are kept from the clock's buffer watch, since no buffer
- * the adaptive cap allows would cover a long one and growing for a one-off stall only adds
- * latency. Frames past 83 ms (MAX_TICKS_PER_FRAME ticks) cannot be sustained anyway, so 100 ms
- * leaves room for jitter at 12 fps and still counts a 120 ms GC pause as a stall.
+ * A frame gap longer than this is a stall (a GC, a tab switch), not the frame rhythm (design,
+ * measured: D-039 raised it from 100 ms with the tick cap): the snapshots of the ticks it delayed
+ * are kept from the clock's buffer watch, since no buffer the adaptive cap allows would cover a
+ * long one and growing for a one-off stall only adds latency. Frames past 133 ms
+ * (MAX_TICKS_PER_FRAME ticks) cannot be sustained anyway, so 150 ms leaves room for jitter at
+ * 8 fps and still counts a 200 ms GC pause as a stall.
  */
-export const HITCH_FRAME_MS = 100;
+export const HITCH_FRAME_MS = 150;
 /** A snapshot cvar hash that stays different this long asks the server for the block (design). */
 export const CVAR_RESEND_AFTER_MS = 1000;
 
@@ -185,6 +188,11 @@ export interface ClientSimOptions {
   readonly log?: ClientLog;
   /** The session ended (kicked, refused or closed); the page shows `reason` to the player. */
   readonly onClosed?: (reason: string) => void;
+  /**
+   * False keeps the clock's dilation at 0 (its steps stay): NET-07's control. Tests only; true by
+   * default.
+   */
+  readonly dilation?: boolean;
 }
 
 function ignoreLog(): void {}
@@ -209,7 +217,8 @@ const PATH_ACC = 5;
  *    position stays where it was and then glides (snapped instead past `cl_teleportDist` or on a
  *    teleport).
  * 2. A clock step the snapshots asked for: fast-forward k ticks now, or hold k tick periods.
- * 3. The tick accumulator: per tick, sample a cmd, predict it and send INPUT with the last four
+ * 3. The tick accumulator, which takes the frame's time × (1 + the clock's dilation δ, ±3%;
+ *    D-039) before the poll: per tick, sample a cmd, predict it and send INPUT with the last four
  *    cmds (at most MAX_TICKS_PER_FRAME ticks; the rest is owed to the next frames). A hard resync
  *    re-anchors once per poll, after the poll, from the newest snapshot.
  * 4. Pings and READY (the connection's handshake).
@@ -303,7 +312,7 @@ export class ClientSim {
     this.clockFn = options.clock;
     this.log = options.log ?? ignoreLog;
     this.input = options.input ?? new NeutralInput();
-    this.clock = new ClientClock(this.now);
+    this.clock = new ClientClock(this.now, { dilation: options.dilation ?? true });
     this.stats = new NetStats(this.now);
     this.offset = new RenderOffset(this.now);
     this.predictor = new Predictor(this.currentWorld);
@@ -395,6 +404,15 @@ export class ClientSim {
     return this.connection.state === CONN_ACTIVE;
   }
 
+  /**
+   * The predicted path's time in ticks: latestTick − 1 + the accumulator in ticks, unclamped (the
+   * time `pathShift` measures jumps of). For tests and tools; it rises by (1 + δ) per tick of
+   * real time between steps.
+   */
+  get pathTicks(): number {
+    return this.predictor.latestTick - 1 + (this.t[ACC] as number) / TICK_MS;
+  }
+
   /** The accumulator's fraction of a tick, 0..1: the interpolation weight of the newest tick. */
   get alpha(): number {
     return Math.min(1, Math.max(0, (this.t[ACC] as number) / TICK_MS));
@@ -419,7 +437,12 @@ export class ClientSim {
     // the snapshot, as of now) consumes it.
     this.hitch = (t[DT] as number) > HITCH_FRAME_MS;
     if (wasActive) {
-      t[ACC] = (t[ACC] as number) + (t[DT] as number);
+      // Dilation (D-039): the prediction runs at (1 + δ) × real time. What it adds or takes away
+      // goes into the stats in ticks, except a stall's: most of a stall's time is dropped or
+      // re-anchored away, and its gain in one bucket would read as more than ±3% in the netgraph.
+      const gain = (t[DT] as number) * (this.clock.dil[0] as number);
+      t[ACC] = (t[ACC] as number) + (t[DT] as number) + gain;
+      if (!this.hitch) this.stats.add(STAT_DILATION, gain / TICK_MS);
       if (this.hitch) {
         // A stall: the ticks it owes go out in the next frames; their snapshots measure it alone.
         this.clock.skipHealthThrough(

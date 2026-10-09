@@ -24,7 +24,8 @@ interface ChildResult {
   attempts: string[];
   outcomes: number[];
   /**
-   * wsTransport: the client end's outcomes; predict: [0] teleports; interp: [0] held; deltaCodec:
+   * wsTransport: the client end's outcomes; predict: [0] teleports, [1] the fewer of the frames
+   * run sped up and slowed down (D-039), [2] holds; interp: [0] held; deltaCodec:
    * [0] full snapshots stored, [1] 64-slot snapshots stored as sent, [2] those that were not;
    * match: [0] deltas stored; matchMulti: [0] stored frames that differed from the server's;
    * snapshotSchedule: [0] failed builds, [1] builds past staleness 2, [2] the largest snapshot
@@ -214,7 +215,7 @@ describe.concurrent("per-tick paths under native ES modules", () => {
     expect(r.clean, r.attempts.join("; ")).toBe(true);
   }, 30_000);
 
-  it("client prediction allocates nothing: frames, predict, reconcile with re-simulation, clock steps (adaptive buffer included), hard resyncs, render offset, respawn teleports (D-027, D-028, D-035)", async ({
+  it("client prediction allocates nothing: frames, predict, reconcile with re-simulation, clock steps (adaptive buffer included), dilation both ways, hard resyncs, render offset, respawn teleports (D-027, D-028, D-035, D-039)", async ({
     expect,
   }) => {
     const r = await runChild("predict");
@@ -223,6 +224,9 @@ describe.concurrent("per-tick paths under native ES modules", () => {
     // (respawns, D-035).
     for (const n of r.outcomes) expect(n).toBeGreaterThan(0);
     expect(r.extra[0]).toBeGreaterThan(0);
+    // The scaled accumulator ran both ways, and the 10-tick delay drop still holds.
+    expect(r.extra[1]).toBeGreaterThan(0);
+    expect(r.extra[2]).toBeGreaterThan(0);
     expect(r.clean, r.attempts.join("; ")).toBe(true);
   }, 30_000);
 

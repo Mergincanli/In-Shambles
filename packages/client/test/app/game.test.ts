@@ -262,6 +262,7 @@ describe("game frame loop (M2 design §2)", () => {
     expect(Number(status.maxFrameMs)).toBe(7);
     expect(status.longFrames).toBe("0");
     expect(status.lateResyncs).toBe("0");
+    expect(status.resyncLog).toBe("");
     // A gap inside the 2-tick input buffer (33 ms) is not long and resyncs nothing.
     const resyncs = client.stats.totals[STAT_HARD_RESYNCS] as number;
     hitch(15);
@@ -277,6 +278,12 @@ describe("game frame loop (M2 design §2)", () => {
     expect(game.lateResyncs).toBe(1);
     expect(status.longFrames).toBe("1");
     expect(status.lateResyncs).toBe("1");
+    // The resync's timing: the 300 ms frame, the server tick it found past the prediction.
+    expect(status.resyncLog).toMatch(
+      /^at \d+ dt 3\d\d snapGap \d+ predicted \d+ server \d+ lead \d+ rtt \d+ low -?\d+$/,
+    );
+    const [, predicted, server] = /predicted (\d+) server (\d+)/.exec(status.resyncLog ?? "") ?? [];
+    expect(Number(server)).toBeGreaterThan(Number(predicted));
     expect(Number(status.maxFrameMs)).toBeGreaterThanOrEqual(300);
     expect(Number(status.maxFrameMs)).toBeLessThan(315);
     // The longest gap is per report: the next one is back to the frame period.

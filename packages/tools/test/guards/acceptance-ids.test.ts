@@ -61,6 +61,7 @@ const MILESTONES: Readonly<Record<string, Milestone>> = {
       "NET-02": "long",
       "NET-04": "long",
       "NET-05": "long",
+      "NET-07": "long",
       "NET-08": "long",
       "NET-12": "long",
       "NET-09": "load",
@@ -76,9 +77,10 @@ const MILESTONES: Readonly<Record<string, Milestone>> = {
     // D-032's amendment); NET-09's fast in-process proxy landed in increment 6, its load leg
     // comes in increment 18; NET-05's fast matrix and its long file (the rest of the matrix, 16
     // clients) landed in increment 7, its 64-player legs (with a late joiner) joined the long
-    // file in increment 10, as did NET-08's 32-player report (b), fast and long.
+    // file in increment 10, as did NET-08's 32-player report (b), fast and long. NET-07 landed in
+    // increment 11: seed 1 at 144 Hz and the control fast, the other seeds, the hitch frames and
+    // the rest of the control long (D-032's placement rule).
     pending: {
-      "NET-07": "increment 11",
       "NET-09 load": "increment 18",
       "NET-10": "increment 13",
     },

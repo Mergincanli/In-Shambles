@@ -27,8 +27,9 @@ import { expectSixteen, runSixteen } from "../test/net/sixteenClients";
 // same checks (`reconciliation.ts`), seeds and names. That file's header says what they check.
 // - wan-100-loss1 and wan-150-loss2 on NetSim seeds 5 and 7 (the fast tier runs seed 1), which
 //   have some corrections, so the smoothing path is exercised;
-// - browser-like frame timing: every frame model on wan-50, wan-100-loss1 and wan-150-loss2 with
-//   seeds 1 and 2, but the fast tier's one (wan-100-loss1, browser hitches, seed 1);
+// - browser-like frame timing: every frame model (the 83–125 ms crawling host since D-039's
+//   cap/hitch trial) on wan-50, wan-100-loss1 and wan-150-loss2 with seeds 1 and 2, but the fast
+//   tier's one (wan-100-loss1, browser hitches, seed 1);
 // - the onset runs: 144 Hz turning into browser hitches or a slow host 15 s into the circuit, lan
 //   included;
 // - lan with 60 fps hitches, where gaps past the lead resync until the lead has learned them.
@@ -72,8 +73,12 @@ describe("NET-04 (M2 basic): browser-like frame timing", () => {
     // Until the third dip the bursts starve (a few corrections, up to about 20 u: the learning
     // cost, as with the mean-only clock but once), then the clock steps within LEARN_MS of the
     // onset: one fast-forward of 2–5 ticks, a forward glide of up to about 57 u at strafe speed
-    // (on lan a resync or two, the first one alone left alone, D-028).
-    expect(onset.firstStepMs - ONSET_MS).toBeLessThan(LEARN_MS);
+    // (on lan a resync or two, the first one alone left alone, D-028). With dilation (D-039) the
+    // speed-up on the first dips can cover the rhythm without any step (wan-100-loss1 with
+    // hitches, seed 1).
+    if (onset.firstStepMs !== Number.POSITIVE_INFINITY) {
+      expect(onset.firstStepMs - ONSET_MS).toBeLessThan(LEARN_MS);
+    }
     expect(onset.glide).toBeLessThan(h.client.settings.teleportDist);
     // That glide (up to about 57 u over cl_correctionSmoothMs) speeds the drawn player up past
     // NET-04's per-frame allowance for those frames: measured up to 1.61 of it (lan, a resync).

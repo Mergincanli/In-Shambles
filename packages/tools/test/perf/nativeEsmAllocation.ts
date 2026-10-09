@@ -1658,7 +1658,8 @@ function runMatchMulti(n: number): void {
 //   past the 4× redundancy and the client corrects (snapshots compared, states adopted, ticks
 //   re-simulated, corrections logged and moved into the render offset);
 // - every 1200 ticks the INPUTs' delay switches between 0 and 10 ticks (a pooled ring), so the
-//   buffer health leaves its band and the clock fast-forwards and holds;
+//   buffer health leaves its band and the clock fast-forwards and holds (10 ticks: past the hold
+//   threshold of D-039), and dilates in between, both ways;
 // - every 2048 ticks the client skips its frames for 8 ticks, a hitch longer than the lead, so a
 //   backlog of snapshots overtakes the prediction and it hard-resyncs and re-anchors;
 // - every 4096 ticks, for 1024 ticks, the client runs a frame only every 5th server tick (83 ms,
@@ -1755,6 +1756,9 @@ class PredictRig {
   lastFrameTick = -1;
   /** Clock steps taken during the slow phases. */
   slowSteps = 0;
+  /** Frames run with the clock's dilation on (D-039), speeding up and slowing down. */
+  fastFrames = 0;
+  slowFrames = 0;
 
   constructor() {
     const course = loadCourse("movement_lab");
@@ -1826,12 +1830,17 @@ function runPredict(n: number): void {
     const steps = client.clock.adjustments;
     client.frame();
     if (slow) rig.slowSteps += client.clock.adjustments - steps;
+    const dil = client.clock.dil[0] as number;
+    if (dil > 0) rig.fastFrames++;
+    else if (dil < 0) rig.slowFrames++;
     client.renderOrigin(rig.out);
   }
   outcomes[0] = totals[STAT_CORRECTIONS] as number;
   outcomes[1] = Math.min(totals[STAT_CLOCK_ADJUSTMENTS] as number, rig.slowSteps);
   outcomes[2] = totals[STAT_HARD_RESYNCS] as number;
   extra[0] = totals[STAT_TELEPORTS] as number;
+  extra[1] = Math.min(rig.fastFrames, rig.slowFrames);
+  extra[2] = client.clock.holds;
 }
 
 // The Node server's per-tick wrapper (D-029): TimedPass over two matches, both histograms and the

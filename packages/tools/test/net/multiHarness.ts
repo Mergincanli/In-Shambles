@@ -92,6 +92,11 @@ export const FRAMES_SLOW_HOST: FrameModel = (rng) => 33 + rng.nextFloat() * 50;
 /** A slower host: every frame 50–83 ms (12–20 fps), like SwiftShader in the e2e. */
 export const FRAMES_SLOWER_HOST: FrameModel = (rng) => 50 + rng.nextFloat() * 33;
 /**
+ * A crawling host: every frame 83–125 ms (8–12 fps), uniformly, past the 83 ms a frame's tick cap
+ * covers at MAX_TICKS_PER_FRAME 5 (M3 design §2.7's cap/hitch trial, D-039).
+ */
+export const FRAMES_CRAWLING_HOST: FrameModel = (rng) => 83 + rng.nextFloat() * 42;
+/**
  * `before` for the first `ms` of frames, then `after`: frames that turn bad mid-play. One per
  * client (it keeps the time it has drawn).
  */
@@ -125,9 +130,18 @@ export class FrameLog {
   readonly speed: number[] = [];
   /** Length of the render offset, u. */
   readonly offset: number[] = [];
-  /** The clock's input buffer health: the mean and the low edge, ticks. */
+  /** The clock's input buffer health: the mean, the low edge and the fast low edge, ticks. */
   readonly buffer: number[] = [];
   readonly bufferLow: number[] = [];
+  readonly bufferLowFast: number[] = [];
+  /** The clock's dilation δ after the frame (D-039). */
+  readonly dilation: number[] = [];
+  /**
+   * The predicted path's time after the frame (`ClientSim.pathTicks`) and how far a clock step or
+   * re-anchor moved it in the frame (`pathShift`), ticks.
+   */
+  readonly pathTicks: number[] = [];
+  readonly pathShift: number[] = [];
   /** Since connecting: the clock steps taken (fast-forwards and holds) and the hard resyncs. */
   readonly clockSteps: number[] = [];
   readonly hardResyncs: number[] = [];
@@ -291,6 +305,8 @@ export interface ClientOptions {
   readonly wrap?: (t: Transport) => Transport;
   /** May change replicated cvars (the Worker's one client is admin). Default false. */
   readonly admin?: boolean;
+  /** False keeps the clock's dilation at 0 (NET-07's control). Default true. */
+  readonly dilation?: boolean;
   /** Keeps per-tick states, predictions and a frame log (see `HarnessClient`). Default false. */
   readonly record?: boolean;
   /**
@@ -407,6 +423,7 @@ export class HarnessClient {
       buildHash: HARNESS_BUILD,
       clock: () => h.now,
       input: options.input,
+      dilation: options.dilation,
     });
     this.client.connect();
     h.at(h.now + this.frameInterval(), () => this.frame());
@@ -588,6 +605,10 @@ export class HarnessClient {
     f.offset.push(Math.hypot(this.off[0] as number, this.off[1] as number, this.off[2] as number));
     f.buffer.push(c.clock.bufferHealth);
     f.bufferLow.push(c.clock.bufferLow);
+    f.bufferLowFast.push(c.clock.bufferLowFast);
+    f.dilation.push(c.clock.dilation);
+    f.pathTicks.push(c.pathTicks);
+    f.pathShift.push(c.pathShift[0] as number);
     f.clockSteps.push(c.stats.totals[STAT_CLOCK_ADJUSTMENTS] as number);
     f.hardResyncs.push(c.stats.totals[STAT_HARD_RESYNCS] as number);
   }

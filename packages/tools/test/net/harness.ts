@@ -7,6 +7,7 @@ export {
   FRAME_HZ,
   FRAMES_144HZ,
   FRAMES_BROWSER_HITCHES,
+  FRAMES_CRAWLING_HOST,
   FRAMES_SLOW_HOST,
   FRAMES_SLOWER_HOST,
   FrameLog,
@@ -45,6 +46,8 @@ export interface HarnessOptions {
   readonly frameIntervalMs?: FrameModel;
   /** Wraps the client's transport (after NetSim), e.g. to drop or rewrite what it receives. */
   readonly wrap?: (t: Transport) => Transport;
+  /** False keeps the clock's dilation at 0 (NET-07's control). Default true. */
+  readonly dilation?: boolean;
 }
 
 export class NetHarness {
@@ -59,6 +62,7 @@ export class NetHarness {
       frameHz: options.frameHz,
       frameIntervalMs: options.frameIntervalMs,
       wrap: options.wrap,
+      dilation: options.dilation,
       admin: true,
       record: true,
     });

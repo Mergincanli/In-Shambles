@@ -58,7 +58,13 @@ export const STAT_BASELINE_DROPS = 22;
  */
 export const STAT_DEFERRED = 23;
 export const STAT_DEFERRED_SNAPSHOTS = 24;
-export const STAT_COUNT = 25;
+/**
+ * Ticks the clock's dilation added to the prediction (negative: took away; D-039), stall frames
+ * (ClientSim's HITCH_FRAME_MS) left out: over the last second, divided by TICK_RATE, about the
+ * mean δ, which the netgraph can show as a percentage.
+ */
+export const STAT_DILATION = 25;
+export const STAT_COUNT = 26;
 
 const BUCKETS = 10;
 const BUCKET_MS = 100;

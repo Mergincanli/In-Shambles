@@ -26,11 +26,15 @@ import {
 //   speed × frame time × 1.5 + 0.5 u);
 // - bad-250-loss5: converges (no hard resync, laps go on, the buffer settles) and logs every
 //   correction;
-// - browser-like frame timing (60 fps with 15% of the frames 50–80 ms, or every frame 33–83 ms or
-//   50–83 ms) on wan-50, wan-100-loss1 and wan-150-loss2, from the start or turning bad
-//   mid-circuit: the same bounds as the lossy profiles for the corrections' render offset, the
-//   clock's own steps gliding (under cl_teleportDist) and rare, and the buffer's latency bounded
-//   (D-028's adaptive input buffer).
+// - browser-like frame timing (60 fps with 15% of the frames 50–80 ms, or every frame 33–83 ms,
+//   50–83 ms or, since D-039's cap/hitch trial, 83–125 ms) on wan-50, wan-100-loss1 and
+//   wan-150-loss2, from the start or turning bad mid-circuit: the same bounds as the lossy
+//   profiles for the corrections' render offset, the clock's own steps gliding (under
+//   cl_teleportDist) and rare, and the buffer's latency bounded (D-028's adaptive input buffer);
+//   with 60 fps hitches and 33–83 ms frames, after 20 s of learning, at most one fast-forward and
+//   no slow-down while a dip below the target is in the clock's 90-snapshot window (D-039).
+// Re-baselined under D-039's dilation (M3 increment 11): the round-trip step test expects a
+// fast-forward up and dilation, not a hold, back down.
 // On every profile the prediction converges: at each snapshot the client reconciled with, its
 // standing prediction equals the server's recorded state (`NetHarness.unreconciled`), so a
 // predictor that stopped correcting fails here, not only in its unit tests.
@@ -72,9 +76,10 @@ describe("NET-04 (M2 basic): reconciliation on every profile", () => {
   );
 
   it("bad-250-loss5: converges and logs its corrections", () => {
-    // Seed 7: the adaptive buffer covers most of this link's jitter (0 to 3 corrections a minute
-    // over seeds 1–12), and this seed has some, so the correction path runs.
-    const h = run(profile("bad-250-loss5"), 7);
+    // Seed 10: the adaptive buffer and dilation cover nearly all of this link's jitter (0 or 1
+    // correction a minute over seeds 1–12; before dilation 0 to 3), and this seed has one, so the
+    // correction path runs.
+    const h = run(profile("bad-250-loss5"), 10);
     expectCircuit(h);
     expectConverged(h);
     const t = h.totals();
@@ -99,7 +104,7 @@ describe("NET-04 (M2 basic): reconciliation on every profile", () => {
     }
   });
 
-  it("re-anchors the clock in steps after a round-trip step up and down (smooth dilation is NET-07)", () => {
+  it("a round-trip step up fast-forwards, a step down is dilated back without a hold (D-039; NET-07 measures both)", () => {
     const h = new NetHarness({ input: new StrafeCircuit(), profile: profile("wan-50"), seed: 3 });
     h.runTicks(600);
     const c = h.client;
@@ -109,7 +114,8 @@ describe("NET-04 (M2 basic): reconciliation on every profile", () => {
     // server's side rather than from the clock's own EWMA.
     const lead0 = h.lead();
     expect(lead0).toBeGreaterThanOrEqual(target + 1);
-    // 100 ms more round trip: the buffer runs dry, the server starves, the clock fast-forwards.
+    // 100 ms more round trip: the buffer runs dry, the server starves, the clock fast-forwards
+    // to target − 1 and dilation closes the last tick.
     h.sim?.setProfile(profile("wan-150-loss2"));
     h.run(4000);
     const up = h.totals();
@@ -120,12 +126,19 @@ describe("NET-04 (M2 basic): reconciliation on every profile", () => {
     expect(h.totals().corrections - up.corrections).toBeLessThanOrEqual(4);
     const leadUp = h.lead();
     expect(leadUp - lead0).toBeGreaterThanOrEqual(2);
-    // Back to lan: inputs arrive 75 ms early, the clock holds and the lead shrinks to the buffer.
+    // Back to lan: inputs arrive 75 ms early, about 5 ticks, under the hold threshold (target +
+    // 6): once the window is clear of the old lows the clock slows down at up to 3% and the lead
+    // shrinks to the buffer, with no hold.
     h.sim?.setProfile(profile("lan"));
-    h.run(4000);
-    expect(clock.holds).toBeGreaterThanOrEqual(1);
-    expect(h.totals().clockAdjustments).toBe(clock.fastForwards + clock.holds);
-    expect(clock.bufferHealth).toBeLessThan(target + 3);
+    let slowed = false;
+    for (let ms = 0; ms < 6000; ms += 100) {
+      h.run(100);
+      if (clock.dilation < 0) slowed = true;
+    }
+    expect(slowed).toBe(true);
+    expect(clock.holds).toBe(0);
+    expect(h.totals().clockAdjustments).toBe(clock.fastForwards);
+    expect(clock.bufferHealth).toBeLessThan(target + 1);
     const leadLan = h.lead();
     expect(leadUp - leadLan).toBeGreaterThanOrEqual(3);
     expect(leadLan).toBeGreaterThanOrEqual(target);

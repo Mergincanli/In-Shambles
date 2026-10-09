@@ -1,8 +1,9 @@
-import { MAX_ADAPTIVE_TICKS, StrafeCircuit } from "@game/client/net";
+import { LOW_WINDOW, MAX_ADAPTIVE_TICKS, StrafeCircuit, TICK_MS } from "@game/client/net";
 import { findNetProfile, type NetProfile } from "@game/shared";
 import { expect } from "vitest";
 import {
   FRAMES_BROWSER_HITCHES,
+  FRAMES_CRAWLING_HOST,
   FRAMES_SLOW_HOST,
   FRAMES_SLOWER_HOST,
   type FrameLog,
@@ -60,6 +61,38 @@ export function bufferMean(f: FrameLog, from = 0): number {
   return sum / Math.max(1, f.buffer.length - from);
 }
 
+/**
+ * The input buffer healths the client's clock was fed (snapshots it did not ignore), with the
+ * harness time and the snapshot's server tick of each: a spy on `ClientClock.onSnapshotHealth`,
+ * so a check can find the dips below the target from the server's reports rather than from the
+ * clock's own window.
+ */
+export class HealthFeed {
+  readonly at: number[] = [];
+  readonly serverTick: number[] = [];
+  readonly health: number[] = [];
+}
+
+/** The health feed of each harness `run` made (for the hitch-model checks). */
+export const healthFeeds = new WeakMap<NetHarness, HealthFeed>();
+
+/** Records what `h`'s clock is fed from now on. */
+export function watchHealth(h: NetHarness): HealthFeed {
+  const feed = new HealthFeed();
+  const clock = h.client.clock;
+  const feedClock = clock.onSnapshotHealth.bind(clock);
+  clock.onSnapshotHealth = (health, serverTick, clientTick, target) => {
+    if (serverTick > clock.ignoreHealthThroughTick) {
+      feed.at.push(h.now);
+      feed.serverTick.push(serverTick);
+      feed.health.push(health);
+    }
+    return feedClock(health, serverTick, clientTick, target);
+  };
+  healthFeeds.set(h, feed);
+  return feed;
+}
+
 export function run(
   profile: NetProfile,
   seed = SEED,
@@ -72,6 +105,7 @@ export function run(
     seed,
     frameIntervalMs: frames?.model,
   });
+  watchHealth(h);
   h.runTicks(idleTicks + TICKS);
   const t = h.totals();
   const maxOffset = Math.max(...h.frames.offset);
@@ -115,12 +149,66 @@ export function expectConverged(h: NetHarness, minReconciles = TICKS / 2): void 
 
 export const profile = (name: string) => findNetProfile(name) as NetProfile;
 
-/** Frame models of the browser-like block (the harness's seeded draws). */
+/**
+ * Frame models of the browser-like block (the harness's seeded draws), with the frame rate they
+ * keep at least (reconciles a second). The crawling host (8–12 fps) is D-039's cap/hitch trial:
+ * it runs since MAX_TICKS_PER_FRAME 8 and HITCH_FRAME_MS 150 (at 5 and 100 it could not keep up).
+ */
 export const FRAME_MODELS = [
-  { name: "browser hitches", model: FRAMES_BROWSER_HITCHES },
-  { name: "slow host", model: FRAMES_SLOW_HOST },
-  { name: "slower host", model: FRAMES_SLOWER_HOST },
+  { name: "browser hitches", model: FRAMES_BROWSER_HITCHES, minFps: 10 },
+  { name: "slow host", model: FRAMES_SLOW_HOST, minFps: 10 },
+  { name: "slower host", model: FRAMES_SLOWER_HOST, minFps: 10 },
+  { name: "crawling host", model: FRAMES_CRAWLING_HOST, minFps: 8 },
 ];
+/**
+ * The models D-039's hitch assertions hold to (M3 design §5, NET-04): 60 fps with hitches and
+ * 33–83 ms frames.
+ */
+export const HITCH_MODELS = ["browser hitches", "slow host"];
+/** The hitch assertions start once the clock has had this long to learn the rhythm, ms. */
+export const HITCH_LEARN_MS = 20_000;
+/**
+ * D-039's hitch-model checks (M3 design §5, NET-04), from HITCH_LEARN_MS into the run on: at most
+ * one fast-forward per 60 s, and no slow-down (δ < 0) within 1.5 s after a health below the
+ * target the clock was fed (`HealthFeed`): 1.5 s of server time, the newest fed snapshot's tick
+ * under LOW_WINDOW ticks past the dip's, and, exactly as the clock is built, while the dip is
+ * among the last LOW_WINDOW healths fed. (Harness time at the frames would add the link's jitter
+ * and the frame's polling delay to the rule.) Returns the fast-forwards, the slowed frames that
+ * broke the rule and the shortest server time from a dip to a slowed frame's snapshot (ms), for
+ * the log.
+ */
+export function hitchChecks(h: NetHarness): {
+  fastForwards: number;
+  slowAfterDip: number;
+  nearestSlowMs: number;
+} {
+  const f = h.frames;
+  const feed = healthFeeds.get(h) as HealthFeed;
+  const target = h.client.settings.inputBuffer;
+  const from = h.player.joinedAt + HITCH_LEARN_MS;
+  let fastForwards = 0;
+  let slowAfterDip = 0;
+  let nearestSlowMs = Number.POSITIVE_INFINITY;
+  let fed = 0;
+  let lastDip = -1;
+  for (let i = 1; i < f.time.length; i++) {
+    const t = f.time[i] as number;
+    while (fed < feed.at.length && (feed.at[fed] as number) <= t) {
+      if ((feed.health[fed] as number) < target) lastDip = fed;
+      fed++;
+    }
+    if (t < from) continue;
+    // A fast-forward moves the path forward without a re-anchor.
+    const resynced = (f.hardResyncs[i] as number) !== (f.hardResyncs[i - 1] as number);
+    if ((f.pathShift[i] as number) > 0 && !resynced) fastForwards++;
+    if ((f.dilation[i] as number) >= 0 || lastDip < 0) continue;
+    const sinceTicks = (feed.serverTick[fed - 1] as number) - (feed.serverTick[lastDip] as number);
+    nearestSlowMs = Math.min(nearestSlowMs, sinceTicks * TICK_MS);
+    if (fed - lastDip <= LOW_WINDOW || sinceTicks < LOW_WINDOW) slowAfterDip++;
+  }
+  return { fastForwards, slowAfterDip, nearestSlowMs };
+}
+
 /**
  * Bounded latency: the buffer's mean health over the run stays under target + 5 ticks. The frame
  * rhythm costs its spread (3.4 to 5.9 ticks of mean on these seeds, up to 6.4 over seeds 1–10),
@@ -217,8 +305,8 @@ export function browserLikeCase(
   // low point of each burst: 0.6 to 8 corrections a second, up to 23 u.
   const h = run(profile(name), seed, frames);
   expectCircuit(h);
-  // Frames come at 12 fps or more: 10 reconciles a second at least.
-  expectConverged(h, SECONDS * 10);
+  // One reconcile a frame: 10 a second at least at 12 fps or more, 8 for the crawling host.
+  expectConverged(h, SECONDS * frames.minFps);
   const t = h.totals();
   expect(t.corrections / SECONDS).toBeLessThan(1);
   expect(t.meanCorrection).toBeLessThan(2);
@@ -236,4 +324,14 @@ export function browserLikeCase(
   const target = h.client.settings.inputBuffer;
   expect(bufferMean(h.frames)).toBeLessThan(target + BUFFER_MEAN_ABOVE_TARGET);
   expect(h.client.clock.adaptiveTicks).toBeLessThanOrEqual(MAX_ADAPTIVE_TICKS);
+  if (HITCH_MODELS.includes(frames.name)) {
+    // D-039: once learned, the hitches' bursts are dilation's; a dip blocks slowing down.
+    const c = hitchChecks(h);
+    console.log(
+      `  after ${HITCH_LEARN_MS / 1000} s: ${c.fastForwards} fast-forwards, ` +
+        `${c.slowAfterDip} slowed frames too soon after a dip (nearest ${c.nearestSlowMs.toFixed(0)} ms)`,
+    );
+    expect(c.fastForwards).toBeLessThanOrEqual(1);
+    expect(c.slowAfterDip).toBe(0);
+  }
 }

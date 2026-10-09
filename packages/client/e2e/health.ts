@@ -71,7 +71,8 @@ export interface Link {
  * alone does not starve (D-027; `pnpm test:long` holds the real Node server to that). A host too
  * slow to tell (more than MAX_LONG_SHARE of its frames long) is a failure that says so, not a
  * random pass or fail; the fps, the window's largest snapshot gap and the page's last starve
- * (`lastStarve`: the lead, the clock's low edge and mean, the frame and snapshot gaps) go into
+ * (`lastStarve`: the lead, the clock's low edge and mean, the frame and snapshot gaps) and the
+ * last hard resyncs (`resyncLog`: frame and snapshot gaps, predicted and server ticks) go into
  * every message.
  */
 export function expectHealthy(a: Sample, b: Sample, link: Link): void {
@@ -90,6 +91,8 @@ export function expectHealthy(a: Sample, b: Sample, link: Link): void {
     ],
     lastLinkGap: b.s.lastLinkGap,
     lastStarve: b.s.lastStarve,
+    // The last hard resyncs with their frame and server-tick timing (the M2 loaded-run carry-over).
+    resyncLog: b.s.resyncLog,
     from: a.s,
     to: b.s,
   });

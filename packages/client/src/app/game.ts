@@ -72,7 +72,31 @@ const T_SNAPS = 9;
 const T_LOST = 10;
 const T_STARVED = 11;
 const T_STARVED_CORR = 12;
-const T_COUNT = 13;
+/** The prediction's newest tick before this frame's client step. */
+const T_TICK = 13;
+/** This frame's gap and the snapshot gap it ended (ms; 0 when it took none). */
+const T_DT = 14;
+const T_SNAP_GAP = 15;
+const T_COUNT = 16;
+
+/**
+ * The hard resyncs the status keeps (`resyncLog`, newest last): the M2 loaded-run carry-over
+ * (one e2e run in 18 with 2 cores busy had a hard resync in a normal-length frame), so a failure
+ * shows the frame and server-tick timing around it.
+ */
+const RESYNC_LOG = 4;
+// Fields of a resyncLog record: page time, frame gap and snapshot gap (ms), the predicted tick
+// before the frame, the server tick it resynced to, the lead after, the round trip (ms), the
+// clock's low edge before.
+const RL_AT = 0;
+const RL_DT = 1;
+const RL_SNAP_GAP = 2;
+const RL_PREDICTED = 3;
+const RL_SERVER = 4;
+const RL_LEAD = 5;
+const RL_RTT = 6;
+const RL_LOW = 7;
+const RL_FIELDS = 8;
 
 function newTiming(): Float64Array {
   const g = new Float64Array(T_COUNT);
@@ -193,6 +217,12 @@ export class Game {
    * [5] the snapshot gap it ended (ms), [6] the round trip (ms).
    */
   private readonly lastStarve = new Float64Array(7).fill(Number.NaN);
+  /** The last RESYNC_LOG hard resyncs, RL_FIELDS each, a ring from `resyncHead`. */
+  private readonly resyncs = new Float64Array(RESYNC_LOG * RL_FIELDS);
+  private resyncHead = 0;
+  private resyncCount = 0;
+  /** The clock's low edge before this frame's step. */
+  private resyncLow = 0;
   /** [0..2] the predicted origin at the last report, [3] horizontal path length since spawn. */
   private readonly travel = new Float64Array([Number.NaN, 0, 0, 0]);
   private running = false;
@@ -262,6 +292,8 @@ export class Game {
     g[T_LOST] = totals[STAT_SNAPSHOTS_LOST] as number;
     g[T_STARVED] = totals[STAT_STARVED] as number;
     g[T_STARVED_CORR] = totals[STAT_STARVED_CORRECTIONS] as number;
+    g[T_TICK] = p.latestTick;
+    this.resyncLow = c.clock.bufferLow;
     c.frame();
     this.frames++;
     this.timeFrame();
@@ -362,11 +394,52 @@ export class Game {
       st[5] = snapGap;
       st[6] = c.clock.rttMs;
     }
+    if ((totals[STAT_HARD_RESYNCS] as number) > (g[T_RESYNCS] as number)) {
+      // Doubles go through the slots: a call taking them would box them under native ESM.
+      g[T_DT] = dt;
+      g[T_SNAP_GAP] = snapGap;
+      this.logResync();
+    }
     if (Number.isNaN(prev)) return;
     if (dt > (g[T_MAX_FRAME] as number)) g[T_MAX_FRAME] = dt;
     if (dt <= buffer) return;
     this.longFrames++;
     if ((totals[STAT_HARD_RESYNCS] as number) > (g[T_RESYNCS] as number)) this.lateResyncs++;
+  }
+
+  /** Files this frame's hard resync in the resyncLog ring (its gaps from T_DT, T_SNAP_GAP). */
+  private logResync(): void {
+    const c = this.client;
+    const p = c.predictor;
+    const g = this.timing;
+    const r = this.resyncs;
+    const at = this.resyncHead * RL_FIELDS;
+    r[at + RL_AT] = c.now[0] as number;
+    r[at + RL_DT] = g[T_DT] as number;
+    r[at + RL_SNAP_GAP] = g[T_SNAP_GAP] as number;
+    r[at + RL_PREDICTED] = g[T_TICK] as number;
+    r[at + RL_SERVER] = p.snapshotTick;
+    r[at + RL_LEAD] = p.latestTick - p.snapshotTick;
+    r[at + RL_RTT] = c.clock.rttMs;
+    r[at + RL_LOW] = this.resyncLow;
+    this.resyncHead = (this.resyncHead + 1) % RESYNC_LOG;
+    this.resyncCount = Math.min(RESYNC_LOG, this.resyncCount + 1);
+  }
+
+  /** The resyncLog status text: the kept resyncs, oldest first, "; "-separated. */
+  private resyncText(): string {
+    const r = this.resyncs;
+    let out = "";
+    for (let i = 0; i < this.resyncCount; i++) {
+      const at = ((this.resyncHead - this.resyncCount + i + RESYNC_LOG) % RESYNC_LOG) * RL_FIELDS;
+      if (out !== "") out += "; ";
+      out +=
+        `at ${Math.round(r[at + RL_AT] as number)} dt ${Math.round(r[at + RL_DT] as number)} ` +
+        `snapGap ${Math.round(r[at + RL_SNAP_GAP] as number)} predicted ${r[at + RL_PREDICTED]} ` +
+        `server ${r[at + RL_SERVER]} lead ${r[at + RL_LEAD]} rtt ${Math.round(r[at + RL_RTT] as number)} ` +
+        `low ${r[at + RL_LOW]}`;
+    }
+    return out;
   }
 
   /** The `r_debug*` segments: this frame's traces, the hull where it is drawn, the ground. */
@@ -502,6 +575,7 @@ export class Game {
     // Frame timing, which explains the hard resyncs and starved cmds of a slow host (D-028).
     s.longFrames = String(this.longFrames);
     s.lateResyncs = String(this.lateResyncs);
+    s.resyncLog = this.resyncText();
     const g = this.timing;
     s.maxFrameMs = String(Math.round(g[T_MAX_FRAME] as number));
     g[T_MAX_FRAME] = 0;

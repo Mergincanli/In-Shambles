@@ -1,7 +1,7 @@
 import { TICK_RATE } from "@game/shared";
 
 /**
- * The client clock of M2 (docs/05 §1.3, §8.2–§8.3; M2 design §2 "Client clock"; D-028). The
+ * The client clock (docs/05 §1.3, §8.2–§8.3; M2 design §2 "Client clock"; D-028, D-039). The
  * client predicts in server-tick space: its tick T is the server's tick T, and it runs ahead of
  * the server by the round trip plus an input buffer, so that the cmd for T reaches the server just
  * before the server simulates T.
@@ -10,25 +10,31 @@ import { TICK_RATE } from "@game/shared";
  *   come back; their median is the round trip. At the first snapshot A the client jumps to tick
  *   A + ceil(RTT / tick) + cl_inputBuffer (`leadTicks`).
  * - **Ongoing:** a ping a second feeds EWMAs of the round trip and its jitter. Each snapshot's
- *   `inputBufferHealth` feeds an EWMA (the mean, over about 30 snapshots) and a window of the
- *   last LOW_WINDOW healths, whose minimum is the low edge. A frame runs every tick it owes at
+ *   `inputBufferHealth` feeds an EWMA (the mean M, over about 30 snapshots) and a window of the
+ *   last LOW_WINDOW healths, whose minimum is the low edge L. A frame runs every tick it owes at
  *   once, so with long or irregular frames cmds reach the server in bursts and the health
  *   saw-tooths: the mean can look fine while the low point of each burst starves the server. So
- *   the clock steers the low edge to cl_inputBuffer (the target): once it is below target −
- *   LOW_MARGIN in a pattern of dips (`recurring`) and the dip has stopped deepening, the clock asks
- *   for a fast-forward of k ticks (predicted and sent at once) that lifts it back to the target;
- *   once the low edge and the mean have both stayed HOLD_ABOVE or more above it for HOLD_AFTER_MS
- *   (HOLD_FAST_AFTER_MS when far above), for a hold of k tick periods. It grows at once and
- *   shrinks only after the window and the hold delay, so it cannot oscillate. With steady frames
- *   on a clean link the health is constant, so the mean sits at cl_inputBuffer as before; bursts
- *   and jitter raise the mean by their spread, within MAX_ADAPTIVE_TICKS. The spread a full
+ *   the clock steers the low edge to cl_inputBuffer (the target), with the asymmetric hybrid of
+ *   D-039 (M3 design §2.7):
+ *   - **Dilation:** the prediction runs at (1 + δ) × real time, |δ| ≤ DIL_MAX (ClientSim scales
+ *     its accumulator by it). It speeds up fast, on the low edge of the last LOW_FAST_WINDOW
+ *     snapshots (adding lead never starves, so reacting to a lone dip is safe), and slows down
+ *     only on the full window's low edge and the mean, so any dip below the target in the last
+ *     1.5 s blocks it (D-028's lesson: short windows miss the longest frames).
+ *   - **Coarse steps** for big errors (D-028's machinery): a fast-forward of k ticks (predicted
+ *     and sent at once) once the low edge is target − 2 or lower in a pattern of dips
+ *     (`recurring`) that stopped deepening, to target − 1 (dilation closes the last tick: +3%
+ *     alone would starve a 3-tick deficit for over 1.6 s); a hold of k tick periods only once the
+ *     whole window sits target + 6 or more above, to target + 2.
+ *   With steady frames on a clean link the health is constant, so the mean sits at cl_inputBuffer;
+ *   bursts and jitter raise the mean by their spread, within MAX_ADAPTIVE_TICKS. The spread a full
  *   window measured is the adaptive lead an anchor adds (`leadTicks`, `onResync`). Each step is a
- *   clock adjustment in the netgraph, which shows the mean and the low edge.
+ *   clock adjustment in the netgraph, which shows the mean and the low edge (δ is ready for it:
+ *   `dilation`, and ClientSim's `STAT_DILATION`).
  *
  * A fast-forward's skip is hidden by the render offset; a hold shows as a short slowdown of the
- * drawn player (up to k ticks). Smooth time dilation (±3%, docs/05 §8.2) is NET-07 in M3. The
- * constants below are design values, not tunables. Time comes from the caller's clock slot
- * `now[0]` (ms).
+ * drawn player (up to k ticks). The constants below are design values, not tunables. Time comes
+ * from the caller's clock slot `now[0]` (ms).
  */
 
 /** Milliseconds per tick. */
@@ -51,38 +57,57 @@ const HEALTH_WEIGHT = 1 / 30;
 export const LOW_WINDOW = 90;
 /**
  * Fast-forward when the low edge falls below target − this (at the default target: a dip to 0,
- * one tick from starving), back up to the target, so a dip one tick deeper than the deepest seen
- * (a lost INPUT, a jitter peak on top of a long frame) still neither starves nor steps again.
+ * one tick from starving) …
  */
 const LOW_MARGIN = 1;
 /**
  * … provided the dips are a pattern: this many separate ones in the window, or the newest lasting
  * FAST_FORWARD_RUN snapshots (a round trip that grew). A lone dip (a lost INPUT, two within 1.5 s
- * on wan-100-loss1 now and then) is left alone: it does not starve, and a step's skip costs a
- * tick of motion in the render offset (about 11 u at strafe-jump speed).
+ * on wan-100-loss1 now and then) is left to dilation: it does not starve, and a step's skip costs
+ * a tick of motion in the render offset (about 11 u at strafe-jump speed).
  */
 const FAST_FORWARD_DIPS = 3;
 /** … snapshots (100 ms). */
 const FAST_FORWARD_RUN = 6;
-/** Hold when the low edge and the mean stay at target + this or more … */
-const HOLD_ABOVE = 2;
-/** … for this long (ms) … */
-const HOLD_AFTER_MS = 4000;
 /**
- * … or for HOLD_FAST_AFTER_MS (still timed from when they reached HOLD_ABOVE) once they are this
- * far above (a round trip that fell, a stall's lead). A small excess is often only a window that happened to miss the longest frames: waiting
- * longer for it keeps the clock from giving back lead it needs again a few seconds later.
+ * The largest dilation, ± (docs/05 §8.2): 1.8 ticks a second at 60 Hz, below what a player sees
+ * as the drawn motion speeding up or slowing down.
  */
-const HOLD_FAST_ABOVE = 4;
-const HOLD_FAST_AFTER_MS = 1000;
+export const DIL_MAX = 0.03;
+/** δ per tick of error below the cap (design): a tick off is ±2%, a tick and a half the cap. */
+const DIL_GAIN = 0.02;
+/**
+ * Speed up once the fast low edge is this far below the target (ticks; design): the healths are
+ * integers, so one tick below.
+ */
+const SPEED_UP_DEADBAND = 0.5;
+/**
+ * The fast low edge: the lowest health of this many snapshots (0.5 s; design). It reacts to a
+ * deficit within a round trip and forgets a dip after half a second.
+ */
+export const LOW_FAST_WINDOW = 30;
+/** Slow down only when the low edge and the mean are both this far above the target (ticks). */
+const SLOW_DOWN_ABOVE = 1;
+/**
+ * Hold only when the full window's low edge is this far above the target (ticks; design): a round
+ * trip that fell by 100 ms or more, a stall's lead. Smaller excesses are dilation's.
+ */
+const HOLD_ABOVE = 6;
+/** … back to target + this (dilation gives back the rest). */
+const HOLD_TO = 2;
 /**
  * Fast-forwards never take the mean health past target + this (ticks): the adaptive part of the
  * buffer is bounded, so a pathological host or link pays in starved cmds rather than latency
- * without bound. 8 ticks (133 ms) cover the burst of a 100 ms frame (6 ticks, the stall limit,
- * ClientSim's HITCH_FRAME_MS) plus the ±1 tick jitter of wan-150-loss2. Once the window's
- * average is HOLD_ABOVE or more past it (after a round trip fell), the clock holds back to it.
+ * without bound. 8 ticks (133 ms) were sized in M2 for the burst of a 100 ms frame (6 ticks, then
+ * the stall limit) plus the ±1 tick jitter of wan-150-loss2; since D-039 raised ClientSim's
+ * HITCH_FRAME_MS to 150 ms, frames of 133–150 ms pay their burst's tail in starved cmds by
+ * design, and the 83–125 ms frames NET-04 measures stay within the cap. Once the window's
+ * average is more than CAP_EXCESS past it (after a round trip fell), the clock slows down at the
+ * full DIL_MAX.
  */
 export const MAX_ADAPTIVE_TICKS = 8;
+/** See MAX_ADAPTIVE_TICKS (ticks; D-028's hold threshold, now dilation's). */
+const CAP_EXCESS = 2;
 /**
  * The health clamps to i8 (docs/05 §8.2): a sample at the floor has an unknown depth, and while
  * the cmds are not arriving (an uplink outage) no fast-forward helps, so it never asks for one.
@@ -108,14 +133,29 @@ export const PING_SLOTS = 64;
 const RTT = 0;
 const JITTER = 1;
 const HEALTH = 2;
-const ABOVE_SINCE = 3;
-const LAST_PING = 4;
-const SCRATCH = 5;
-const LAST_RESYNC = 6;
+const LAST_PING = 3;
+const SCRATCH = 4;
+const LAST_RESYNC = 5;
+const AVERAGE = 6;
+
+export interface ClientClockOptions {
+  /**
+   * False keeps δ at 0 (the steps stay): NET-07's control, which must fail. Tests only; true by
+   * default.
+   */
+  readonly dilation?: boolean;
+}
 
 export class ClientClock {
-  /** [rtt ms, jitter ms, health EWMA, above since, last ping sent, scratch, last resync]. */
+  /** [rtt ms, jitter ms, health EWMA, last ping sent, scratch, last resync, window average]. */
   private readonly t = new Float64Array(7);
+  /**
+   * [0] the dilation δ (`dilation`), for ClientSim's frame: a getter's double would box per
+   * frame under native ES modules.
+   */
+  readonly dil = new Float64Array(1);
+  /** The lowest health of the last LOW_FAST_WINDOW snapshots in the window. */
+  private lowFast = 0;
   /** The last LOW_WINDOW healths (integers, moved by each step), a ring from `windowHead`. */
   private readonly recent = new Int32Array(LOW_WINDOW);
   private windowHead = 0;
@@ -153,18 +193,25 @@ export class ClientClock {
   fastForwards = 0;
   holds = 0;
 
-  constructor(private readonly now: Float64Array) {
+  private readonly dilationOn: boolean;
+
+  constructor(
+    private readonly now: Float64Array,
+    options: ClientClockOptions = {},
+  ) {
+    this.dilationOn = options.dilation ?? true;
     this.reset();
   }
 
   reset(): void {
     const t = this.t;
     t.fill(0);
-    t[ABOVE_SINCE] = Number.NaN;
+    this.dil[0] = 0;
     this.windowHead = 0;
     this.windowCount = 0;
     this.windowSum = 0;
     this.low = 0;
+    this.lowFast = 0;
     this.lastHealth = 0;
     this.adaptiveTicks = 0;
     t[LAST_PING] = Number.NEGATIVE_INFINITY;
@@ -201,6 +248,19 @@ export class ClientClock {
    */
   get bufferLow(): number {
     return this.low;
+  }
+
+  /** The fast low edge: the lowest health of the last LOW_FAST_WINDOW snapshots, ticks. */
+  get bufferLowFast(): number {
+    return this.lowFast;
+  }
+
+  /**
+   * The dilation δ the prediction runs at, (1 + δ) × real time, |δ| ≤ DIL_MAX (0 with the
+   * `dilation: false` test option).
+   */
+  get dilation(): number {
+    return this.dil[0] as number;
   }
 
   get handshakeDone(): boolean {
@@ -293,7 +353,8 @@ export class ClientClock {
     this.windowHead = 0;
     this.windowCount = 0;
     this.windowSum = 0;
-    this.t[ABOVE_SINCE] = Number.NaN;
+    // The new lead is measured from scratch: no speed to carry into it.
+    this.dil[0] = 0;
   }
 
   /**
@@ -305,10 +366,11 @@ export class ClientClock {
   }
 
   /**
-   * Feeds one snapshot's input buffer health (an integer). Returns the step the client should
-   * take now: k > 0 fast-forwards k ticks, k < 0 holds −k tick periods, 0 none. `clientTick` is
-   * the client's newest predicted tick; snapshots up to the tick the step's effect reaches are
-   * then ignored, and the mean and the window move by the step at once instead of waiting for them.
+   * Feeds one snapshot's input buffer health (an integer) and sets the dilation. Returns the step
+   * the client should take now: k > 0 fast-forwards k ticks, k < 0 holds −k tick periods, 0 none.
+   * `clientTick` is the client's newest predicted tick; snapshots up to the tick the step's effect
+   * reaches are then ignored (δ stays as set), and the mean and the window move by the step at
+   * once instead of waiting for them.
    */
   onSnapshotHealth(health: number, serverTick: number, clientTick: number, target: number): number {
     if (serverTick <= this.ignoreHealthThroughTick) return 0;
@@ -322,8 +384,9 @@ export class ClientClock {
     this.healthSamples++;
     this.pushHealth(health);
     const low = this.low;
+    const full = this.windowCount === LOW_WINDOW;
     const average = this.windowSum / this.windowCount;
-    if (this.windowCount === LOW_WINDOW) {
+    if (full) {
       // The spread the clock keeps the mean above the target for: a lone dip (the mean still on
       // the target) or a round trip rounded up (no spread) is not one.
       const spread = Math.min(average - low, average - target);
@@ -331,36 +394,16 @@ export class ClientClock {
     }
     let step = 0;
     if (low < target - LOW_MARGIN && !deepening && this.recurring(target - LOW_MARGIN)) {
-      // Enough to lift the low edge back to the target (and a steady health with it), as far as
-      // the cap allows.
-      step = Math.max(target - low, Math.round(target - (t[HEALTH] as number)));
+      // To target − 1, as far as the cap allows; dilation closes the last tick.
       step = Math.min(
-        step,
+        target - LOW_MARGIN - low,
         MAX_FAST_FORWARD_TICKS,
         Math.floor(target + MAX_ADAPTIVE_TICKS - average),
       );
       if (step < 1) step = 0;
-    }
-    // What a hold may give back: the lead the low edge and the mean both have above the target,
-    // or the average's above the adaptive cap. The mean counts rounded: the EWMA approaches a
-    // health from below and can stall a few ulps short of it for good, so a health settled at
-    // exactly target + 2 must count as 2 above (the low edge, an integer, is what makes a hold
-    // safe; the mean only delays it while it catches up).
-    const excess = Math.max(
-      Math.min(low, Math.round(t[HEALTH] as number)) - target,
-      average - target - MAX_ADAPTIVE_TICKS,
-    );
-    if (step === 0 && excess >= HOLD_ABOVE) {
-      const now = this.now[0] as number;
-      if (Number.isNaN(t[ABOVE_SINCE] as number)) t[ABOVE_SINCE] = now;
-      else if (
-        now - (t[ABOVE_SINCE] as number) >=
-        (excess >= HOLD_FAST_ABOVE ? HOLD_FAST_AFTER_MS : HOLD_AFTER_MS)
-      ) {
-        step = -Math.min(MAX_HOLD_TICKS, Math.round(excess));
-      }
-    } else {
-      t[ABOVE_SINCE] = Number.NaN;
+    } else if (full && low >= target + HOLD_ABOVE) {
+      // The whole window that far above: a round trip that fell, a stall's lead.
+      step = -Math.min(MAX_HOLD_TICKS, low - target - HOLD_TO);
     }
     if (step !== 0) {
       t[HEALTH] = (t[HEALTH] as number) + step;
@@ -370,12 +413,59 @@ export class ClientClock {
       this.low = low + step;
       this.lastHealth += step;
       this.ignoreHealthThroughTick = clientTick + Math.abs(step);
-      t[ABOVE_SINCE] = Number.NaN;
       this.adjustments++;
       if (step > 0) this.fastForwards++;
       else this.holds++;
     }
+    this.lowFast = this.fastLow();
+    t[AVERAGE] = this.windowSum / this.windowCount;
+    this.dil[0] = 0;
+    if (this.dilationOn) this.setDilation(target, full);
     return step;
+  }
+
+  /**
+   * δ into `dil[0]` for the window as it stands (D-039, M3 design §2.7): the adaptive cap's excess
+   * slows at the full DIL_MAX; else a fast low edge below the target speeds up by DIL_GAIN per
+   * tick; else a full window whose low edge and mean are both a tick or more above slows down the
+   * same way. The mean counts rounded for that: the EWMA approaches a health from below and can
+   * stall a few ulps short of it for good, so a health settled at exactly target + 1 counts as 1
+   * above. Doubles stay in slots (no fractional double crosses the call).
+   */
+  private setDilation(target: number, full: boolean): void {
+    const t = this.t;
+    const out = this.dil;
+    if ((t[AVERAGE] as number) > target + MAX_ADAPTIVE_TICKS + CAP_EXCESS) {
+      out[0] = -DIL_MAX;
+      return;
+    }
+    const fast = this.lowFast - target;
+    if (fast <= -SPEED_UP_DEADBAND) {
+      out[0] = Math.min(DIL_MAX, -DIL_GAIN * fast);
+      return;
+    }
+    const low = this.low;
+    if (
+      full &&
+      low >= target + SLOW_DOWN_ABOVE &&
+      Math.round(t[HEALTH] as number) >= target + SLOW_DOWN_ABOVE
+    ) {
+      out[0] = -Math.min(DIL_MAX, DIL_GAIN * (Math.min(low, t[HEALTH] as number) - target));
+    }
+  }
+
+  /** The lowest of the newest LOW_FAST_WINDOW healths in the window. */
+  private fastLow(): number {
+    const w = this.recent;
+    const n = Math.min(this.windowCount, LOW_FAST_WINDOW);
+    let j = this.windowHead + this.windowCount - 1;
+    if (j >= LOW_WINDOW) j -= LOW_WINDOW;
+    let m = w[j] as number;
+    for (let i = 1; i < n; i++) {
+      j = j === 0 ? LOW_WINDOW - 1 : j - 1;
+      m = Math.min(m, w[j] as number);
+    }
+    return m;
   }
 
   /**
