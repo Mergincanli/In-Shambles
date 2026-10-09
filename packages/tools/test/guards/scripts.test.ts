@@ -242,12 +242,14 @@ function hasIdDescribe(file: string, prefix: string): boolean {
 
 /**
  * prefix, root script, IDs that must have a file (NET-01 is a shared unit test, D-026, so it has no
- * net-01 file). acceptance-ids.test.ts checks the full docs/09 lists.
+ * net-01 file; NET-02's unit is one too, `shared/test/net/delta.test.ts`, with its real-store twin
+ * in `client/test/net/net-02-store.test.ts`; its match legs get net-02 files in M3 increment 9).
+ * acceptance-ids.test.ts checks the full docs/09 lists.
  */
 const ID_SUITES = [
   ["BAL", "test:balance", ["01"]],
   ["MV", "test:movement", ["01", "03", "04", "05", "06", "07", "08", "17", "18", "19"]],
-  ["NET", "test:net", ["03", "04", "05", "09"]],
+  ["NET", "test:net", ["02", "03", "04", "05", "09"]],
 ] as const;
 
 describe.each(ID_SUITES)("naming of the %s-NN test files", (prefix, script, required) => {

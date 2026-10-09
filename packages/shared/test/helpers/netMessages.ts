@@ -49,16 +49,19 @@ import {
   SNAP_BUDGET_BITS,
   SNAP_FLAG_SPECTATOR,
   SNAP_FLAG_STARVED,
+  SNAPSHOT_HISTORY,
 } from "../../src/net/protocol";
 import {
   decodeSnapshotBody,
   decodeSnapshotHeader,
   ENTITY_NEW_BITS,
   encodeSnapshot,
+  SNAP_FIT_MAX_PLAYERS,
   SNAP_FULL_FIXED_BITS,
   SnapshotHeader,
 } from "../../src/net/snapshot";
 import {
+  copySlot,
   ENTITY_EVENT_SLOTS,
   FRAME_SLOTS,
   playerStateToSlot,
@@ -176,39 +179,188 @@ export function randomFrame(
   return f;
 }
 
-/** A snapshot header and frame, as the SNAPSHOT codec takes them. */
+const MAX_FIELD = 524288;
+const MAX_LOCAL_VELOCITY = 524287;
+const MAX_ENTITY_VELOCITY = 32767;
+
+/**
+ * `base` moved by a random class (M3 design §2.1): the same a quarter of the time, else a small
+ * (i7), medium (i13) or any value, clamped to ±`max`, so every class and its edges come up.
+ */
+export function mutateAxis(rng: Mulberry32, base: number, max: number): number {
+  const c = rng.nextInt(4);
+  let v = base;
+  if (c === 1) v = base + pick(rng, [-64, -1, 1, 63, intIn(rng, -64, 63)]);
+  else if (c === 2) v = base + pick(rng, [-4096, -65, 64, 4095, intIn(rng, -4096, 4095)]);
+  else if (c === 3) v = intIn(rng, -max, max);
+  return Math.max(-max, Math.min(max, v));
+}
+
+/** Half the time `base`, else a random value of `lo`…`hi`. */
+function maybe(rng: Mulberry32, base: number, lo: number, hi: number): number {
+  return rng.nextInt(2) === 0 ? base : intIn(rng, lo, hi);
+}
+
+/**
+ * Random changes to slot `s` of `f` (present, its entity fields): each field group alone or with
+ * others, origin and velocity by random classes, everything within the record's range.
+ */
+export function mutateEntity(rng: Mulberry32, f: WorldFrame, s: number): void {
+  const groups = rng.nextInt(4) === 0 ? 0xff : 1 << rng.nextInt(8);
+  if ((groups & 1) !== 0) {
+    f.originX[s] = mutateAxis(rng, f.originX[s] as number, MAX_FIELD);
+    f.originY[s] = mutateAxis(rng, f.originY[s] as number, MAX_FIELD);
+    f.originZ[s] = mutateAxis(rng, f.originZ[s] as number, MAX_FIELD);
+  }
+  if ((groups & 2) !== 0) {
+    f.entVelX[s] = mutateAxis(rng, f.entVelX[s] as number, MAX_ENTITY_VELOCITY);
+    f.entVelY[s] = mutateAxis(rng, f.entVelY[s] as number, MAX_ENTITY_VELOCITY);
+    f.entVelZ[s] = mutateAxis(rng, f.entVelZ[s] as number, MAX_ENTITY_VELOCITY);
+  }
+  if ((groups & 4) !== 0) f.yaw[s] = intIn(rng, 0, 0xffff);
+  if ((groups & 8) !== 0) f.pitch[s] = intIn(rng, -PITCH_LIMIT_U16, PITCH_LIMIT_U16);
+  if ((groups & 16) !== 0) f.flags[s] = intIn(rng, 0, 0x3ff);
+  if ((groups & 32) !== 0) f.team[s] = intIn(rng, 0, 2);
+  if ((groups & 64) !== 0) f.teleportSeq[s] = intIn(rng, 0, 255);
+  if ((groups & 128) !== 0) {
+    f.eventSeq[s] = intIn(rng, 0, 255);
+    randomEvents(rng, f, s);
+  }
+}
+
+/** Random changes to the receiver's local-block fields of slot `s` of `f`. */
+export function mutateLocal(rng: Mulberry32, f: WorldFrame, s: number): void {
+  if (rng.nextInt(2) === 0) {
+    f.originX[s] = mutateAxis(rng, f.originX[s] as number, MAX_FIELD);
+    f.originY[s] = mutateAxis(rng, f.originY[s] as number, MAX_FIELD);
+    f.originZ[s] = mutateAxis(rng, f.originZ[s] as number, MAX_FIELD);
+  }
+  if (rng.nextInt(2) === 0) {
+    f.vel16X[s] = mutateAxis(rng, f.vel16X[s] as number, MAX_LOCAL_VELOCITY);
+    f.vel16Y[s] = mutateAxis(rng, f.vel16Y[s] as number, MAX_LOCAL_VELOCITY);
+    f.vel16Z[s] = mutateAxis(rng, f.vel16Z[s] as number, MAX_LOCAL_VELOCITY);
+  }
+  f.yaw[s] = maybe(rng, f.yaw[s] as number, 0, 0xffff);
+  f.pitch[s] = maybe(rng, f.pitch[s] as number, -PITCH_LIMIT_U16, PITCH_LIMIT_U16);
+  f.flags[s] = maybe(rng, f.flags[s] as number, 0, 0x3ff);
+  f.ground1[s] = maybe(rng, f.ground1[s] as number, 0, 32768);
+  f.waterLevel[s] = maybe(rng, f.waterLevel[s] as number, 0, 3);
+  f.stamina[s] = maybe(rng, f.stamina[s] as number, 0, 0xffff);
+}
+
+/**
+ * Frame `cur` of tick `tick` as a random successor of `base` (D-038): the receiver's slot (unless
+ * spectator) with changed local fields and a random teleportSeq; each other slot `base` holds
+ * left (a removal), replaced by a new incarnation (another serial), unchanged or changed; a few
+ * slots `base` lacks appear. At most `maxRecords` slots need a record, so a live delta stays
+ * within the budget by construction (36 records: the worst 1088 B).
+ */
+export function randomDeltaFrame(
+  rng: Mulberry32,
+  base: WorldFrame,
+  cur: WorldFrame,
+  tick: number,
+  selfId: number,
+  maxRecords: number,
+): WorldFrame {
+  cur.clear();
+  if (selfId >= 0) {
+    copySlot(cur, selfId, base, selfId);
+    cur.setPresent(selfId, tick);
+    mutateLocal(rng, cur, selfId);
+    cur.teleportSeq[selfId] = maybe(rng, cur.teleportSeq[selfId] as number, 0, 255);
+  }
+  let records = 0;
+  for (let s = 0; s < FRAME_SLOTS; s++) {
+    if (s === selfId) continue;
+    if (base.present[s] === 1) {
+      const r = records < maxRecords ? rng.nextInt(10) : 4;
+      if (r === 0) {
+        records++;
+        continue;
+      }
+      if (r === 1) {
+        randomEntity(rng, cur, s, tick);
+        cur.serial[s] = ((base.serial[s] as number) + 1 + rng.nextInt(1000)) & 0xffff;
+        records++;
+        continue;
+      }
+      copySlot(cur, s, base, s);
+      cur.setPresent(s, tick);
+      if (r >= 5) {
+        mutateEntity(rng, cur, s);
+        records++;
+      }
+    } else if (records < maxRecords && rng.nextInt(16) === 0) {
+      randomEntity(rng, cur, s, tick);
+      records++;
+    }
+  }
+  return cur;
+}
+
+/** A snapshot header, frame and baseline frame, as the SNAPSHOT codec takes them. */
 export class SnapshotParts {
   readonly hdr = new SnapshotHeader();
   readonly frame = new WorldFrame();
+  /**
+   * The baseline frame a delta (`hdr.baseBack` > 0) is coded against, as the receiver holds it.
+   * Parts that encode and decode the same packet share it.
+   */
+  readonly base: WorldFrame;
+
+  constructor(base: WorldFrame = new WorldFrame()) {
+    this.base = base;
+  }
+
   /** The receiver (−1 for a spectator snapshot). */
   get selfId(): number {
     return (this.hdr.flags & SNAP_FLAG_SPECTATOR) !== 0 ? -1 : SNAP_SELF;
   }
+
+  /** The codec's `base` argument: null for a full snapshot. */
+  get baseline(): WorldFrame | null {
+    return this.hdr.baseBack === 0 ? null : this.base;
+  }
 }
 
 export function encodeSnapshotParts(w: BitWriter, m: SnapshotParts): boolean {
-  return encodeSnapshot(w, m.hdr, m.frame, null, m.selfId);
+  return encodeSnapshot(w, m.hdr, m.frame, m.baseline, m.selfId);
 }
 
-/** Header then body, as receiver SNAP_SELF (a spectator snapshot has none). */
+/** Header then body, as receiver SNAP_SELF (a spectator snapshot has none), against `m.base`. */
 export function decodeSnapshotParts(r: BitReader, m: SnapshotParts): boolean {
-  return decodeSnapshotHeader(r, m.hdr) && decodeSnapshotBody(r, m.hdr, null, SNAP_SELF, m.frame);
+  return (
+    decodeSnapshotHeader(r, m.hdr) && decodeSnapshotBody(r, m.hdr, m.baseline, SNAP_SELF, m.frame)
+  );
 }
 
-/** Random valid parts: live (starved or not) or spectator, up to the most records that fit. */
+/**
+ * Random valid parts: live (starved or not) or spectator, full or (half the time) a delta against
+ * a random baseline in `m.base`, up to the most records that fit.
+ */
 export function randomSnapshot(rng: Mulberry32, m: SnapshotParts): SnapshotParts {
   const h = m.hdr;
   h.serverTick = intIn(rng, 1, TICK_MAX);
-  h.baseBack = 0;
   const kind = rng.nextInt(5);
   h.flags = kind === 0 ? SNAP_FLAG_SPECTATOR : kind === 1 ? SNAP_FLAG_STARVED : 0;
   h.cvarHash = intIn(rng, 0, 0xffff);
   h.inputBufferHealth = intIn(rng, -128, 127);
   const spectator = kind === 0;
+  const self = spectator ? -1 : SNAP_SELF;
   const max = spectator ? 24 : 16;
-  const others =
-    rng.nextInt(10) === 0 ? (spectator ? 64 : LIVE_FULL_MAX_OTHERS) : intIn(rng, 0, max);
-  randomFrame(rng, m.frame, h.serverTick, spectator ? -1 : SNAP_SELF, others);
+  const delta = h.serverTick > 1 && rng.nextInt(2) === 0;
+  h.baseBack = delta ? intIn(rng, 1, Math.min(SNAPSHOT_HISTORY - 1, h.serverTick - 1)) : 0;
+  if (!delta) {
+    const others =
+      rng.nextInt(10) === 0 ? (spectator ? 64 : LIVE_FULL_MAX_OTHERS) : intIn(rng, 0, max);
+    randomFrame(rng, m.frame, h.serverTick, self, others);
+    return m;
+  }
+  const most = spectator ? FRAME_SLOTS : SNAP_FIT_MAX_PLAYERS - 1;
+  const baseOthers = rng.nextInt(10) === 0 ? most : intIn(rng, 0, max);
+  randomFrame(rng, m.base, h.serverTick - h.baseBack, self, baseOthers);
+  randomDeltaFrame(rng, m.base, m.frame, h.serverTick, self, rng.nextInt(10) === 0 ? most : max);
   return m;
 }
 
@@ -347,6 +499,12 @@ function kind<T>(
   };
 }
 
+/**
+ * The baseline every SNAPSHOT kind struct shares: a random delta writes its baseline here, and the
+ * kind's kept struct decodes the packet right after against the same frame.
+ */
+const fuzzBase = new WorldFrame();
+
 export const MESSAGE_KINDS: readonly MessageKind[] = [
   kind(
     MSG_HELLO,
@@ -415,7 +573,7 @@ export const MESSAGE_KINDS: readonly MessageKind[] = [
   kind(
     MSG_SNAPSHOT,
     "SNAPSHOT",
-    () => new SnapshotParts(),
+    () => new SnapshotParts(fuzzBase),
     (rng, m) => {
       randomSnapshot(rng, m);
     },

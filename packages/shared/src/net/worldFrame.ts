@@ -43,7 +43,11 @@ export class WorldFrame {
   readonly present = new Uint8Array(FRAME_SLOTS);
   /** The server tick of the slot's state; 0 = pending. */
   readonly stamp = new Int32Array(FRAME_SLOTS);
-  /** Server only: the slot's connect counter, which tells the encoder a slot holds a new player. */
+  /**
+   * On the server, the slot's connect counter, which tells the encoder a slot holds a new player.
+   * On the client, a stand-in the decoder keeps (the baseline's, + 1 for a "new" record over a
+   * slot it holds) only so a re-encode against the same baseline picks the same body forms (D-038).
+   */
   readonly serial = new Uint16Array(FRAME_SLOTS);
   /** 1/32 u. */
   readonly originX = new Int32Array(FRAME_SLOTS);

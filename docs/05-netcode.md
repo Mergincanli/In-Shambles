@@ -180,7 +180,7 @@ Every message starts with the `u8` type: 1 `HELLO`, 2 `WELCOME`, 3 `READY`, 4 `I
 | `WELCOME` S→C | reliable | protocolVersion 16, clientId 8 (the slot, below 64 since v2: the client refuses more, D-034), tickRate 8 (1–255), serverTick 32, mapName (short ASCII), mapHash lo 32 + hi 32 (the cmap `contentHash`), cvar block (§3.5) | ≈ 0.5 KB with the M2 cvars |
 | `READY` C→S | reliable | none | 1 B |
 | `INPUT` C→S | unreliable | packetSeq 16, lastSnapshotTick 32, count 3 (1–4), newestTick 32; per cmd, newest first: tickBack 8 (not for the first cmd), buttons 16, forward 8, right 8, up 8 (i8 each, ±127), yaw 16, pitch 16 (±16201), weaponSlot 8 (0–7) | 55 B for 4 cmds |
-| `SNAPSHOT` S→C | unreliable | the snapshot header below, the player state below (the local block; not when spectator), entityCount 7 (0–63; 0–64 when spectator), then an entity record per other present player, below | 292 bits + 213 per other player: 37 B alone, 862 B at 32 players; ≤ 1100 B |
+| `SNAPSHOT` S→C | unreliable | the snapshot header below, the local block (not when spectator: the player state below in a full snapshot, the delta local block below in a delta), entityCount 7 (0–63; 0–64 when spectator), then the entity records below: one per other present player in a full snapshot, one per other player that left, appeared or changed since the baseline in a delta | full: 292 bits + 213 per other player, 37 B alone, 862 B at 32 players; worst delta: 312 bits + 233 per other player, 942 B at 32, 1088 B at 37; ≤ 1100 B |
 | `PING` C→S | unreliable | pingId 16 | 3 B |
 | `PONG` S→C | unreliable | pingId 16, serverTick 32 | 7 B |
 | `CVARS` S→C | reliable | effectiveTick 32, blockHash 32, cvar block (§3.5) | ≈ 0.5 KB |
@@ -207,19 +207,19 @@ Every message starts with the `u8` type: 1 `HELLO`, 2 `WELCOME`, 3 `READY`, 4 `I
 |---|---|---|
 | type | 8 | 5 |
 | serverTick | 32 | 1 … `TICK_MAX` |
-| baseBack | 6 | serverTick − the baseline's tick; 0 = full. A delta (1–63) is refused until D-038 |
+| baseBack | 6 | serverTick − the baseline's tick; 0 = full; 1–63 = a delta against the receiver's frame of that tick (D-038), whose tick must be ≥ 1 (baseBack < serverTick) |
 | flags | 8 | bit 0 starved; bit 2 spectator (every player, no local block: demo files only, D-044; a live connection drops and strikes it); bit 3 deferred list, refused until D-046; bit 1 (v1's teleport flag) and bits 4–7 must be 0; spectator with starved is refused |
 | cvarHash | 16 | low 16 bits of the replicated cvar hash (§3.5) |
 | inputBufferHealth | 8 | i8 (§8.2); not when spectator |
 | teleportSeq | 8 | the receiver's teleport counter (D-035); not when spectator |
 
-**Entity record** (a player other than the receiver; entity id = client id), the full ("new") form, 213 bits:
+**Entity record** (a player other than the receiver; entity id = client id; a removal is its first two fields, 17 bits, and the delta form follows the delta local block below), the full ("new") form, 213 bits:
 
 | Field | Bits | Encoding and decode check |
 |---|---|---|
 | id | 16 | < 64 (`MATCH_MAX_CLIENTS`); ids strictly ascending; never the receiver's own, unless spectator |
-| removed | 1 | 0: a removal needs a baseline (refused until D-038) |
-| new | 1 | 1: a full body follows (the delta body is refused until D-038) |
+| removed | 1 | 1: the player left since the baseline, nothing follows; refused in a full snapshot and for a slot the baseline lacks (one it holds as pending may be removed, D-046) |
+| new | 1 | 1: a full body follows: always in a full snapshot and for a slot the baseline has no state for; over a slot with state only for a new incarnation (the server's slot serial changed, D-034). 0: a delta body follows (below) |
 | origin x, y, z | 3 × 21 | signed, 1/32 u; within ±524288 (±16384 u) |
 | velocity x, y, z | 3 × 16 | signed, 1 u/s (the 1/16 u/s velocity rounded half up, clamped); within ±32767 (−32768 is refused) |
 | yaw | 16 | u16 angle units |
@@ -230,9 +230,42 @@ Every message starts with the `u8` type: 1 `HELLO`, 2 `WELCOME`, 3 `READY`, 4 `I
 | eventSeq | 8 | movement events so far (wrapping) |
 | events | 2 × 12 | the player's two newest movement events, newest first: kind 4 (0 none, 1 step, 2 jump, 3 land; 4–15 refused) + value 8 (step: the height change rounded to whole u, i8; land: the impact speed / 16 rounded, at most 255; 0 when empty and for a jump; an empty first slot needs an empty second). The server appends every pmove event of the player's tick to its slot's history, which, like the teleport counter, persists across the players who take the slot |
 
-- **Size:** a live snapshot is at most `MAX_SNAPSHOT_BYTES` (1100 B, §4.3); the encoder refuses more and so does the decoder. Full snapshots of a 37-player match (the cap until D-046, D-034) take 995 B; at most 39 other players fit. A spectator snapshot (demo files only) is at most 2048 B: all 64 players take 1714 B.
-- **Canonical:** a packet the decoder accepts re-encodes to the same bytes, and decodes to the frame it was encoded from, as its receiver holds it: its own slot from the local block (with the header's teleportSeq), each record's slot with the snapshot's tick as its stamp, every other slot absent (M3 design §2.2).
-- **Forms that join within v2** (nothing is released between): the delta local block and delta entity records against a baseline (`baseBack` > 0), and removals, with D-038; the deferred-id list (`flags` bit 3) and pending slots with D-046. Until then the decoder refuses them.
+**Delta local block** (`baseBack` > 0; against the receiver's own slot of the baseline frame, which must hold state), at most 219 bits: a mask, then the set fields in mask order. Origin and velocity are class-coded per axis: a 2-bit class (0 the baseline's value, nothing follows; 1 and 2 a signed difference of the first or second width; 3 the absolute value at the full block's width), always the smallest class that holds the value. Mask 0 = unchanged.
+
+| Field | Bits | Encoding and decode check |
+|---|---|---|
+| mask | 8 | bit 0 origin, 1 velocity, 2 viewYaw, 3 viewPitch, 4 flags, 5 groundEntity + 1, 6 waterLevel, 7 stamina |
+| origin x, y, z | 3 × 23 | class 2 + i7 / i13 / absolute i21; within ±524288 |
+| velocity x, y, z | 3 × 22 | class 2 + i7 / i13 / absolute i20; within ±524287 |
+| viewYaw | 16 | as the player state |
+| viewPitch | 16 | as the player state; within ±16201 |
+| flags | 10 | as the player state |
+| groundEntity + 1 | 16 | as the player state; ≤ 32768 |
+| waterLevel | 2 | as the player state |
+| stamina | 16 | as the player state |
+
+**Delta entity record** (`baseBack` > 0, `new` 0; against the slot's state in the baseline frame, which must hold state for it), at most 233 bits: a mask (never 0), then the set fields in mask order, origin and velocity class-coded as above:
+
+| Field | Bits | Encoding and decode check |
+|---|---|---|
+| id | 16 | as the full record |
+| removed | 1 | 0 |
+| new | 1 | 0 |
+| mask | 8 | bit 0 origin, 1 velocity, 2 yaw, 3 pitch, 4 flags, 5 team, 6 teleportSeq, 7 events; 0 is refused |
+| origin x, y, z | 3 × 23 | class 2 + i7 / i13 / absolute i21; within ±524288 |
+| velocity x, y, z | 3 × 18 | class 2 + i6 / i11 / absolute i16 (1 u/s); within ±32767 |
+| yaw | 16 | as the full record |
+| pitch | 16 | as the full record |
+| flags | 10 | as the full record |
+| team | 2 | as the full record |
+| teleportSeq | 8 | as the full record |
+| eventSeq | 8 | as the full record (with the events, one group) |
+| events | 2 × 12 | as the full record |
+
+- **Unlisted players in a delta:** a slot the baseline holds that has no record is unchanged: the receiver copies it from the baseline with this snapshot's tick as its stamp; a slot the baseline lacks and that has no record stays absent. A record is sent only when one is needed (removed, new, or a delta with a mask ≠ 0).
+- **Size:** a live snapshot is at most `MAX_SNAPSHOT_BYTES` (1100 B, §4.3); the encoder refuses more and so does the decoder. Full snapshots of a 37-player match (the cap until D-046, D-034) take 995 B; at most 39 other players fit. The worst delta (every local and entity field changed, origins and velocities absolute: 312 bits + 233 per other player) takes 942 B at 32 players and 1088 B at 37, so every snapshot fits by construction while the baseline and the current frame together hold at most 37 players (`SNAP_FIT_MAX_PLAYERS`); 36 others and 6 removals would take 1101 B, the D-046 scheduler's case. A spectator snapshot (demo files only) is at most 2048 B: all 64 players take 1714 B full and at worst 1874 B as a delta.
+- **Canonical:** a packet the decoder accepts re-encodes to the same bytes against the same baseline, and decodes to the frame it was encoded from, as its receiver holds it: its own slot from the local block (with the header's teleportSeq), each full or delta record's slot and each unlisted slot the baseline holds with the snapshot's tick as its stamp, every other slot absent (M3 design §2.2). The decoder refuses a non-minimal class, a set group whose classes are all 0, a set field or group equal to the baseline, a mask of 0, a delta record or a removal for a slot the baseline lacks (and a delta record for one it holds as pending), and an unlisted slot the baseline holds as pending.
+- **Forms that join within v2** (nothing is released between): the deferred-id list (`flags` bit 3) and pending slots join with D-046. Until then the decoder refuses them.
 
 INPUT, SNAPSHOT, PING and PONG encode and decode without allocating, refused packets included: decoders read a tick as two u16 halves and reject it past `TICK_MAX` before it becomes a number V8 would box. The text and cvar-block fields of the reliable messages allocate (rare). A decoder that accepts a packet re-encodes it to the same bytes (NET-01).
 
@@ -258,7 +291,7 @@ The origin is not simply rounded: pmove snaps it to the nearest clear 1/32 u gri
   - `cvarHash` (u16)
   - `inputBufferHealth` (i8, §8.2) and `teleportSeq` (u8: the receiver's teleport counter, D-035)
   - v1 also carried `lastProcessedCmdTick`. v2 drops it: a cmd's tick is the server tick it is simulated on (D-027), so it always equalled `serverTick`, and no client read it. It returns if cmd ticks ever decouple from server ticks.
-- **M2 (v1) sent only the header and the local player's full movement state.** Since M3 (v2) a snapshot also lists every other player. Every snapshot is full until delta coding (D-038, M3); the combat state joins in a later milestone, with a protocol version bump.
+- **M2 (v1) sent only the header and the local player's full movement state.** Since M3 (v2) a snapshot also lists every other player, as a full snapshot or as a delta against a baseline the client acked (D-038: the codec and the client's store since M3 increment 8, the server's deltas with increment 9; until then the server sends full snapshots); the combat state joins in a later milestone, with a protocol version bump.
 - **Local player block:** the full authoritative `PlayerState` (`docs/03` §6) plus the combat state (ammo, weapon state, zoom, bleeding, wounds), delta-coded against the baseline.
 - **Entities:** count (u7), then per entity, ids strictly ascending:
   - `id` (u16; a player's entity id is its client id, < 64, D-034; the receiver itself is never listed), `removed` bit, `new` bit (a full body follows)
@@ -271,6 +304,7 @@ The origin is not simply rounded: pmove snaps it to the nearest clear 1/32 u gri
 ### 4.3 Delta compression
 - The server keeps the last 64 snapshots per client. The baseline is the newest snapshot the client acked (`lastSnapshotTick`).
 - If the baseline is too old or missing → send full. The client keeps received snapshots for 64 ticks to resolve baselines.
+- **The client** (D-038, `client/src/net/snapshotStore.ts`): INPUT acks the newest snapshot tick it stored (0 before the first: "send a full snapshot"). It decodes a delta against its stored frame of the baseline tick, so each stored frame equals the frame the server encoded it from. A delta whose baseline frame it does not hold (lost, or overwritten in the ring) is dropped and counted as a baseline drop, not struck; after 8 such drops in a row it acks 0 until a full snapshot arrives (a safety net: with 64 frames on both ends a server that codes only against acked ticks never triggers it).
 - **Size target** ≤ 1100 bytes (datagram-safe). If over budget, defer low-priority entities to the next tick (priority accumulator: distance, visibility, time since last update).
 
 ## 5. Client prediction and reconciliation

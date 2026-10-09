@@ -107,6 +107,18 @@ export const SNAP_BUDGET_BITS = MAX_SNAPSHOT_BYTES * 8;
 /** A spectator snapshot's cap (design): up to 64 players, in demo files only, never on a socket. */
 export const MAX_SPECTATOR_SNAPSHOT_BYTES = 2048;
 
+/**
+ * Delta class widths (M3 design §2.1, design values; D-038): a class-coded axis is class 0 (same
+ * as the baseline), 1 (a signed difference of the D1 width), 2 (of the D2 width) or 3 (the
+ * absolute value at the full width: origin i21, local velocity i20, entity velocity i16).
+ */
+export const SNAP_ORIGIN_D1 = 7;
+export const SNAP_ORIGIN_D2 = 13;
+export const SNAP_LOCAL_VELOCITY_D1 = 7;
+export const SNAP_LOCAL_VELOCITY_D2 = 13;
+export const SNAP_ENTITY_VELOCITY_D1 = 6;
+export const SNAP_ENTITY_VELOCITY_D2 = 11;
+
 /** PRINT levels (u2; 3 is not used and rejected). */
 export const PRINT_INFO = 0;
 export const PRINT_WARN = 1;

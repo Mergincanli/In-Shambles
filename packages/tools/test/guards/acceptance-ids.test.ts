@@ -62,15 +62,16 @@ const MILESTONES: Readonly<Record<string, Milestone>> = {
       "NET-12": "long",
       "NET-09": "load",
     },
-    // NET-01's fast test covers the v2 full snapshots since increment 4 (deltas and the deferred
-    // list extend it in increments 8 and 10); NET-04 keeps its M2 fast test until increment 9,
+    // NET-01's fast test covers the v2 full snapshots since increment 4 and the deltas since
+    // increment 8 (the deferred list extends it in increment 10); NET-02's fast unit (the codec
+    // and the store's rules over a long impaired world sequence) landed in increment 8, its match
+    // legs (fast smoke, long file) come in increment 9; NET-04 keeps its M2 fast test until increment 9,
     // which adds its 16-client legs to its long file (`net-04-reconciliation.long.ts`, holding
     // the M2 runs the fast tier leaves out since D-032's amendment); NET-09's fast in-process
     // proxy landed in increment 6, its load leg comes in increment 18; NET-05's fast matrix and
     // its long file (the rest of the matrix, 16 clients) landed in increment 7, its 64-player leg
     // joins the long file in increment 10.
     pending: {
-      "NET-02": "increment 8",
       "NET-02 long": "increment 9",
       "NET-07": "increment 11",
       "NET-08": "increment 9",

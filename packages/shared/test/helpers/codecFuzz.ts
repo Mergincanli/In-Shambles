@@ -9,7 +9,10 @@ import { MESSAGE_KINDS, type MessageKind, newWriter, readerOver } from "./netMes
 // tier (`long/net-01-codec-fuzz.long.ts`) with the full counts. The truncation and bit-flip
 // streams have a generator per message type, so the fast messages are the long ones' first; the
 // corruption fuzz draws snapshots, then inputs, from one generator, so its fast inputs start at
-// another point of the stream than the long ones (the fast snapshots are still a prefix).
+// another point of the stream than the long ones (the fast snapshots are still a prefix). Half
+// the random snapshots are deltas (D-038) against a baseline the SNAPSHOT generator and decoder
+// share (`netMessages.ts`), so every fuzz also feeds the delta decoder, re-encoding what it accepts
+// against that baseline.
 
 /** How many seeded messages each fuzz takes. */
 export interface CodecFuzzCounts {

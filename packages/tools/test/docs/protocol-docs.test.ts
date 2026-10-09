@@ -7,7 +7,9 @@ import {
   CHANNEL_UNRELIABLE,
   CmdMsg,
   CVAR_HASH_SEED,
+  ENTITY_DELTA_MAX_BITS,
   ENTITY_NEW_BITS,
+  ENTITY_REMOVED_BITS,
   encodeCmd,
   encodeHello,
   encodeInput,
@@ -20,6 +22,7 @@ import {
   HelloMsg,
   InputMsg,
   KickMsg,
+  LOCAL_DELTA_MAX_BITS,
   MAX_CLIENT_MESSAGE_BYTES,
   MAX_RELIABLE_BYTES,
   MAX_SNAPSHOT_BYTES,
@@ -31,8 +34,16 @@ import {
   PROTOCOL_VERSION,
   PrintMsg,
   SHORT_TEXT_MAX,
+  SNAP_DELTA_FIXED_BITS,
+  SNAP_ENTITY_VELOCITY_D1,
+  SNAP_ENTITY_VELOCITY_D2,
+  SNAP_FIT_MAX_PLAYERS,
   SNAP_FULL_FIXED_BITS,
   SNAP_HEADER_BITS,
+  SNAP_LOCAL_VELOCITY_D1,
+  SNAP_LOCAL_VELOCITY_D2,
+  SNAP_ORIGIN_D1,
+  SNAP_ORIGIN_D2,
   SnapshotHeader,
   TEXT_MAX,
   type UserCmd,
@@ -109,20 +120,56 @@ describe("docs/05 §3.6 protocol layout", () => {
     expect(layout).toContain(`the full ("new") form, ${ENTITY_NEW_BITS} bits:`);
   });
 
-  // Inc. 4 lands the full forms only (D-033): the decoder refuses deltas, removals and the
-  // deferred list, and the doc must say so until D-038 (inc. 8) and D-046 (inc. 10) flip both.
-  it("marks the delta forms refused until D-038 and the deferred list until D-046", () => {
-    expect(tableRow("**Snapshot header**", "baseBack")).toContain("is refused until D-038");
+  // Inc. 4 landed the full forms (D-033), inc. 8 the deltas and removals (D-038); the decoder
+  // refuses the deferred list, and the doc must say so until D-046 (inc. 10) flips it.
+  it("gives the delta forms (D-038) and marks the deferred list refused until D-046", () => {
+    expect(layout).not.toContain("until D-038");
+    expect(tableRow("**Snapshot header**", "baseBack")).toContain("1–63 = a delta");
+    expect(tableRow("**Entity record**", "removed")).toContain("1: the player left");
+    expect(tableRow("**Entity record**", "new")).toContain("0: a delta body follows");
     expect(tableRow("**Snapshot header**", "flags")).toContain(
       "deferred list, refused until D-046",
     );
-    expect(tableRow("**Entity record**", "removed")).toContain("(refused until D-038)");
-    expect(tableRow("**Entity record**", "new")).toContain("is refused until D-038");
-    expect(layout).toContain("with D-038; the deferred-id list (`flags` bit 3) and pending");
-    expect(layout).toContain("with D-046. Until then the decoder refuses them.");
+    expect(layout).toContain(
+      "the deferred-id list (`flags` bit 3) and pending slots join with D-046. Until then the " +
+        "decoder refuses them.",
+    );
   });
 
-  it("states the sizes of a full snapshot and a four-cmd INPUT", () => {
+  it("gives the delta local block and delta record widths at their largest (D-038)", () => {
+    expect(tableBits("**Delta local block**")).toBe(LOCAL_DELTA_MAX_BITS);
+    expect(layout).toContain(`which must hold state), at most ${LOCAL_DELTA_MAX_BITS} bits:`);
+    expect(tableBits("**Delta entity record**")).toBe(ENTITY_DELTA_MAX_BITS);
+    expect(layout).toContain(
+      `which must hold state for it), at most ${ENTITY_DELTA_MAX_BITS} bits:`,
+    );
+    expect(layout).toContain(`a removal is its first two fields, ${ENTITY_REMOVED_BITS} bits,`);
+    // The class widths (protocol.ts) as the tables give them.
+    const classes = (d1: number, d2: number, full: number) =>
+      `class 2 + i${d1} / i${d2} / absolute i${full}`;
+    expect(tableRow("**Delta local block**", "origin x, y, z")).toContain(
+      classes(SNAP_ORIGIN_D1, SNAP_ORIGIN_D2, 21),
+    );
+    expect(tableRow("**Delta local block**", "velocity x, y, z")).toContain(
+      classes(SNAP_LOCAL_VELOCITY_D1, SNAP_LOCAL_VELOCITY_D2, 20),
+    );
+    expect(tableRow("**Delta entity record**", "origin x, y, z")).toContain(
+      classes(SNAP_ORIGIN_D1, SNAP_ORIGIN_D2, 21),
+    );
+    expect(tableRow("**Delta entity record**", "velocity x, y, z")).toContain(
+      classes(SNAP_ENTITY_VELOCITY_D1, SNAP_ENTITY_VELOCITY_D2, 16),
+    );
+    // The worst delta of 32 and of SNAP_FIT_MAX_PLAYERS players, as the size bullet states.
+    const bytes = (others: number) =>
+      (SNAP_DELTA_FIXED_BITS + others * ENTITY_DELTA_MAX_BITS + 7) >> 3;
+    expect(layout).toContain(
+      `${SNAP_DELTA_FIXED_BITS} bits + ${ENTITY_DELTA_MAX_BITS} per other player) takes ` +
+        `${bytes(31)} B at 32 players and ${bytes(SNAP_FIT_MAX_PLAYERS - 1)} B at ` +
+        `${SNAP_FIT_MAX_PLAYERS},`,
+    );
+  });
+
+  it("states the sizes of a full snapshot, the worst delta and a four-cmd INPUT", () => {
     const rows = firstTable(layout).rows;
     const size = (name: string) => rows.find((r) => r[0]?.startsWith(`\`${name}\``))?.[3];
     const w = new BitWriter(MAX_UNRELIABLE_BYTES);
@@ -136,9 +183,14 @@ describe("docs/05 §3.6 protocol layout", () => {
       expect(encodeSnapshot(w, h, frame, null, 0)).toBe(true);
       return w.byteLength;
     };
+    const worstDelta = (others: number) =>
+      (SNAP_DELTA_FIXED_BITS + others * ENTITY_DELTA_MAX_BITS + 7) >> 3;
     expect(size("SNAPSHOT")).toBe(
-      `${SNAP_FULL_FIXED_BITS} bits + ${ENTITY_NEW_BITS} per other player: ${bytesWith(0)} B ` +
-        `alone, ${bytesWith(31)} B at 32 players; ≤ ${MAX_SNAPSHOT_BYTES} B`,
+      `full: ${SNAP_FULL_FIXED_BITS} bits + ${ENTITY_NEW_BITS} per other player, ` +
+        `${bytesWith(0)} B alone, ${bytesWith(31)} B at 32 players; worst delta: ` +
+        `${SNAP_DELTA_FIXED_BITS} bits + ${ENTITY_DELTA_MAX_BITS} per other player, ` +
+        `${worstDelta(31)} B at 32, ${worstDelta(SNAP_FIT_MAX_PLAYERS - 1)} B at ` +
+        `${SNAP_FIT_MAX_PLAYERS}; ≤ ${MAX_SNAPSHOT_BYTES} B`,
     );
     const input = new InputMsg();
     input.count = 4;

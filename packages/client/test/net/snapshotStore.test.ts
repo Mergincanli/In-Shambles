@@ -12,8 +12,10 @@ import {
 } from "@game/shared";
 import { describe, expect, it } from "vitest";
 import {
+  BASELINE_MISSES_BEFORE_FULL,
   SnapshotStore,
   STORE_BAD,
+  STORE_NO_BASELINE,
   STORE_SPECTATOR,
   STORE_STALE,
   STORE_STORED,
@@ -21,25 +23,41 @@ import {
 
 const SELF = 2;
 
-/** The bytes of a full snapshot of `tick` for receiver SELF, players 0–3 present. */
-function snapshot(tick: number, flags = 0): Uint8Array {
-  const h = new SnapshotHeader();
-  h.serverTick = tick;
-  h.flags = flags;
-  h.inputBufferHealth = 2;
+/** The server's frame of `tick`: players 0–3 present, each moving along x (player 3 left at 50). */
+function serverFrame(tick: number): WorldFrame {
   const f = new WorldFrame();
   const ps = new PlayerState();
   for (let s = 0; s < 4; s++) {
+    if (s === 3 && tick >= 50) continue;
     f.setPresent(s, tick);
     ps.origin[0] = tick + s;
     playerStateToSlot(f, s, ps);
   }
   f.teleportSeq[SELF] = 1;
+  return f;
+}
+
+/**
+ * The bytes of the snapshot of `tick` for receiver SELF: full, or a delta against the server's
+ * frame of `baseTick`.
+ */
+function snapshot(tick: number, flags = 0, baseTick = 0): Uint8Array {
+  const h = new SnapshotHeader();
+  h.serverTick = tick;
+  h.flags = flags;
+  h.inputBufferHealth = 2;
+  h.baseBack = baseTick === 0 ? 0 : tick - baseTick;
+  const base = baseTick === 0 ? null : serverFrame(baseTick);
   const w = new BitWriter(MAX_UNRELIABLE_BYTES);
-  if (!encodeSnapshot(w, h, f, null, (flags & SNAP_FLAG_SPECTATOR) !== 0 ? -1 : SELF)) {
+  const self = (flags & SNAP_FLAG_SPECTATOR) !== 0 ? -1 : SELF;
+  if (!encodeSnapshot(w, h, serverFrame(tick), base, self)) {
     throw new Error("test snapshot did not encode");
   }
   return w.bytes.slice(0, w.byteLength);
+}
+
+function delta(tick: number, baseTick: number): Uint8Array {
+  return snapshot(tick, 0, baseTick);
 }
 
 const reader = new BitReader();
@@ -59,7 +77,67 @@ describe("SnapshotStore (M3 design §2.3)", () => {
     expect(store.header.teleportSeq).toBe(1);
     expect(f?.presentCount).toBe(4);
     expect(f?.originX[3]).toBe(13 * 32);
-    expect([store.newestTick, store.stored, store.full]).toEqual([10, 1, 1]);
+    expect([store.newestTick, store.stored, store.full, store.delta]).toEqual([10, 1, 1, 0]);
+  });
+
+  it("decodes a delta against its stored baseline into the frame the server encoded (D-038)", () => {
+    const store = new SnapshotStore();
+    receive(store, snapshot(40));
+    expect(store.ackTick).toBe(40);
+    for (let t = 41; t < 60; t++) {
+      expect(receive(store, delta(t, store.ackTick)), `tick ${t}`).toBe(STORE_STORED);
+      expect(store.header.baseBack).toBe(1);
+      expect(frameDigest(store.ring.get(t) as WorldFrame, SELF)).toBe(
+        frameDigest(serverFrame(t), SELF),
+      );
+      expect(store.ackTick).toBe(t);
+    }
+    // Player 3 left at 50: removed in that delta, absent since.
+    expect([store.ring.get(49)?.present[3], store.ring.get(50)?.present[3]]).toEqual([1, 0]);
+    // A delta against an older stored frame, and one that arrives late, behind the newest.
+    expect(receive(store, delta(62, 45))).toBe(STORE_STORED);
+    expect(receive(store, delta(61, 59))).toBe(STORE_STORED);
+    expect(store.newestTick).toBe(62);
+    expect([store.stored, store.full, store.delta, store.baselineDrops]).toEqual([22, 1, 21, 0]);
+  });
+
+  it("drops a delta whose baseline it does not hold, without striking it", () => {
+    const store = new SnapshotStore();
+    receive(store, snapshot(100));
+    // Never stored, and evicted: tick 100 + 64 overwrote 100's slot.
+    expect(receive(store, delta(105, 103))).toBe(STORE_NO_BASELINE);
+    expect(receive(store, snapshot(164))).toBe(STORE_STORED);
+    expect(receive(store, delta(163, 100))).toBe(STORE_NO_BASELINE);
+    expect(receive(store, delta(166, 164))).toBe(STORE_STORED);
+    expect([store.baselineDrops, store.bad, store.stored, store.ackTick]).toEqual([2, 0, 3, 166]);
+    // A stale delta is dropped as stale before its baseline is looked up.
+    expect(receive(store, delta(166, 120))).toBe(STORE_STALE);
+    expect(store.baselineDrops).toBe(2);
+  });
+
+  it("acks 0 after 8 missing baselines in a row, until a full snapshot arrives", () => {
+    const store = new SnapshotStore();
+    receive(store, snapshot(10));
+    expect(BASELINE_MISSES_BEFORE_FULL).toBe(8);
+    // Lost baselines: deltas against ticks the client never got.
+    for (let i = 0; i < BASELINE_MISSES_BEFORE_FULL - 1; i++) {
+      expect(receive(store, delta(20 + i, 15))).toBe(STORE_NO_BASELINE);
+    }
+    expect(store.ackTick).toBe(10);
+    // A stored snapshot breaks the run.
+    expect(receive(store, delta(30, 10))).toBe(STORE_STORED);
+    for (let i = 0; i < BASELINE_MISSES_BEFORE_FULL - 1; i++) receive(store, delta(31 + i, 25));
+    expect(store.ackTick).toBe(30);
+    receive(store, delta(40, 25));
+    expect([store.ackTick, store.newestTick, store.baselineDrops]).toEqual([0, 30, 15]);
+    // A delta that still decodes (the server had not seen the 0 yet) keeps asking.
+    expect(receive(store, delta(41, 30))).toBe(STORE_STORED);
+    expect(store.ackTick).toBe(0);
+    expect(receive(store, snapshot(42))).toBe(STORE_STORED);
+    expect(store.ackTick).toBe(42);
+    receive(store, delta(43, 15));
+    store.reset();
+    expect([store.ackTick, store.newestTick]).toEqual([0, 0]);
   });
 
   it("swaps decode targets in, so a later snapshot never overwrites a stored frame", () => {

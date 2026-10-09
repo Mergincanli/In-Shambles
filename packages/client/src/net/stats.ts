@@ -48,7 +48,11 @@ export const STAT_RENDER_SNAPS = 18;
 /** Remote movement events surfaced, and those lost (more than 2 in one step of a slot). */
 export const STAT_REMOTE_EVENTS = 19;
 export const STAT_REMOTE_EVENTS_LOST = 20;
-export const STAT_COUNT = 21;
+/** Of the snapshots stored, those that were full (D-038: the first, and any without a baseline). */
+export const STAT_FULL_SNAPSHOTS = 21;
+/** Delta snapshots dropped because their baseline frame was not held (D-038; not struck). */
+export const STAT_BASELINE_DROPS = 22;
+export const STAT_COUNT = 23;
 
 const BUCKETS = 10;
 const BUCKET_MS = 100;

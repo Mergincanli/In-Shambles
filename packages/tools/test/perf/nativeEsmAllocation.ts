@@ -19,6 +19,8 @@ import {
   STAT_REMOTE_EXTRAPOLATED,
   STAT_REMOTE_HELD,
   STAT_TELEPORTS,
+  STORE_NO_BASELINE,
+  STORE_STORED,
   StrafeCircuit,
   WebSocketTransport,
 } from "@game/client/net";
@@ -54,6 +56,7 @@ import {
   clipVelocity,
   cmdScale,
   copyPlayerState,
+  copySlot,
   createCollisionWorld,
   createLoopbackPair,
   decodeInput,
@@ -68,6 +71,10 @@ import {
   encodePong,
   encodeReady,
   encodeSnapshot,
+  entityEquals,
+  entityVelocity,
+  FRAME_SLOTS,
+  FrameRing,
   findNetProfile,
   HelloMsg,
   HULL_CROUCHED_MAXS,
@@ -743,6 +750,278 @@ function runCodec(n: number): void {
   }
 }
 
+// Delta snapshots (D-038): a 16-player world the server captures each tick into its 64-frame
+// history, each tick's snapshot a delta for one receiver against a baseline 1–63 ticks back (full
+// every 16th tick), decoded by the client's SnapshotStore against its own ring. Every 61st
+// snapshot is lost on the way, so deltas against it take the store's missing-baseline drop. Then
+// one hostile delta per call, decoded against a fixed baseline, which must be refused.
+const DC_PLAYERS = 16;
+const DC_SELF = 3;
+const dcHistory = new FrameRing();
+const dcStore = new SnapshotStore();
+const dcHeader = new SnapshotHeader();
+const dcReader = new BitReader();
+let dcTick = 0;
+let dcSerial = 1;
+
+/** The server's frame of tick `t`: tick t − 1's players moved on (integer steps), events, a rejoin. */
+function dcCapture(t: number): WorldFrame {
+  const f = dcHistory.slot(t);
+  const prevFrame = dcHistory.get(t - 1);
+  f.clear();
+  for (let p = 0; p < DC_PLAYERS; p++) {
+    if (prevFrame !== null && prevFrame.present[p] === 1) copySlot(f, p, prevFrame, p);
+    else {
+      f.setPresent(p, t);
+      f.serial[p] = dcSerial;
+      f.teleportSeq[p] = (f.teleportSeq[p] as number) + 1;
+    }
+    f.setPresent(p, t);
+    // Runners: x creeps every tick, y now and then, velocity with it; yaw turns.
+    f.originX[p] = (((f.originX[p] as number) + 37 + p) & 0x3ffff) - 0x20000;
+    if (((t + p) & 3) === 0) f.originY[p] = (f.originY[p] as number) + ((t & 8) === 0 ? 70 : -70);
+    f.vel16X[p] = ((t * 13 + p * 101) & 0x1fff) - 0x1000;
+    f.entVelX[p] = entityVelocity(f.vel16X[p] as number);
+    f.yaw[p] = (t * 91 + p * 4099) & 0xffff;
+  }
+  // Player 15 leaves for 32 ticks of every 256 and comes back as a new incarnation.
+  if ((t & 255) < 32) f.setAbsent(DC_PLAYERS - 1);
+  else if ((t & 255) === 32) {
+    dcSerial = (dcSerial + 1) & 0xffff;
+    f.serial[DC_PLAYERS - 1] = dcSerial;
+    f.teleportSeq[DC_PLAYERS - 1] = ((f.teleportSeq[DC_PLAYERS - 1] as number) + 1) & 0xff;
+  }
+  if ((t & 15) === 0) {
+    const s = (t >> 4) & 7;
+    pushEntityEvent(f.eventSeq, f.evKind, f.evValue, s, PMEV_STEP, t & 0x7f);
+  }
+  dcHistory.store(t);
+  return f;
+}
+
+/** A hostile delta's header (tick 1000, 10 back) and no local change; `count` records follow. */
+function dcHostileStart(w: BitWriter, count: number): void {
+  w.reset();
+  w.writeBits(MSG_SNAPSHOT, 8);
+  w.writeBits(1000, 16);
+  w.writeBits(0, 16);
+  w.writeBits(10, 6);
+  w.writeBits(0, 16);
+  w.writeBits(0, 16);
+  w.writeBits(0, 8);
+  // The delta local block's mask: no local change.
+  w.writeBits(0, 8);
+  w.writeBits(count, 7);
+}
+
+/** A delta record's id, removed bit 0, new bit 0 and mask. */
+function dcRecord(w: BitWriter, id: number, mask: number): void {
+  w.writeBits(id, 16);
+  w.writeBits(0, 2);
+  w.writeBits(mask, 8);
+}
+
+/** The baseline of the hostile deltas: the receiver and players 3, 20 and 40, every field 0. */
+const dcHostileBase = new WorldFrame();
+const dcHostileOut = new WorldFrame();
+const DC_HOSTILE_SELF = 9;
+dcHostileBase.setPresent(DC_HOSTILE_SELF, 990);
+for (const id of [3, 20, 40]) dcHostileBase.setPresent(id, 990);
+const dcHostile: Uint8Array[] = [];
+{
+  const w = new BitWriter(MAX_UNRELIABLE_BYTES);
+  const done = () => dcHostile.push(w.bytes.slice(0, w.byteLength));
+  // A mask of 0.
+  dcHostileStart(w, 1);
+  dcRecord(w, 3, 0);
+  done();
+  // An origin axis of class 1 that differs by 0 (non-minimal).
+  dcHostileStart(w, 1);
+  dcRecord(w, 3, 1);
+  w.writeBits(1, 2);
+  w.writeBits(0, 7);
+  w.writeBits(0, 4);
+  done();
+  // A yaw equal to the baseline's.
+  dcHostileStart(w, 1);
+  dcRecord(w, 20, 4);
+  w.writeBits(0, 16);
+  done();
+  // A delta for a slot the baseline lacks.
+  dcHostileStart(w, 1);
+  dcRecord(w, 50, 4);
+  w.writeBits(5, 16);
+  done();
+  // A removal of a slot the baseline lacks.
+  dcHostileStart(w, 1);
+  w.writeBits(50, 16);
+  w.writeBits(1, 1);
+  done();
+  // Ids out of order (both removals are otherwise fine).
+  dcHostileStart(w, 2);
+  w.writeBits(20, 16);
+  w.writeBits(1, 1);
+  w.writeBits(3, 16);
+  w.writeBits(1, 1);
+  done();
+  // An absolute entity velocity of −32768.
+  dcHostileStart(w, 1);
+  dcRecord(w, 40, 2);
+  w.writeBits(3, 2);
+  w.writeBits(0x8000, 16);
+  w.writeBits(0, 4);
+  done();
+  // Event kind 4, after two good records.
+  dcHostileStart(w, 3);
+  dcRecord(w, 3, 4);
+  w.writeBits(1, 16);
+  dcRecord(w, 20, 4);
+  w.writeBits(1, 16);
+  dcRecord(w, 40, 128);
+  w.writeBits(1, 8);
+  w.writeBits(4, 4);
+  w.writeBits(0, 20);
+  done();
+}
+// Each hostile delta's valid twin (the defect removed) must decode, or a layout slip would make
+// every hostile packet fail early, on misaligned bits, and leave the refusals it names unrun.
+{
+  const w = new BitWriter(MAX_UNRELIABLE_BYTES);
+  const r = new BitReader();
+  const h = new SnapshotHeader();
+  const check = (what: string) => {
+    r.reset(w.bytes, w.byteLength);
+    if (
+      !decodeSnapshotHeader(r, h) ||
+      !decodeSnapshotBody(r, h, dcHostileBase, DC_HOSTILE_SELF, dcHostileOut)
+    ) {
+      throw new Error(`deltaCodec: the valid twin of the hostile '${what}' delta is refused`);
+    }
+  };
+  dcHostileStart(w, 0);
+  check("empty");
+  dcHostileStart(w, 1);
+  dcRecord(w, 3, 1);
+  w.writeBits(1, 2);
+  w.writeBits(1, 7);
+  w.writeBits(0, 4);
+  check("class 1 axis");
+  dcHostileStart(w, 1);
+  dcRecord(w, 20, 4);
+  w.writeBits(5, 16);
+  check("yaw");
+  dcHostileStart(w, 1);
+  w.writeBits(3, 16);
+  w.writeBits(1, 1);
+  check("removal");
+  dcHostileStart(w, 2);
+  w.writeBits(3, 16);
+  w.writeBits(1, 1);
+  w.writeBits(20, 16);
+  w.writeBits(1, 1);
+  check("ids in order");
+  dcHostileStart(w, 1);
+  dcRecord(w, 40, 2);
+  w.writeBits(3, 2);
+  w.writeBits(0x7fff, 16);
+  w.writeBits(0, 4);
+  check("velocity");
+  dcHostileStart(w, 3);
+  dcRecord(w, 3, 4);
+  w.writeBits(1, 16);
+  dcRecord(w, 20, 4);
+  w.writeBits(1, 16);
+  dcRecord(w, 40, 128);
+  w.writeBits(1, 8);
+  w.writeBits(1, 4);
+  w.writeBits(0, 20);
+  check("events");
+}
+
+/**
+ * Whether the client's frame `got` holds what the server's `cur` does as DC_SELF sees it (what
+ * frameDigest hashes, compared field by field: a digest's uint32 would box here).
+ */
+function dcSame(got: WorldFrame, cur: WorldFrame): boolean {
+  for (let s = 0; s < FRAME_SLOTS; s++) {
+    if (got.present[s] !== cur.present[s] || got.stamp[s] !== cur.stamp[s]) return false;
+    if (cur.present[s] !== 1) continue;
+    if (s !== DC_SELF) {
+      if (!entityEquals(got, s, cur, s)) return false;
+    } else if (
+      got.originX[s] !== cur.originX[s] ||
+      got.originY[s] !== cur.originY[s] ||
+      got.originZ[s] !== cur.originZ[s] ||
+      got.vel16X[s] !== cur.vel16X[s] ||
+      got.vel16Y[s] !== cur.vel16Y[s] ||
+      got.vel16Z[s] !== cur.vel16Z[s] ||
+      got.yaw[s] !== cur.yaw[s] ||
+      got.pitch[s] !== cur.pitch[s] ||
+      got.flags[s] !== cur.flags[s] ||
+      got.teleportSeq[s] !== cur.teleportSeq[s]
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * A snapshot every fourth call (a 16-player delta costs some 50 times a hostile refusal), one
+ * hostile delta every call. Outcomes: stored snapshots equal to the server's frame as the receiver
+ * sees it, deltas stored,
+ * baseline drops; `extra[0]` full snapshots stored; `codecRejected` counts the hostile refusals.
+ */
+function runDeltaCodec(n: number): void {
+  const w = codecWriter;
+  const r = dcReader;
+  const h = dcHeader;
+  for (let i = 0; i < n; i++) {
+    const bad = dcHostile[i & 7] as Uint8Array;
+    r.reset(bad, bad.length);
+    if (
+      !decodeSnapshotHeader(r, h) ||
+      !decodeSnapshotBody(r, h, dcHostileBase, DC_HOSTILE_SELF, dcHostileOut)
+    ) {
+      codecRejected[0] = (codecRejected[0] as number) + 1;
+    }
+    if ((i & 3) !== 0) continue;
+    const t = ++dcTick;
+    const cur = dcCapture(t);
+    // A rotating baseline age, as long as the store holds that frame (the server codes against
+    // acked frames), else the store's ack; a lost tick stays a baseline now and then, so the
+    // store's missing-baseline drop runs too. Full every 16th tick and while the history is short:
+    // rarer, the full path stays in V8's unoptimized tiers, which box its fractional doubles (a few
+    // hundred bytes per full snapshot, measured at every 128th; the codec workload covers that
+    // path hot).
+    let back = 1 + ((i * 7) % 63);
+    if (back < t && !dcStore.ring.has(t - back) && (t - back) % 61 !== 0) {
+      const ack = dcStore.ackTick;
+      back = ack > 0 && t - ack <= 63 ? t - ack : 0;
+    }
+    const full = (t & 15) === 0 || back === 0 || back >= t;
+    h.serverTick = t;
+    h.baseBack = full ? 0 : back;
+    h.flags = 0;
+    h.cvarHash = t & 0xffff;
+    h.inputBufferHealth = (i & 7) - 2;
+    w.reset();
+    const sent = encodeSnapshot(w, h, cur, full ? null : dcHistory.get(t - back), DC_SELF);
+    if (sent && t % 61 !== 0) {
+      r.reset(w.bytes, w.byteLength);
+      const result = dcStore.receive(r, DC_SELF);
+      if (result === STORE_STORED) {
+        if (dcSame(dcStore.lastStored as WorldFrame, cur))
+          outcomes[0] = (outcomes[0] as number) + 1;
+        if (dcStore.header.baseBack !== 0) outcomes[1] = (outcomes[1] as number) + 1;
+        else extra[0] = (extra[0] as number) + 1;
+      } else if (result === STORE_NO_BASELINE) {
+        outcomes[2] = (outcomes[2] as number) + 1;
+      }
+    }
+  }
+}
+
 // Transports (D-026, D-028): an idle PortTransport, a raw loopback pair, and one whose client end
 // is wrapped by NetSim on the worst profile, on a fractional fake clock (a 144 Hz frame per call),
 // so loss, duplication, reordering, jitter and reliable ordering all run, with a wake callback and
@@ -1285,6 +1564,7 @@ function runInterp(n: number): void {
 const WORKLOADS: Record<string, (n: number) => void> = {
   botInput: runBotInput,
   codec: runCodec,
+  deltaCodec: runDeltaCodec,
   interp: runInterp,
   match: runMatch,
   pmove: runPmove,

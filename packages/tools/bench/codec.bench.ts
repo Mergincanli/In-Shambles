@@ -24,29 +24,38 @@ import { countIn, WARMUP_ROUNDS, warmupCalls } from "./trace.bench";
 
 /**
  * The snapshot codec microbenchmark (docs/10 §4.4: encode + decode of a typical snapshot
- * ≤ 30 µs). Since M3 increment 4 a typical snapshot is a 16-player match's full protocol v2
- * snapshot (D-033): the receiver's state as the local block and the other 15 players as entity
- * records, 436 B. The cases are the pmove bench's 16 players on movement_lab (running, jumping,
- * swimming, on the ladder) over 64 ticks, one world frame per tick, each tick's snapshot for each
- * of the 16 receivers, captured once before the clock runs, behind a header like the match sends.
- * Decoding goes through the header and the body into a frame, as the client's store does. INPUT,
- * the other per-tick message, is timed alongside with four cmds from the pmove bench's cmd table.
- * (Deltas, M3 increment 8, change the typical snapshot again.)
+ * ≤ 30 µs). Since M3 increment 8 a typical snapshot is a 16-player match's protocol v2 delta
+ * (D-033, D-038): the receiver's state as a delta local block and the other 15 players as delta
+ * records against the frame of a baseline 6–10 ticks back (about an RTT of acks). The cases are
+ * the pmove bench's 16 players on movement_lab (running, jumping, swimming, on the ladder) over 64
+ * ticks after BASELINE_BACK_MAX lead-in ticks, one world frame per tick, each tick's snapshot for
+ * each of the 16 receivers, captured once before the clock runs, behind a header like the match
+ * sends. Decoding goes through the header and the body into a frame against the baseline frame,
+ * as the client's store does. INPUT, the other per-tick message, is timed alongside with four
+ * cmds from the pmove bench's cmd table. (Until increment 8 the typical snapshot was the full one,
+ * 436 B.)
  */
 
 /** Snapshots captured: the pmove bench's 16 players over 64 ticks, one per receiver. */
 export const CODEC_CASES = 1024;
 const CAPTURE_TICKS = CODEC_CASES / PMOVE_PLAYERS;
+/** The cases' baselines: 6 + (case % 5) ticks back (design: a 6–10 tick baseline age). */
+export const BASELINE_BACK_MIN = 6;
+export const BASELINE_BACK_MAX = 10;
 
 /** docs/10 §4.4: codec encode/decode of a typical snapshot ≤ 30 µs. */
 export const CODEC_BUDGET_NS = 30_000;
 
 export interface CodecWorkload {
-  /** One world frame per captured tick, every player present. */
+  /** One world frame per captured tick (the lead-in first), every player present. */
   readonly frames: readonly WorldFrame[];
-  /** Per case: its header, the frame it is encoded from and its receiver. */
+  /**
+   * Per case: its header (`baseBack` set), the frame it is encoded from, its baseline frame's
+   * index and its receiver.
+   */
   readonly headers: readonly SnapshotHeader[];
   readonly frameOf: Int32Array;
+  readonly baseOf: Int32Array;
   readonly receiver: Int32Array;
   readonly inputs: readonly InputMsg[];
 }
@@ -62,8 +71,9 @@ export function buildCodecWorkload(): CodecWorkload {
   const frames: WorldFrame[] = [];
   const headers: SnapshotHeader[] = [];
   const frameOf = new Int32Array(CODEC_CASES);
+  const baseOf = new Int32Array(CODEC_CASES);
   const receiver = new Int32Array(CODEC_CASES);
-  for (let t = 0; t < CAPTURE_TICKS; t++) {
+  for (let t = 0; t < BASELINE_BACK_MAX + CAPTURE_TICKS; t++) {
     runPmoveTicks(pmove, sim, 1);
     const f = new WorldFrame();
     for (let p = 0; p < PMOVE_PLAYERS; p++) {
@@ -72,13 +82,18 @@ export function buildCodecWorkload(): CodecWorkload {
       f.teleportSeq[p] = 1;
     }
     frames.push(f);
+    if (t < BASELINE_BACK_MAX) continue;
     for (let p = 0; p < PMOVE_PLAYERS; p++) {
+      const c = headers.length;
+      const back = BASELINE_BACK_MIN + (c % (BASELINE_BACK_MAX - BASELINE_BACK_MIN + 1));
       const h = new SnapshotHeader();
       h.serverTick = sim.tick;
+      h.baseBack = back;
       h.inputBufferHealth = 1 + (p % 3);
       h.cvarHash = hash;
-      frameOf[headers.length] = t;
-      receiver[headers.length] = p;
+      frameOf[c] = t;
+      baseOf[c] = t - back;
+      receiver[c] = p;
       headers.push(h);
     }
   }
@@ -103,7 +118,7 @@ export function buildCodecWorkload(): CodecWorkload {
     }
     inputs.push(m);
   }
-  return { frames, headers, frameOf, receiver, inputs };
+  return { frames, headers, frameOf, baseOf, receiver, inputs };
 }
 
 /** One run's writer, reader, decode targets and sinks. */
@@ -120,7 +135,11 @@ export class CodecBenchState {
   sink = 0;
 }
 
-/** `calls` snapshot encodes, each followed by its decode (header, then body), cycling the cases. */
+/**
+ * `calls` delta snapshot encodes, each followed by its decode (header, then body against the
+ * baseline frame), cycling the cases. The baseline is the server's frame of that tick on both
+ * sides: the decoder reads only what the receiver's own frame holds alike.
+ */
 export function runSnapshotCodec(workload: CodecWorkload, s: CodecBenchState, calls: number): void {
   const w = s.writer;
   const r = s.reader;
@@ -132,10 +151,11 @@ export function runSnapshotCodec(workload: CodecWorkload, s: CodecBenchState, ca
     const c = i & (CODEC_CASES - 1);
     const self = workload.receiver[c] as number;
     const f = frames[workload.frameOf[c] as number] as WorldFrame;
+    const base = frames[workload.baseOf[c] as number] as WorldFrame;
     w.reset();
-    const sent = encodeSnapshot(w, headers[c] as SnapshotHeader, f, null, self);
+    const sent = encodeSnapshot(w, headers[c] as SnapshotHeader, f, base, self);
     r.reset(w.bytes, w.byteLength);
-    if (!sent || !decodeSnapshotHeader(r, hdr) || !decodeSnapshotBody(r, hdr, null, self, out)) {
+    if (!sent || !decodeSnapshotHeader(r, hdr) || !decodeSnapshotBody(r, hdr, base, self, out)) {
       s.failures++;
     }
     s.snapshotBytes += w.byteLength;
@@ -235,7 +255,7 @@ export function formatCodecBench(result: CodecBenchResult): string {
   const pass = meetsCodecBudget(result.nsPerSnapshot);
   return [
     `codec: ${result.calls} encode+decode round trips per message, ${CODEC_CASES} cases (pmove bench states on movement_lab)`,
-    `SNAPSHOT, full v2 of 16 players (${result.snapshotBytes.toFixed(0)} B) encode+decode: ${result.nsPerSnapshot.toFixed(1)} ns, budget ${CODEC_BUDGET_NS} ns: ${pass ? "PASS" : "FAIL"}`,
+    `SNAPSHOT, v2 delta of 16 players (${result.snapshotBytes.toFixed(0)} B) encode+decode: ${result.nsPerSnapshot.toFixed(1)} ns, budget ${CODEC_BUDGET_NS} ns: ${pass ? "PASS" : "FAIL"}`,
     `INPUT, 4 cmds (${result.inputBytes.toFixed(0)} B) encode+decode: ${result.nsPerInput.toFixed(1)} ns`,
     `failed round trips: ${result.failures} (expect 0); GCs during the codec loops: ${result.gcs} (expect 0)`,
     `sink: ${result.sink}`,

@@ -41,11 +41,13 @@ import {
 } from "@game/shared";
 import type { ClientClock } from "./clock";
 import type { CmdRing } from "./predictor";
-import { SnapshotStore, STORE_STALE, STORE_STORED } from "./snapshotStore";
+import { SnapshotStore, STORE_NO_BASELINE, STORE_STALE, STORE_STORED } from "./snapshotStore";
 import {
   type NetStats,
+  STAT_BASELINE_DROPS,
   STAT_BYTES_IN,
   STAT_BYTES_OUT,
+  STAT_FULL_SNAPSHOTS,
   STAT_PACKETS_OUT,
   STAT_STRIKES,
 } from "./stats";
@@ -174,9 +176,10 @@ export class Connection {
 
   /**
    * INPUT with the newest cmds of `cmds` up to `newestTick`, newest first: up to four, as long as
-   * the ticks run back without a gap (docs/05 §3.4 redundancy). `ack` is the newest snapshot tick.
+   * the ticks run back without a gap (docs/05 §3.4 redundancy). It acks the store's `ackTick`: the
+   * newest stored snapshot, the baseline the server codes the next deltas against (D-038).
    */
-  sendInput(cmds: CmdRing, newestTick: number, ack: number): void {
+  sendInput(cmds: CmdRing, newestTick: number): void {
     const m = this.input;
     let n = 0;
     while (n < INPUT_MAX_CMDS) {
@@ -189,7 +192,7 @@ export class Connection {
     m.count = n;
     m.packetSeq = this.packetSeq;
     this.packetSeq = (this.packetSeq + 1) & 0xffff;
-    m.lastSnapshotTick = Math.max(0, ack);
+    m.lastSnapshotTick = this.store.ackTick;
     const w = this.writer;
     w.reset();
     if (encodeInput(w, m)) this.sendUnreliable();
@@ -252,9 +255,14 @@ export class Connection {
       } else if (state === CONN_SPAWNING || state === CONN_ACTIVE) {
         const store = this.store;
         const result = store.receive(r, this.clientId);
-        if (result === STORE_STORED)
+        if (result === STORE_STORED) {
+          if (store.header.baseBack === 0) this.stats.add(STAT_FULL_SNAPSHOTS, 1);
           this.handler.onSnapshot(store.header, store.lastStored as WorldFrame);
-        else if (result !== STORE_STALE) this.strike();
+        } else if (result === STORE_NO_BASELINE) {
+          this.stats.add(STAT_BASELINE_DROPS, 1);
+        } else if (result !== STORE_STALE) {
+          this.strike();
+        }
       } else if (!decodeSnapshotHeader(r, this.outOfState)) {
         // Before the session (or after it) the body can't be read: its receiver isn't known.
         this.strike();

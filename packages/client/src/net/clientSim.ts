@@ -569,7 +569,7 @@ export class ClientSim {
     cmd.tick = tick;
     this.predictFirst(cmd);
     copyUserCmd(this.lastCmd, cmd);
-    this.connection.sendInput(p.cmds, tick, p.snapshotTick);
+    this.connection.sendInput(p.cmds, tick);
   }
 
   /** Predicts `cmd` for the first time and files its movement events under its tick. */
@@ -622,7 +622,7 @@ export class ClientSim {
     for (let t = tick + 1; t <= target; t++) {
       f.tick = t;
       this.predictFirst(f);
-      this.connection.sendInput(p.cmds, t, p.snapshotTick);
+      this.connection.sendInput(p.cmds, t);
     }
     this.jumping = false;
     copyUserCmd(this.lastCmd, f);

@@ -5,12 +5,12 @@ import { fromRoot } from "../src/paths";
 
 // The per-tick paths (quantizePlayerState, snapOrigin, the state ring, copy/equals,
 // sanitizeUserCmd, the pmove params refresh and basics, whole pmove ticks in every M2 move mode,
-// the scenario runner and bots, the per-tick message codecs, the transports, the server's match
-// tick and the Node server's timing wrapper, both ends of the WebSocket transport, the client's
-// prediction and reconciliation, the remote interpolation, and the BVH queries) must not
-// allocate under native ES modules either, where V8 boxes a double returned by a call it doesn't
-// inline or joined with a module constant in a ternary. Vitest's module runner hides that, so
-// this runs a child process.
+// the scenario runner and bots, the per-tick message codecs, delta snapshots through the client's
+// snapshot store, the transports, the server's match tick and the Node server's timing wrapper,
+// both ends of the WebSocket transport, the client's prediction and reconciliation, the remote
+// interpolation, and the BVH queries) must not allocate under native ES modules either, where V8
+// boxes a double returned by a call it doesn't inline or joined with a module constant in a
+// ternary. Vitest's module runner hides that, so this runs a child process.
 //
 // The children run two at a time: one after another this file took some 16 s alone (it set the
 // floor of `pnpm test`, where it ran until D-032 moved it to `pnpm test:long`). Each child counts
@@ -21,9 +21,12 @@ interface ChildResult {
   clean: boolean;
   attempts: string[];
   outcomes: number[];
-  /** wsTransport: the client end's outcomes; predict: [0] teleports; interp: [0] held. */
+  /**
+   * wsTransport: the client end's outcomes; predict: [0] teleports; interp: [0] held; deltaCodec:
+   * [0] full snapshots stored.
+   */
   extra: number[];
-  /** codec only: hostile packets the decoders refused. */
+  /** codec and deltaCodec: hostile packets the decoders refused. */
   rejected: number;
 }
 
@@ -119,6 +122,20 @@ describe.concurrent("per-tick paths under native ES modules", () => {
     expect(r.outcomes[0]).toBe(r.outcomes[1]);
     expect(r.outcomes[2]).toBe(2 * (r.outcomes[0] as number));
     // And every hostile packet, one per message, was refused, in each run of 200000 calls.
+    expect(r.rejected).toBeGreaterThan(0);
+    expect(r.rejected % 200_000).toBe(0);
+    expect(r.clean, r.attempts.join("; ")).toBe(true);
+  }, 30_000);
+
+  it("delta snapshots and the client's snapshot store allocate nothing: rotating baselines, removals, new incarnations, missing baselines, hostile deltas (D-038)", async ({
+    expect,
+  }) => {
+    const r = await runChild("deltaCodec");
+    // Every stored snapshot equals the server's frame; most are deltas, some full, some dropped.
+    expect(r.outcomes[0]).toBe((r.outcomes[1] as number) + (r.extra[0] as number));
+    expect(r.outcomes[1]).toBeGreaterThan(10 * (r.extra[0] as number));
+    expect(r.outcomes[2]).toBeGreaterThan(0);
+    // Every hostile delta, one per call, was refused, in each run of 200000 calls.
     expect(r.rejected).toBeGreaterThan(0);
     expect(r.rejected % 200_000).toBe(0);
     expect(r.clean, r.attempts.join("; ")).toBe(true);

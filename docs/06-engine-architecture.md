@@ -78,13 +78,13 @@ packages/shared/src/
     protocol.ts        PROTOCOL_VERSION, MSG_* type ids, MSG_CHANNEL (type → channel), packet,
                        client-message and text size limits
     messages.ts        message structs + encodeX/decodeX (docs/05 §3.6) but SNAPSHOT; readTick/writeTick
-    snapshot.ts        SNAPSHOT v2: SnapshotHeader, encodeSnapshot, decodeSnapshotHeader/Body, the size
-                       constants (D-033)
+    snapshot.ts        SNAPSHOT v2: SnapshotHeader, encodeSnapshot, decodeSnapshotHeader/Body, full and
+                       delta forms against a baseline frame, exact size functions localBlockBits and
+                       entityRecordBits, the size constants and their static checks (D-033, D-038)
     worldFrame.ts      WorldFrame (64 slots as typed arrays, stamps, masks), FrameRing (64 by tick),
                        slot ↔ PlayerState, copySlot, entityEquals, frameDigest (D-034)
     playerStateCodec.ts  the PlayerState bit layout and its decode-time range checks
     cvarBlock.ts       replicated cvar block: canonical encoding, hash, all-or-nothing apply (D-027)
-    delta.ts           field masks, baseline diff/apply (M3)
     transport.ts       Transport interface, TransportStats, createLoopbackPair (pooled; D-026)
     packetQueue.ts     pooled packet copies ordered by due time (loopback, NetSim and the
                        WebSocket inbox)
@@ -146,8 +146,10 @@ packages/client/src/
                        CmdSampler interface
     connection.ts      handshake state machine (HELLO → WELCOME → pings and the map → READY →
                        spawn), decoding, channel checks and strikes, INPUT/CMD encoding
-    snapshotStore.ts   SnapshotStore: snapshots decoded into a FrameRing of 64 by tick, newest stored,
-                       counters; a spectator snapshot is refused (D-033, D-034)
+    snapshotStore.ts   SnapshotStore: snapshots decoded into a FrameRing of 64 by tick, deltas against
+                       the stored baseline frame, newest stored = the ack, missing baselines dropped
+                       (8 in a row: ack 0), counters; a spectator snapshot is refused (D-033, D-034,
+                       D-038)
     predictor.ts       cmd and state rings (128), exact compare, re-simulation with params by tick,
                        pending CVARS params, correction log (32), hard resync (docs/05 §5)
     clock.ts           handshake median RTT, lead, RTT/jitter EWMAs, buffer-health step re-anchoring
