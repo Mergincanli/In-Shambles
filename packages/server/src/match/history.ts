@@ -5,9 +5,10 @@ const RING_MASK = SNAPSHOT_HISTORY - 1;
 /**
  * The match's world frames of the last SNAPSHOT_HISTORY ticks (M3 design §2.3, D-038): one ring
  * for every client, captured once at the end of each tick. A client's delta is coded against the
- * frame of the tick it acked, so the baseline is exactly what the server sent then; up to 37
- * players (D-034) every sent frame is the world frame minus the receiver's row, so nothing per
- * client is stored but the sent ring.
+ * frame of the tick it acked, so the baseline is exactly what the server sent then. A sent frame
+ * is usually the world frame as its receiver sees it (always up to 37 players, D-034), so nothing
+ * per client is stored but the sent ring; one the byte-budget scheduler left players out of lives
+ * in the client's mirror (`mirror.ts`, D-046).
  */
 export class WorldHistory {
   readonly ring = new FrameRing();

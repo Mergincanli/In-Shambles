@@ -1,7 +1,9 @@
+import { ID_DEFER_LAG } from "@game/client/net";
 import { describe, expect, it } from "vitest";
 import {
   formatInterpBench,
   INTERP_REMOTES,
+  INTERP_REMOTES_64,
   type InterpBenchResult,
   InterpBenchState,
   interpStrictFailure,
@@ -36,6 +38,18 @@ describe("interp bench workload", () => {
     }
     expect(past).toBeGreaterThan(0);
     expect(s.interp.view.count).toBe(INTERP_REMOTES);
+  });
+
+  it("draws all 63 remotes of a full match through deferred copies, the defer lag at 1 (D-046)", () => {
+    const s = new InterpBenchState(world, 0, INTERP_REMOTES_64, true);
+    runInterpFrames(s, 2000);
+    const f = s.store.ring.get(s.tick) as NonNullable<ReturnType<typeof s.store.ring.get>>;
+    let left = 0;
+    for (let k = 1; k <= INTERP_REMOTES_64; k++) if (f.stamp[k] !== s.tick) left++;
+    expect(left).toBe(21);
+    expect(s.interp.view.count).toBe(INTERP_REMOTES_64);
+    expect(s.interp.delay.t[ID_DEFER_LAG]).toBe(1);
+    expect(s.interp.mode.filter((m) => m >= 2).length).toBe(0);
   });
 });
 

@@ -18,6 +18,7 @@ import {
   type MatchLog,
   type MatchLoop,
   type Session,
+  sentFrame,
   startMatchLoop,
   TickWindow,
 } from "@game/server";
@@ -70,7 +71,7 @@ export const HARNESS_BUILD = "net-harness";
 export const FRAME_HZ = 144;
 /**
  * Player slots of a match: the most clients a harness could hold. The match admits its
- * `maxClients` (`sv_maxClients`: 32 by default, at most 37 until the D-046 scheduler, D-034), and
+ * `maxClients` (`sv_maxClients`: 32 by default, up to 64 with the D-046 scheduler, D-034), and
  * `addClient` refuses one it has no free slot for.
  */
 export const MAX_HARNESS_CLIENTS = MATCH_MAX_CLIENTS;
@@ -493,7 +494,11 @@ export class HarnessClient {
     const tick = this.harness.match.serverTick;
     if (this.record) this.server.set(tick, copyPlayerState(new PlayerState(), s.player));
     if (this.checkFrames) {
-      this.serverDigests.set(tick, frameDigest(this.harness.match.worldFrame, s.clientId));
+      // What the client was sent: the world frame, or its mirror frame when the byte-budget
+      // scheduler left players out (D-046).
+      const match = this.harness.match;
+      const sent = sentFrame(match.history, s.mirror, tick) ?? match.worldFrame;
+      this.serverDigests.set(tick, frameDigest(sent, s.clientId));
     }
     // A tick starves at most once, so the counter rising means this tick did.
     if (s.stats.starved > this.starvedSeen) {

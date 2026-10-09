@@ -58,6 +58,16 @@ export interface SummaryServer {
   readonly droppedTicks: number;
   readonly starved: number;
   readonly fullSnapshots: number;
+  /**
+   * The byte-budget scheduler (D-046; 0 at 37 players or fewer): snapshots sent, those that left
+   * players out and the players left out; the largest staleness of a remote at send since the
+   * match started (2 at most) and snapshots whose encode failed (0 by the bound).
+   */
+  readonly snapshots: number;
+  readonly deferredSnapshots: number;
+  readonly deferredEntities: number;
+  readonly maxStaleness: number;
+  readonly snapshotOverflow: number;
   readonly strikes: number;
   readonly kicks: number;
   readonly kbOutPerS: number;
@@ -367,6 +377,13 @@ export function summaryMarkdown(s: BotsSummary): string {
       row([
         "counters",
         `dropped ticks ${v.droppedTicks}, starved ${v.starved}, full snapshots ${v.fullSnapshots}, strikes ${v.strikes}, kicks ${v.kicks}`,
+      ]),
+    );
+    const share = v.snapshots === 0 ? 0 : (100 * v.deferredSnapshots) / v.snapshots;
+    out.push(
+      row([
+        "scheduler (D-046)",
+        `${v.deferredEntities} players left out of ${v.deferredSnapshots} of ${v.snapshots} snapshots (${share.toFixed(1)}%), max staleness ${v.maxStaleness}, snapshot overflows ${v.snapshotOverflow}`,
       ]),
     );
   }

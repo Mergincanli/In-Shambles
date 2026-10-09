@@ -10,6 +10,7 @@ import {
   matchOf,
   runBots,
   type ServerStatus,
+  serverSection,
   statusUrl,
 } from "../../src/bots/runner";
 import { serverChildArgs } from "../../src/bots/serverChild";
@@ -273,4 +274,48 @@ describe.concurrent("a bots run", () => {
     expect(json).toEqual(JSON.parse(JSON.stringify(summary)));
     expect(readFileSync(files.md, "utf8")).toMatch(/^# Bots run .*: (PASS|FAIL)\n/);
   }, 20_000);
+});
+
+describe("the summary's server section from /metrics", () => {
+  /** A /metrics reading after `runS` s with the scheduler counters given. */
+  const metrics = (runS: number, n: number, maxStaleness: number) => ({
+    process: {
+      runS,
+      tickUs: { p50: 1, p95: 2, p99: 3, max: 4 },
+      gc: { count: 0, maxMs: 0 },
+      memoryMB: { heapUsed: 1, external: 1, rss: 1, peakHeapExternal: 1, peakRss: 1 },
+      cpuMsPerWallS: 10,
+      droppedTicks: 0,
+    },
+    matches: {
+      default: {
+        starved: 0,
+        snapshots: 1000 * n,
+        fullSnapshots: n,
+        deferredSnapshots: 100 * n,
+        deferredEntities: 2900 * n,
+        maxStaleness,
+        snapshotOverflow: 0,
+        strikes: 0,
+        kicks: 0,
+        traffic: { bytesIn: 0, bytesOut: 0, kbInPerS: 0, kbOutPerS: 0 },
+      },
+    },
+  });
+
+  it("takes the scheduler counters over the bots' window, the staleness as a running maximum", () => {
+    const whole = serverSection(metrics(30, 3, 2), "default", "x", 64, null, 30);
+    expect([whole.snapshots, whole.deferredSnapshots, whole.deferredEntities]).toEqual([
+      3000, 300, 8700,
+    ]);
+    const windowed = serverSection(metrics(30, 3, 2), "default", "x", 64, metrics(10, 1, 1), 20);
+    expect([
+      windowed.snapshots,
+      windowed.fullSnapshots,
+      windowed.deferredSnapshots,
+      windowed.deferredEntities,
+      windowed.maxStaleness,
+      windowed.snapshotOverflow,
+    ]).toEqual([2000, 2, 200, 5800, 2, 0]);
+  });
 });

@@ -1,13 +1,16 @@
-import { SESSION_ACTIVE } from "@game/server";
+import { SESSION_ACTIVE, sentFrame } from "@game/server";
 import {
   ENTITY_NEW_BITS,
   entityRecordBits,
   FRAME_SLOTS,
   localBlockBits,
+  MAX_SNAPSHOT_BYTES,
   PLAYER_STATE_BITS,
   SNAP_FULL_FIXED_BITS,
+  SNAP_MAX_STALENESS,
   SNAPSHOT_HISTORY,
   TICK_RATE,
+  type WorldFrame,
 } from "@game/shared";
 import type { HarnessClient, MultiHarness } from "./multiHarness";
 
@@ -22,6 +25,14 @@ class AckModel {
   ack = 0;
   /** Acks past the newest snapshot sent (each worth 2 strikes). */
   ahead = 0;
+  /**
+   * Per slot (D-046): sent snapshots in a row that left the player out (not fresh), and in a row
+   * that held no state for it (pending, or a reused slot sent as removed).
+   */
+  readonly leftRun = new Int32Array(FRAME_SLOTS);
+  readonly statelessRun = new Int32Array(FRAME_SLOTS);
+  /** Per slot: the serial of the player last sent fresh there (−1: none yet). */
+  readonly freshSerial = new Int32Array(FRAME_SLOTS).fill(-1);
 }
 
 /**
@@ -36,6 +47,15 @@ class AckModel {
  * local block at most the full state + 20) and counts the deltas, their bytes and what full
  * snapshots of the same frames would have taken. Clients' frames are checked against the server's
  * by the harness itself (recording clients, `frameDigest`).
+ *
+ * Above 37 players (D-046) it also checks the byte-budget scheduler on what each client was sent
+ * (`sentFrame`: the world frame, or the client's mirror frame when players were left out): every
+ * snapshot ≤ 1100 B; a player who left is gone at once (removals are never deferred); a left-out
+ * player is never left out two snapshots in a row, and one with no state yet (pending, or a reused
+ * slot sent as removed) has state by the next; a slot is pending only where the baseline holds no
+ * state for it (or in a full snapshot); a slot never shows a departed player's state, and a
+ * player once sent never blinks out while still there (a reused slot's new player); the
+ * session's largest staleness stays ≤ 2; and it counts the snapshots that left anyone out.
  */
 export class DeltaWatch {
   /** Broken rules, the first few kept. */
@@ -56,6 +76,10 @@ export class DeltaWatch {
   /** The largest baseBack sent, and the deltas sent 32 or more ticks back. */
   maxBaseBack = 0;
   oldDeltas = 0;
+  /** Snapshots that left a player out (D-046), the players left out, the largest snapshot (B). */
+  deferredSnapshots = 0;
+  deferredPlayers = 0;
+  maxSnapshotBytes = 0;
   private readonly models = new Map<HarnessClient, AckModel>();
 
   /**
@@ -85,7 +109,10 @@ export class DeltaWatch {
     return (
       `${this.snapshots} snapshots, ${this.deltas} deltas (${(100 * this.warmDeltaShare).toFixed(1)}% ` +
       `after the first RTT), mean delta ${mean.toFixed(0)} B vs ${full.toFixed(0)} B full; worst ` +
-      `record ${this.worstEntityOver} and local block ${this.worstLocalOver} bits over full`
+      `record ${this.worstEntityOver} and local block ${this.worstLocalOver} bits over full; ` +
+      `${this.deferredSnapshots} snapshots left players out ` +
+      `(${(100 * this.deferredShare).toFixed(1)}%, ${this.deferredPlayers} players), largest ` +
+      `${this.maxSnapshotBytes} B`
     );
   }
 
@@ -118,6 +145,7 @@ export class DeltaWatch {
         continue;
       }
       this.snapshots++;
+      this.checkScheduled(c, m, t, cur);
       const ack = m.ack;
       if (ack !== s.ackTick) {
         this.fail(`client ${s.clientId} tick ${t}: ackTick ${s.ackTick}, want ${ack}`);
@@ -137,7 +165,7 @@ export class DeltaWatch {
       if (warm) this.warmSnapshots++;
       if (!usable) continue;
       if (got === 0) this.fullsWithBaseline++;
-      const base = history.get(ack);
+      const base = sentFrame(history, s.mirror, ack);
       if (base === null) {
         this.fail(`client ${s.clientId} tick ${t}: the history lost tick ${ack}`);
         continue;
@@ -162,6 +190,65 @@ export class DeltaWatch {
         );
       }
     }
+  }
+
+  /** The byte-budget scheduler's rules on the snapshot of `t` sent to `c` (D-046). */
+  private checkScheduled(c: HarnessClient, m: AckModel, t: number, cur: WorldFrame): void {
+    const s = c.session;
+    if (s === null) return;
+    const id = s.clientId;
+    const bytes = c.tap.lastSnapshotBytes;
+    this.maxSnapshotBytes = Math.max(this.maxSnapshotBytes, bytes);
+    if (bytes > MAX_SNAPSHOT_BYTES) this.fail(`client ${id} tick ${t}: ${bytes} B`);
+    if (s.stats.maxStaleness > SNAP_MAX_STALENESS) {
+      this.fail(`client ${id} tick ${t}: staleness ${s.stats.maxStaleness}`);
+    }
+    const history = this.h.match.history;
+    const sent = sentFrame(history, s.mirror, t);
+    if (sent === null) return;
+    const back = c.tap.lastBaseBack;
+    const base = back > 0 ? sentFrame(history, s.mirror, t - back) : null;
+    let left = 0;
+    for (let e = 0; e < FRAME_SLOTS; e++) {
+      if (e === id) continue;
+      if (cur.present[e] !== 1) {
+        if (sent.present[e] === 1) this.fail(`client ${id} tick ${t}: slot ${e} left, still sent`);
+        m.leftRun[e] = 0;
+        m.statelessRun[e] = 0;
+        continue;
+      }
+      const fresh = sent.present[e] === 1 && sent.stamp[e] === t;
+      const state = sent.present[e] === 1 && sent.stamp[e] !== 0;
+      if (!fresh) left++;
+      if (sent.present[e] !== 1 && m.freshSerial[e] === cur.serial[e]) {
+        this.fail(`client ${id} tick ${t}: slot ${e}'s player, already sent, blinks out`);
+      }
+      if (fresh) m.freshSerial[e] = cur.serial[e] as number;
+      if (state && sent.serial[e] !== cur.serial[e]) {
+        this.fail(`client ${id} tick ${t}: slot ${e} shows a departed player`);
+      }
+      if (sent.present[e] === 1 && sent.stamp[e] === 0 && base !== null) {
+        if (base.present[e] === 1 && base.stamp[e] !== 0) {
+          this.fail(`client ${id} tick ${t}: slot ${e} pending over a baseline with state`);
+        }
+      }
+      m.leftRun[e] = fresh ? 0 : (m.leftRun[e] as number) + 1;
+      m.statelessRun[e] = state ? 0 : (m.statelessRun[e] as number) + 1;
+      if ((m.leftRun[e] as number) > 1)
+        this.fail(`client ${id} tick ${t}: slot ${e} left out twice`);
+      if ((m.statelessRun[e] as number) > 1) {
+        this.fail(`client ${id} tick ${t}: slot ${e} without state twice`);
+      }
+    }
+    if (left > 0) {
+      this.deferredSnapshots++;
+      this.deferredPlayers += left;
+    }
+  }
+
+  /** The share of the watched snapshots that left a player out (D-046). */
+  get deferredShare(): number {
+    return this.snapshots === 0 ? 0 : this.deferredSnapshots / this.snapshots;
   }
 
   /** Follows the acks that reach the match for `c`'s session, by docs/05 §4.3's rule. */

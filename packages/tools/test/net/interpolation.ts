@@ -1,6 +1,7 @@
 import {
   type ClientSim,
   type CmdSampler,
+  ID_DEFER_LAG,
   ID_FORMULA,
   INTERP_DELAY_MAX,
   INTERP_DELAY_MIN,
@@ -109,6 +110,13 @@ export class RemoteWatch {
   readonly teleports = new Int32Array(FRAME_SLOTS);
   /** Per slot, frames drawn. */
   readonly drawn = new Int32Array(FRAME_SLOTS);
+  /**
+   * Remote-frames of a slot drawn before and present in the newest stored frame (deferred,
+   * pending or fresh) yet not drawn: a hide no removal explains (D-046: never).
+   */
+  hiddenPresent = 0;
+  /** The largest defer lag the delay carried (D-046; 0 at 37 players or fewer). */
+  maxDeferLag = 0;
   private readonly origin = vec3();
   private prevRender = Number.NaN;
   private clockBase = -1;
@@ -150,13 +158,20 @@ export class RemoteWatch {
     ) {
       this.delayOut++;
     }
+    this.maxDeferLag = Math.max(this.maxDeferLag, interp.delay.t[ID_DEFER_LAG] as number);
     const steps = c.stats.totals[STAT_CLOCK_ADJUSTMENTS] as number;
     if (this.clockBase < 0) this.clockBase = steps;
     this.clockSteps = steps - this.clockBase;
     const late = this.now() >= this.heldSince;
     const o = this.origin;
+    const newestFrame = c.store.ring.get(c.store.newestTick);
     for (let s = 0; s < FRAME_SLOTS; s++) {
-      if (view.visible[s] !== 1) continue;
+      if (view.visible[s] !== 1) {
+        if ((this.drawn[s] as number) > 0 && newestFrame !== null && newestFrame.present[s] === 1) {
+          this.hiddenPresent++;
+        }
+        continue;
+      }
       this.remoteFrames++;
       this.drawn[s] = (this.drawn[s] as number) + 1;
       const mode = interp.mode[s] as number;

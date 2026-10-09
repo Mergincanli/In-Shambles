@@ -14,7 +14,8 @@ import { SNAPSHOT_HISTORY } from "./protocol";
  * - A client fills its own slot from the snapshot's local block (plus `teleportSeq` from the
  *   header) and, for every other slot, only the entity fields, `present` and `stamp`.
  * - `stamp` is the server tick a slot's state belongs to; 0 marks a pending slot (present, no state
- *   yet; D-046). Until the scheduler every present slot's stamp is the frame's tick.
+ *   yet; D-046). A slot the byte-budget scheduler left out keeps its baseline's state and stamp,
+ *   an older tick; every other present slot's stamp is the frame's tick.
  *
  * `masks` keeps the present and pending sets as two 64-bit masks (lo/hi Int32 halves) in step with
  * `present` and `stamp`, so counts are popcounts. Every write that changes a slot's presence goes
@@ -120,6 +121,16 @@ export class WorldFrame {
   get pendingCount(): number {
     const m = this.masks;
     return bitCount(m[MASK_PENDING_LO] as number) + bitCount(m[MASK_PENDING_HI] as number);
+  }
+
+  /** Slots present here (pending included) and absent in `other`: popcounts of the masks. */
+  presentNotIn(other: WorldFrame): number {
+    const m = this.masks;
+    const o = other.masks;
+    return (
+      bitCount((m[MASK_PRESENT_LO] as number) & ~(o[MASK_PRESENT_LO] as number)) +
+      bitCount((m[MASK_PRESENT_HI] as number) & ~(o[MASK_PRESENT_HI] as number))
+    );
   }
 }
 

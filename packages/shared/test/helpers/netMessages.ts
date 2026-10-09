@@ -47,6 +47,7 @@ import {
   MSG_SNAPSHOT,
   MSG_WELCOME,
   SNAP_BUDGET_BITS,
+  SNAP_FLAG_DEFERRED,
   SNAP_FLAG_SPECTATOR,
   SNAP_FLAG_STARVED,
   SNAPSHOT_HISTORY,
@@ -337,7 +338,9 @@ export function decodeSnapshotParts(r: BitReader, m: SnapshotParts): boolean {
 
 /**
  * Random valid parts: live (starved or not) or spectator, full or (half the time) a delta against
- * a random baseline in `m.base`, up to the most records that fit.
+ * a random baseline in `m.base`, up to the most records that fit. A third of the live ones with
+ * at most 16 others carry the byte-budget scheduler's forms (D-046, `randomDeferrals`): a
+ * baseline with pending slots and older stamps, and slots left out of the snapshot.
  */
 export function randomSnapshot(rng: Mulberry32, m: SnapshotParts): SnapshotParts {
   const h = m.hdr;
@@ -349,19 +352,78 @@ export function randomSnapshot(rng: Mulberry32, m: SnapshotParts): SnapshotParts
   const spectator = kind === 0;
   const self = spectator ? -1 : SNAP_SELF;
   const max = spectator ? 24 : 16;
+  // Small enough that any deferral fits: 312 + 16 × 233 + 6 + 16 × 16 bits.
+  const defer = !spectator && rng.nextInt(3) === 0;
   const delta = h.serverTick > 1 && rng.nextInt(2) === 0;
   h.baseBack = delta ? intIn(rng, 1, Math.min(SNAPSHOT_HISTORY - 1, h.serverTick - 1)) : 0;
   if (!delta) {
     const others =
-      rng.nextInt(10) === 0 ? (spectator ? 64 : LIVE_FULL_MAX_OTHERS) : intIn(rng, 0, max);
+      !defer && rng.nextInt(10) === 0
+        ? spectator
+          ? 64
+          : LIVE_FULL_MAX_OTHERS
+        : intIn(rng, 0, max);
     randomFrame(rng, m.frame, h.serverTick, self, others);
+    if (defer) randomDeferrals(rng, null, m.frame, h);
     return m;
   }
   const most = spectator ? FRAME_SLOTS : SNAP_FIT_MAX_PLAYERS - 1;
-  const baseOthers = rng.nextInt(10) === 0 ? most : intIn(rng, 0, max);
-  randomFrame(rng, m.base, h.serverTick - h.baseBack, self, baseOthers);
-  randomDeltaFrame(rng, m.base, m.frame, h.serverTick, self, rng.nextInt(10) === 0 ? most : max);
+  const baseOthers = !defer && rng.nextInt(10) === 0 ? most : intIn(rng, 0, max);
+  const baseTick = h.serverTick - h.baseBack;
+  randomFrame(rng, m.base, baseTick, self, baseOthers);
+  if (defer) randomBaselineStamps(rng, m.base, baseTick, self);
+  const records = !defer && rng.nextInt(10) === 0 ? most : max;
+  randomDeltaFrame(rng, m.base, m.frame, h.serverTick, self, records);
+  if (defer) randomDeferrals(rng, m.base, m.frame, h);
   return m;
+}
+
+/**
+ * Some other slots of baseline `base` (of tick `baseTick`) as a client holds them after deferrals
+ * (D-046): pending, or with the state of an older tick.
+ */
+export function randomBaselineStamps(
+  rng: Mulberry32,
+  base: WorldFrame,
+  baseTick: number,
+  selfId: number,
+): void {
+  for (let s = 0; s < FRAME_SLOTS; s++) {
+    if (s === selfId || base.present[s] !== 1) continue;
+    const r = rng.nextInt(6);
+    if (r === 0) base.setPresent(s, 0);
+    else if (r === 1 && baseTick > 1) base.setPresent(s, Math.max(1, baseTick - intIn(rng, 1, 20)));
+  }
+}
+
+/**
+ * Leaves some of `cur`'s other players out, as the scheduler does (D-046): a slot `base` holds
+ * state for (same incarnation) keeps the baseline's state and stamp; one it holds no state for
+ * (or every slot of a full snapshot, `base` null) turns pending; a reused slot is never left out
+ * here (the scheduler sends it as a removal). Sets `hdr`'s DEFERRED flag when one is.
+ */
+export function randomDeferrals(
+  rng: Mulberry32,
+  base: WorldFrame | null,
+  cur: WorldFrame,
+  hdr: SnapshotHeader,
+): number {
+  let n = 0;
+  const self = (hdr.flags & SNAP_FLAG_SPECTATOR) !== 0 ? -1 : SNAP_SELF;
+  for (let s = 0; s < FRAME_SLOTS; s++) {
+    if (s === self || cur.present[s] !== 1 || rng.nextInt(3) !== 0) continue;
+    const held = base !== null && base.present[s] === 1 && base.stamp[s] !== 0;
+    if (!held) {
+      cur.setPresent(s, 0);
+    } else if (base !== null && base.serial[s] === cur.serial[s]) {
+      copySlot(cur, s, base, s);
+    } else {
+      continue;
+    }
+    n++;
+  }
+  if (n > 0) hdr.flags |= SNAP_FLAG_DEFERRED;
+  return n;
 }
 
 export function randomCmdFields(rng: Mulberry32, c: UserCmd): void {

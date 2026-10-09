@@ -39,8 +39,10 @@ export const BASELINE_MISSES_BEFORE_FULL = 8;
  * snapshot is decoded only when it is newer than what its tick's slot holds, straight into a spare
  * frame that is then swapped into the ring, so nothing is copied or allocated; one that fails to
  * decode leaves the store as it was. By induction every stored frame equals the frame the server
- * encoded it from (frameDigest). Prediction reads the local slot of the newest
- * (`slotToPlayerState`); the interpolator (D-037) reads the other slots of all.
+ * encoded it from (frameDigest), stamps and pending slots included: a player the server's
+ * scheduler left out keeps its baseline's state and stamp, or is pending (D-046). Prediction reads
+ * the local slot of the newest (`slotToPlayerState`); the interpolator (D-037) reads the other
+ * slots of all, by stamp.
  */
 export class SnapshotStore {
   readonly ring = new FrameRing();
@@ -58,6 +60,12 @@ export class SnapshotStore {
   baselineDrops = 0;
   /** Spectator snapshots refused (a live connection never gets one from an honest server). */
   spectatorDropped = 0;
+  /**
+   * Of the snapshots stored, players the server's byte-budget scheduler left out (deferred ids,
+   * D-046) and the snapshots that left any out: 0 at 37 players or fewer.
+   */
+  deferred = 0;
+  deferredSnapshots = 0;
   /** Snapshots that did not decode. */
   bad = 0;
   /** Baseline misses since the last stored snapshot. */
@@ -128,6 +136,10 @@ export class SnapshotStore {
     this.latest = f;
     if (t > this.newestTick) this.newestTick = t;
     this.stored++;
+    if (h.deferred > 0) {
+      this.deferred += h.deferred;
+      this.deferredSnapshots++;
+    }
     this.missRun = 0;
     if (base === null) {
       this.full++;

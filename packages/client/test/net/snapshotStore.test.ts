@@ -1,6 +1,7 @@
 import {
   BitReader,
   BitWriter,
+  copySlot,
   encodeSnapshot,
   frameDigest,
   MAX_UNRELIABLE_BYTES,
@@ -67,6 +68,32 @@ function receive(store: SnapshotStore, bytes: Uint8Array): number {
 }
 
 describe("SnapshotStore (M3 design §2.3)", () => {
+  it("keeps a left-out player's baseline state and stamp, marks a new one pending, counts both (D-046)", () => {
+    const store = new SnapshotStore();
+    expect(receive(store, snapshot(10))).toBe(STORE_STORED);
+    // Tick 12 against 10: player 1 left out (its copy of tick 10), player 5 new and left out.
+    const cur = serverFrame(12);
+    const base = store.ring.get(10) as WorldFrame;
+    const sent = new WorldFrame();
+    for (let s = 0; s < 64; s++) if (cur.present[s] === 1) copySlot(sent, s, cur, s);
+    copySlot(sent, 1, serverFrame(10), 1);
+    sent.setPresent(5, 0);
+    const h = new SnapshotHeader();
+    h.serverTick = 12;
+    h.baseBack = 2;
+    const w = new BitWriter(MAX_UNRELIABLE_BYTES);
+    expect(encodeSnapshot(w, h, sent, base, SELF)).toBe(true);
+    expect(receive(store, w.bytes.slice(0, w.byteLength))).toBe(STORE_STORED);
+    const f = store.ring.get(12) as WorldFrame;
+    expect([f.stamp[0], f.stamp[1], f.stamp[5], f.pendingCount]).toEqual([12, 10, 0, 1]);
+    expect(f.originX[1]).toBe(11 * 32);
+    expect(frameDigest(f, SELF)).toBe(frameDigest(sent, SELF));
+    expect([store.header.deferred, store.deferred, store.deferredSnapshots]).toEqual([2, 2, 1]);
+    // A snapshot that leaves nobody out adds nothing.
+    expect(receive(store, delta(13, 10))).toBe(STORE_STORED);
+    expect([store.header.deferred, store.deferred, store.deferredSnapshots]).toEqual([0, 2, 1]);
+  });
+
   it("stores each snapshot as its tick's frame, as the receiver holds it", () => {
     const store = new SnapshotStore();
     expect([store.lastStored, store.newest, store.newestTick]).toEqual([null, null, 0]);

@@ -9,6 +9,8 @@ export * from "./match/host";
 export * from "./match/inputQueue";
 export * from "./match/loop";
 export * from "./match/match";
+export * from "./match/mirror";
+export * from "./match/scheduler";
 export * from "./match/session";
 export * from "./match/spawns";
 export * from "./match/tickStats";

@@ -2,7 +2,9 @@ import { PerformanceObserver } from "node:perf_hooks";
 import {
   ClientNetSettings,
   ClientSim,
+  ID_DEFER_LAG,
   JM_CHECKED,
+  JM_VIOLATIONS,
   NetStats,
   type PortLike,
   PortTransport,
@@ -17,6 +19,7 @@ import {
   STAT_HARD_RESYNCS,
   STAT_REMOTE_EVENTS,
   STAT_REMOTE_EXTRAPOLATED,
+  STAT_REMOTE_FRAMES,
   STAT_REMOTE_HELD,
   STAT_TELEPORTS,
   STORE_NO_BASELINE,
@@ -24,7 +27,20 @@ import {
   StrafeCircuit,
   WebSocketTransport,
 } from "@game/client/net";
-import { LoopStats, Match, type Session, TickHistogram } from "@game/server";
+import {
+  acceptAck,
+  buildSnapshot,
+  type ClientMirror,
+  LoopStats,
+  Match,
+  MirrorPool,
+  resetScheduleState,
+  type Session,
+  type SnapshotClient,
+  SnapshotScheduler,
+  TickHistogram,
+  WorldHistory,
+} from "@game/server";
 import {
   type PassClock,
   type ServerMatch,
@@ -120,6 +136,7 @@ import {
   refreshPmoveParams,
   registerPmoveCvars,
   rotatedBoxPlanes,
+  SNAP_FLAG_DEFERRED,
   SNAP_FLAG_STARVED,
   SNAP_FULL_FIXED_BITS,
   SnapshotHeader,
@@ -799,14 +816,18 @@ function dcCapture(t: number): WorldFrame {
   return f;
 }
 
-/** A hostile delta's header (tick 1000, 10 back) and no local change; `count` records follow. */
-function dcHostileStart(w: BitWriter, count: number): void {
+/**
+ * A hostile delta's header (tick 1000, 10 back, `flags`: SNAP_FLAG_DEFERRED when a deferred list
+ * follows the records) and no local change; `count` records follow.
+ */
+function dcHostileStart(w: BitWriter, count: number, flags = 0): void {
   w.reset();
   w.writeBits(MSG_SNAPSHOT, 8);
   w.writeBits(1000, 16);
   w.writeBits(0, 16);
   w.writeBits(10, 6);
-  w.writeBits(0, 16);
+  w.writeBits(flags, 8);
+  w.writeBits(0, 8);
   w.writeBits(0, 16);
   w.writeBits(0, 8);
   // The delta local block's mask: no local change.
@@ -882,6 +903,23 @@ const dcHostile: Uint8Array[] = [];
   w.writeBits(4, 4);
   w.writeBits(0, 20);
   done();
+  // A deferred list (D-046) of count 0.
+  dcHostileStart(w, 0, SNAP_FLAG_DEFERRED);
+  w.writeBits(0, 6);
+  done();
+  // A deferred id that is also a record (a removal of 3, then 3 deferred).
+  dcHostileStart(w, 1, SNAP_FLAG_DEFERRED);
+  w.writeBits(3, 16);
+  w.writeBits(1, 1);
+  w.writeBits(1, 6);
+  w.writeBits(3, 16);
+  done();
+  // Deferred ids out of order.
+  dcHostileStart(w, 0, SNAP_FLAG_DEFERRED);
+  w.writeBits(2, 6);
+  w.writeBits(40, 16);
+  w.writeBits(20, 16);
+  done();
 }
 // Each hostile delta's valid twin (the defect removed) must decode, or a layout slip would make
 // every hostile packet fail early, on misaligned bits, and leave the refusals it names unrun.
@@ -936,6 +974,108 @@ const dcHostile: Uint8Array[] = [];
   w.writeBits(1, 4);
   w.writeBits(0, 20);
   check("events");
+  dcHostileStart(w, 0, SNAP_FLAG_DEFERRED);
+  w.writeBits(1, 6);
+  w.writeBits(20, 16);
+  check("one deferred");
+  dcHostileStart(w, 1, SNAP_FLAG_DEFERRED);
+  w.writeBits(3, 16);
+  w.writeBits(1, 1);
+  w.writeBits(1, 6);
+  w.writeBits(20, 16);
+  check("removal then deferred");
+  dcHostileStart(w, 0, SNAP_FLAG_DEFERRED);
+  w.writeBits(2, 6);
+  w.writeBits(20, 16);
+  w.writeBits(40, 16);
+  check("deferred in order");
+}
+
+// 64 slots with the byte-budget scheduler's forms (D-046): every slot moves a little each tick; a
+// third of the slots the baseline holds are left out of each delta, keeping their state and
+// stamp, and two thirds of those it holds no state for (every slot of a full snapshot, which must
+// fit 1100 B) stay pending, rotating.
+// Slot 63 leaves 16 ticks of every 128 and comes back as a new incarnation, never left out over
+// its departed self (the scheduler sends that as a removal). The server keeps what it sent (the
+// client's frames); the client's second store decodes against its own ring, and every stored
+// frame is compared field by field with what was sent.
+const DC64_SELF = 5;
+const dc64World = new WorldFrame();
+const dc64Sent = new FrameRing();
+const dc64Store = new SnapshotStore();
+let dc64Tick = 0;
+let dc64Serial = 1;
+
+/** The frame sent for tick `t` against `base` (null: full), built in `dc64Sent`. */
+function dc64Build(t: number, base: WorldFrame | null): WorldFrame {
+  const live = dc64World;
+  for (let p = 0; p < FRAME_SLOTS; p++) {
+    if (live.present[p] !== 1) {
+      live.setPresent(p, t);
+      live.serial[p] = dc64Serial;
+      live.teleportSeq[p] = ((live.teleportSeq[p] as number) + 1) & 0xff;
+    }
+    live.setPresent(p, t);
+    live.originX[p] = (((live.originX[p] as number) + 1 + (p & 31)) & 0x3ffff) - 0x20000;
+    live.yaw[p] = (t * 37 + p * 1021) & 0xffff;
+  }
+  if ((t & 127) < 16) live.setAbsent(FRAME_SLOTS - 1);
+  else if ((t & 127) === 16) {
+    dc64Serial = (dc64Serial + 1) & 0xffff;
+    live.serial[FRAME_SLOTS - 1] = dc64Serial;
+  }
+  const f = dc64Sent.slot(t);
+  f.clear();
+  for (let p = 0; p < FRAME_SLOTS; p++) {
+    if (live.present[p] !== 1) continue;
+    // A third of the slots the client holds are left out; a slot it holds no state for goes in
+    // full one tick in three (so a delta after a full baseline full of pending slots fits).
+    const k = (p + t) % 3;
+    const held = base !== null && base.present[p] === 1 && base.stamp[p] !== 0;
+    const left = p !== DC64_SELF && (held ? k === 1 : k !== 0);
+    if (left && held && base !== null && base.serial[p] === live.serial[p]) {
+      copySlot(f, p, base, p);
+    } else if (left && !held) {
+      copySlot(f, p, live, p);
+      f.setPresent(p, 0);
+    } else {
+      copySlot(f, p, live, p);
+      f.setPresent(p, t);
+    }
+  }
+  dc64Sent.store(t);
+  return f;
+}
+
+/** One 64-slot snapshot: `extra[1]` stored frames equal to what was sent, `extra[2]` not. */
+function dc64Step(w: BitWriter, r: BitReader, h: SnapshotHeader, i: number): void {
+  const t = ++dc64Tick;
+  let back = 1 + (i % 11);
+  if (back >= t || !dc64Store.ring.has(t - back) || !dc64Sent.has(t - back)) back = 0;
+  if ((t & 31) === 0) back = 0;
+  const base = back === 0 ? null : dc64Sent.get(t - back);
+  const sent = dc64Build(t, base);
+  h.serverTick = t;
+  h.baseBack = back;
+  h.flags = 0;
+  h.cvarHash = t & 0xffff;
+  h.inputBufferHealth = 1;
+  w.reset();
+  if (!encodeSnapshot(w, h, sent, base, DC64_SELF)) {
+    extra[2] = (extra[2] as number) + 1;
+    return;
+  }
+  r.reset(w.bytes, w.byteLength);
+  if (dc64Store.receive(r, DC64_SELF) !== STORE_STORED) {
+    extra[2] = (extra[2] as number) + 1;
+    return;
+  }
+  const got = dc64Store.lastStored as WorldFrame;
+  if (dc64Store.header.deferred > 0 && sameFrame(got, sent, DC64_SELF)) {
+    extra[1] = (extra[1] as number) + 1;
+  } else {
+    extra[2] = (extra[2] as number) + 1;
+  }
 }
 
 /**
@@ -967,17 +1107,18 @@ function dcSame(got: WorldFrame, cur: WorldFrame): boolean {
 }
 
 /**
- * A snapshot every fourth call (a 16-player delta costs some 50 times a hostile refusal), one
- * hostile delta every call. Outcomes: stored snapshots equal to the server's frame as the receiver
- * sees it, deltas stored,
- * baseline drops; `extra[0]` full snapshots stored; `codecRejected` counts the hostile refusals.
+ * A snapshot every fourth call (a 16-player delta costs some 50 times a hostile refusal), a
+ * 64-slot one with a deferred list every eighth, one hostile delta every call. Outcomes: stored
+ * snapshots equal to the server's frame as the receiver sees it, deltas stored, baseline drops;
+ * `extra[0]` full snapshots stored, `extra[1]` 64-slot snapshots stored equal to what was sent and
+ * `extra[2]` those that failed or differed; `codecRejected` counts the hostile refusals.
  */
 function runDeltaCodec(n: number): void {
   const w = codecWriter;
   const r = dcReader;
   const h = dcHeader;
   for (let i = 0; i < n; i++) {
-    const bad = dcHostile[i & 7] as Uint8Array;
+    const bad = dcHostile[i % dcHostile.length] as Uint8Array;
     r.reset(bad, bad.length);
     if (
       !decodeSnapshotHeader(r, h) ||
@@ -985,6 +1126,7 @@ function runDeltaCodec(n: number): void {
     ) {
       codecRejected[0] = (codecRejected[0] as number) + 1;
     }
+    if ((i & 7) === 2) dc64Step(w, r, h, i);
     if ((i & 3) !== 0) continue;
     const t = ++dcTick;
     const cur = dcCapture(t);
@@ -1019,6 +1161,130 @@ function runDeltaCodec(n: number): void {
         outcomes[2] = (outcomes[2] as number) + 1;
       }
     }
+  }
+}
+
+// The byte-budget scheduler (D-046): a 64-player world captured each tick into the match's
+// `WorldHistory`, every remote at its worst two ticks in three (every entity field changed, origin
+// and velocity absolute) and a small step otherwise, slot 63 leaving for 8 ticks of every 128 and
+// coming back as a new incarnation; 63 receivers, each with its `ClientMirror` and scheduler rows,
+// get the snapshot of every tick through `buildSnapshot` (the worst-case check, the size pass,
+// the scheduler, the mirror frame, the encoder, the commit), acking a tick 1–12 back (rotating)
+// and every 97th tick per receiver nothing (a full snapshot). No pmove and no decode: those are
+// the `matchMulti` and `deltaCodec` workloads. A call is a sixteenth of a tick's builds.
+class ScheduleClient implements SnapshotClient {
+  readonly sentTicks = new Int32Array(64);
+  newestSent = 0;
+  ackTick = 0;
+  readonly lastSent = new Int32Array(FRAME_SLOTS);
+  readonly lastDeferred = new Int32Array(FRAME_SLOTS);
+  readonly sentSerial = new Int32Array(FRAME_SLOTS);
+  mirror: ClientMirror | null = null;
+}
+
+const SS_RECEIVERS = 63;
+class ScheduleRig {
+  readonly history = new WorldHistory();
+  readonly live = new WorldFrame();
+  readonly sched = new SnapshotScheduler();
+  readonly pool = new MirrorPool();
+  readonly clients: ScheduleClient[] = [];
+  readonly writer = new BitWriter(MAX_UNRELIABLE_BYTES);
+  readonly header = new SnapshotHeader();
+  tick = 0;
+  next = 0;
+  serial = 1;
+  warmup = 1;
+
+  constructor() {
+    for (let k = 0; k < SS_RECEIVERS; k++) {
+      const c = new ScheduleClient();
+      resetScheduleState(c);
+      c.mirror = this.pool.acquire();
+      this.clients.push(c);
+    }
+  }
+
+  /** The world of the next tick into the history. */
+  capture(): void {
+    const t = ++this.tick;
+    const live = this.live;
+    const worst = t % 3 !== 0;
+    for (let p = 0; p < FRAME_SLOTS; p++) {
+      if (live.present[p] !== 1) {
+        live.setPresent(p, t);
+        live.serial[p] = this.serial;
+        live.teleportSeq[p] = ((live.teleportSeq[p] as number) + 1) & 0xff;
+      }
+      live.setPresent(p, t);
+      if (worst) {
+        const sign = ((t + p) & 1) === 0 ? 1 : -1;
+        live.originX[p] = sign * (500000 - p * 8);
+        live.originY[p] = -sign * (500000 - p * 8);
+        live.originZ[p] = sign * (400000 + (t & 63));
+        live.vel16X[p] = sign * (500000 - p);
+        live.entVelX[p] = sign * (32000 - p);
+        live.entVelY[p] = -sign * (32000 - p);
+        live.entVelZ[p] = sign * (30000 + (t & 63));
+        live.yaw[p] = (t * 4099 + p) & 0xffff;
+        live.pitch[p] = sign * (100 + (t & 255));
+        live.flags[p] = sign > 0 ? PMF_GROUNDED : 0;
+        live.team[p] = sign > 0 ? 1 : 2;
+        live.teleportSeq[p] = ((live.teleportSeq[p] as number) + 1) & 0xff;
+        pushEntityEvent(live.eventSeq, live.evKind, live.evValue, p, PMEV_STEP, t & 0x7f);
+      } else {
+        live.originX[p] = (live.originX[p] as number) + 3;
+      }
+    }
+    if ((t & 127) < 8) live.setAbsent(FRAME_SLOTS - 1);
+    else if ((t & 127) === 8) {
+      this.serial = (this.serial + 1) & 0xffff;
+      live.serial[FRAME_SLOTS - 1] = this.serial;
+    }
+    const f = this.history.frameFor(t);
+    f.clear();
+    for (let p = 0; p < FRAME_SLOTS; p++) if (live.present[p] === 1) copySlot(f, p, live, p);
+    this.history.stored(t);
+  }
+}
+
+let scheduleRig: ScheduleRig | null = null;
+
+/**
+ * Outcomes: snapshots built, those that left players out, full ones; `extra[0]` failed builds and
+ * `extra[1]` builds whose largest staleness passed 2 (both must stay 0), `extra[2]` the largest
+ * snapshot in bytes.
+ */
+function runSnapshotSchedule(n: number): void {
+  if (scheduleRig === null) scheduleRig = new ScheduleRig();
+  const rig = scheduleRig;
+  const sched = rig.sched;
+  const h = rig.header;
+  const w = rig.writer;
+  // The first call warms up 6 times as long: the size pass, the scheduler and the encoder's
+  // deferred forms settle in V8 only after some thousand ticks of builds.
+  const builds = rig.warmup-- > 0 ? (n / 16) * 6 : n / 16;
+  for (let i = 0; i < builds; i++) {
+    if (rig.next === 0) rig.capture();
+    const k = rig.next;
+    rig.next = k + 1 === SS_RECEIVERS ? 0 : k + 1;
+    const c = rig.clients[k] as ScheduleClient;
+    const t = rig.tick;
+    // Receiver k is slot k (the receivers take slots 0–62; slot 63 comes and goes).
+    if ((t + k) % 97 === 0) acceptAck(c, 0, t, rig.history);
+    else if (t > 12) acceptAck(c, t - 1 - ((t + k) % 12), t, rig.history);
+    h.flags = 0;
+    h.cvarHash = t & 0xffff;
+    h.inputBufferHealth = 2;
+    if (!buildSnapshot(sched, w, h, rig.history, c, k, t, rig.pool)) {
+      extra[0] = (extra[0] as number) + 1;
+      continue;
+    }
+    outcomes[0] = (outcomes[0] as number) + 1;
+    if (sched.deferred + sched.dropped > 0) outcomes[1] = (outcomes[1] as number) + 1;
+    if (h.baseBack === 0) outcomes[2] = (outcomes[2] as number) + 1;
+    if (sched.maxStaleness > 2) extra[1] = (extra[1] as number) + 1;
+    extra[2] = Math.max(extra[2] as number, w.byteLength);
   }
 }
 
@@ -1302,11 +1568,14 @@ class MatchMultiRig {
 
 let matchMultiRig: MatchMultiRig | null = null;
 
-/** Whether `got` holds what `cur` does as receiver `self` sees it (what frameDigest hashes). */
+/**
+ * Whether `got` holds what `cur` does as receiver `self` sees it (what frameDigest hashes: a
+ * pending slot by its presence and stamp only).
+ */
 function sameFrame(got: WorldFrame, cur: WorldFrame, self: number): boolean {
   for (let s = 0; s < FRAME_SLOTS; s++) {
     if (got.present[s] !== cur.present[s] || got.stamp[s] !== cur.stamp[s]) return false;
-    if (cur.present[s] !== 1) continue;
+    if (cur.present[s] !== 1 || cur.stamp[s] === 0) continue;
     if (s !== self) {
       if (!entityEquals(got, s, cur, s)) return false;
     } else if (
@@ -1747,11 +2016,93 @@ function runInterp(n: number): void {
   extra[0] = totals[STAT_REMOTE_HELD] as number;
 }
 
+// The remote interpolation with 63 remotes (D-046): every other slot of a 64-slot store moving
+// across the room, a third of them left out of each snapshot by the byte-budget scheduler
+// (rotating: a copy of the previous frame's state with its older stamp), slot 63 pending for 4
+// ticks of every 256 after it rejoins, and every 512 ticks an 8-tick outage; the defer lag sizes
+// the delay. A call is a quarter of a frame's update (63 remotes cost about 4 times 16).
+class Interp64Rig {
+  readonly now = new Float64Array(2);
+  readonly store = new SnapshotStore();
+  readonly settings = new ClientNetSettings();
+  readonly stats = new NetStats(this.now);
+  readonly interp: RemoteInterpolator;
+  readonly meter = new RemoteJumpMeter();
+  tick = 0;
+  frames = 0;
+  warmup = 1;
+
+  constructor() {
+    this.interp = new RemoteInterpolator(this.store, this.now, this.settings, this.stats, world);
+  }
+
+  store1(t: number): void {
+    const ring = this.store.ring;
+    const prev = ring.get(t - 1);
+    const f = ring.slot(t);
+    f.clear();
+    f.setPresent(0, t);
+    for (let s = 1; s < FRAME_SLOTS; s++) {
+      if (s === FRAME_SLOTS - 1 && (t & 255) < 4) {
+        f.setPresent(s, 0);
+        continue;
+      }
+      if ((s + t) % 3 === 0 && prev !== null && prev.present[s] === 1 && prev.stamp[s] !== 0) {
+        copySlot(f, s, prev, s);
+        continue;
+      }
+      f.setPresent(s, t);
+      const period = 90 + s;
+      const phase = t % (2 * period);
+      const along = phase < period ? phase : 2 * period - phase;
+      f.originX[s] = (-384 + (along * 768) / period) * 32;
+      f.originY[s] = (-480 + 15 * s) * 32;
+      f.originZ[s] = 24 * 32;
+      f.entVelX[s] = ((phase < period ? 1 : -1) * 768 * 60) / period;
+      f.yaw[s] = (t * 300 + s * 1000) & 0xffff;
+      f.flags[s] = PMF_GROUNDED;
+      f.team[s] = 1 + (s & 1);
+      f.teleportSeq[s] = 1;
+    }
+    ring.store(t);
+    this.store.newestTick = t;
+    this.interp.onStored(t);
+  }
+}
+
+let interp64Rig: Interp64Rig | null = null;
+
+/** Outcomes: remote-frames drawn, frames the NET-05 meter judged, the defer lag's last value. */
+function runInterp64(n: number): void {
+  if (interp64Rig === null) interp64Rig = new Interp64Rig();
+  const rig = interp64Rig;
+  const now = rig.now;
+  // The first call warms up 4 times as long (63 remotes take longer to settle than 16).
+  const frames = rig.warmup-- > 0 ? n : n / 4;
+  for (let i = 0; i < frames; i++) {
+    now[0] = (now[0] as number) + 1000 / 144;
+    now[1] = (now[1] as number) + 1000 / 144;
+    while ((now[1] as number) >= 1000 / 60) {
+      now[1] = (now[1] as number) - 1000 / 60;
+      const t = ++rig.tick;
+      if ((t & 511) >= 8) rig.store1(t);
+    }
+    rig.stats.advance();
+    rig.interp.update(0);
+    rig.meter.measure(rig.interp, true);
+  }
+  outcomes[0] = rig.stats.totals[STAT_REMOTE_FRAMES] as number;
+  outcomes[1] = rig.meter.t[JM_CHECKED] as number;
+  outcomes[2] = rig.interp.delay.t[ID_DEFER_LAG] as number;
+  extra[0] = rig.meter.t[JM_VIOLATIONS] as number;
+}
+
 const WORKLOADS: Record<string, (n: number) => void> = {
   botInput: runBotInput,
   codec: runCodec,
   deltaCodec: runDeltaCodec,
   interp: runInterp,
+  interp64: runInterp64,
   match: runMatch,
   matchMulti: runMatchMulti,
   pmove: runPmove,
@@ -1761,6 +2112,7 @@ const WORKLOADS: Record<string, (n: number) => void> = {
   quantize: runQuantize,
   scenario: runScenario,
   snap: runSnap,
+  snapshotSchedule: runSnapshotSchedule,
   strafeBot: runStrafeBot,
   state: runState,
   timedPass: runTimedPass,

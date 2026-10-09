@@ -92,10 +92,13 @@ export const INPUT_TICK_BACK_MAX = 255;
 export const SNAP_FLAG_STARVED = 1 << 0;
 /** Every player, no local block: demo files only (D-044); a live connection drops it. */
 export const SNAP_FLAG_SPECTATOR = 1 << 2;
-/** A deferred-id list follows the entities (D-046). Refused until the byte-budget scheduler. */
+/**
+ * A deferred-id list follows the entities (D-046): players the byte-budget scheduler left out of
+ * this snapshot. Never with SPECTATOR. The encoder sets it exactly when it lists an id.
+ */
 export const SNAP_FLAG_DEFERRED = 1 << 3;
-/** The flags a snapshot may carry now. */
-export const SNAP_FLAG_MASK = SNAP_FLAG_STARVED | SNAP_FLAG_SPECTATOR;
+/** The flags a snapshot may carry. */
+export const SNAP_FLAG_MASK = SNAP_FLAG_STARVED | SNAP_FLAG_SPECTATOR | SNAP_FLAG_DEFERRED;
 
 /** Snapshots each end keeps, and so the oldest baseline a delta may use (docs/05 §4.3). */
 export const SNAPSHOT_HISTORY = 64;

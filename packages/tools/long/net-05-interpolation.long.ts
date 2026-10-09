@@ -17,6 +17,7 @@ import {
   type HarnessClient,
   MultiHarness,
 } from "../test/net/multiHarness";
+import { expectSixtyFourSmooth, runSixtyFour } from "../test/net/sixtyFour";
 
 // NET-05 (docs/05 §14, M3 design §2.8 and §5, D-037), its long tier (D-032): the runs of
 // `packages/tools/test/net/net-05-interpolation.test.ts` that `pnpm test` leaves out, with the
@@ -29,7 +30,11 @@ import {
 // - 16 clients on arena_greybox (the stairs mover and 15 bots running the bots' routes and random
 //   walks), every client watching all 15 others for 60 s: on wan-100-loss1 at 144 Hz, and on
 //   wan-150-loss2 with frames like the bots' 60 Hz timer (10–33 ms, often passing a whole bracket).
-// The 64-player leg (deferred slots, a late joiner) comes with the byte-budget scheduler (D-046).
+// - 64 players (D-046; `sixtyFour.ts`): 4 observers sample all 63 others at 60 Hz at the real
+//   1100 B budget on wan-150-loss2 for 20 s, with the 64th client joining 5 s in (its remotes
+//   snap once each, at their first appearance, never on a re-sent "new" while slots alternate
+//   with pending), and through the launch storm that leaves players out of most snapshots for
+//   10 s; extrapolated + held ≤ 2% in both, and no remote the newest stored frame holds hidden.
 
 const PROFILES = ["wan-50", "wan-100-loss1", "wan-150-loss2", "bad-250-loss5"] as const;
 const MODELS: readonly (readonly [string, FrameModel])[] = [
@@ -139,4 +144,31 @@ describe("NET-05: remote interpolation is continuous", () => {
     },
     60_000,
   );
+
+  it("64 players at wan-150-loss2: 4 observers draw all 63 others smoothly, a late joiner's remotes snap once", () => {
+    const run = runSixtyFour({
+      profile: "wan-150-loss2",
+      seconds: 20,
+      seed: 13,
+      observers: 4,
+      checked: 0,
+      lateJoinMs: 5000,
+    });
+    expect(run.watch.failures).toEqual([]);
+    console.log(expectSixtyFourSmooth(run));
+  }, 180_000);
+
+  it("64 players through the launch storm: 4 observers draw all 63 others smoothly", () => {
+    const run = runSixtyFour({
+      profile: "wan-100-loss1",
+      seconds: 10,
+      seed: 17,
+      observers: 4,
+      checked: 0,
+      storm: true,
+    });
+    expect(run.watch.failures).toEqual([]);
+    expect(run.windowDeferred / run.windowSnapshots).toBeGreaterThanOrEqual(0.5);
+    console.log(expectSixtyFourSmooth(run));
+  }, 180_000);
 });

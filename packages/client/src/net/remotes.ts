@@ -10,6 +10,7 @@ import {
   MASK_PRESENT_LO,
   ORIGIN_SCALE,
   PMF_CROUCHED,
+  SNAP_MAX_STALENESS,
   SNAPSHOT_HISTORY,
   TICK_DT,
   TraceResult,
@@ -81,10 +82,12 @@ export const INTERVAL_WINDOW = 30;
 /** The delay falls only after this long at a lower value (design), ms. */
 export const DELAY_FALL_MS = 2000;
 /**
- * The largest staleness of a slot's state in a frame, ticks: the D-046 scheduler's bound (a
- * deferred slot keeps its baseline's stamp; 0 until then), kept so the search already covers it.
+ * The D-046 scheduler's bound (`SNAP_MAX_STALENESS`): the sent stream carries every player fresh
+ * at least every 2 ticks, so the window reaches that far behind the render tick. A deferred copy
+ * keeps its baseline's (possibly much older) stamp, so a slot whose window holds only copies at or
+ * before render time searches on (`RemoteInterpolator.slot`).
  */
-export const SAMPLE_STALENESS_TICKS = 2;
+export const SAMPLE_STALENESS_TICKS = SNAP_MAX_STALENESS;
 /**
  * The stored frames the samples are searched in: from the newest back over at least the delay's
  * maximum plus that staleness (M3 design §2.8), and on past lost frames until one at least that
@@ -288,18 +291,26 @@ export class RenderClock {
 export const ID_P95 = 0;
 /** The median tick step between newest snapshots over the last 30. */
 export const ID_INTERVAL = 1;
-/** clamp(ceil(2 × interval + p95), 2, 6) at the last snapshot. */
+/** clamp(ceil(2 × interval + p95 + deferLag), 2, 6) at the last snapshot. */
 export const ID_FORMULA = 2;
 /** Since when the formula has been below the delay (ms; NaN when it isn't). */
 const ID_LOWER_SINCE = 3;
-const ID_SLOTS = 4;
+/**
+ * The defer lag (D-046), ticks: the largest, over the last 120 newly newest snapshots, of how far
+ * the freshest sample of a player a snapshot left out lags that snapshot (0 when none deferred).
+ */
+export const ID_DEFER_LAG = 4;
+const ID_SLOTS = 5;
 
 /**
  * The interpolation delay (docs/05 §6, M3 design §2.8): D = clamp(ceil(2 × snapshotInterval +
  * p95 lateness), 2, 6) ticks, where lateness = the render clock's largest offset − each offset over
  * the same 120 arrivals (a histogram of 1/8-tick buckets to 8 ticks) and the interval is the
  * median tick step of the last 30 newest snapshots. D rises at once and falls only after 2 s
- * below it (to the highest value of those 2 s). The scheduler's defer lag joins with D-046.
+ * below it (to the highest value of those 2 s). Above 37 players the byte-budget scheduler leaves
+ * players out of some snapshots (D-046): the defer lag adds the ticks a left-out player's freshest
+ * sample lags (1 when it works without loss: a player left out at T went fresh at T − 1), so the
+ * render time stays bracketed; with nothing deferred it is 0 and D is unchanged.
  */
 export class InterpDelay {
   readonly t = new Float64Array(ID_SLOTS);
@@ -312,6 +323,9 @@ export class InterpDelay {
   private stepHead = 0;
   /** The highest formula value since it went below `ticks`. */
   private lowerMax = 0;
+  /** Each newly newest snapshot's defer lag over the last LATENESS_WINDOW (a ring). */
+  private readonly lags = new Uint8Array(LATENESS_WINDOW);
+  private lagHead = 0;
 
   constructor(private readonly now: Float64Array) {
     this.reset();
@@ -322,21 +336,33 @@ export class InterpDelay {
     this.t[ID_INTERVAL] = 1;
     this.t[ID_FORMULA] = INTERP_DELAY_MIN;
     this.t[ID_LOWER_SINCE] = Number.NaN;
+    this.t[ID_DEFER_LAG] = 0;
     this.ticks = INTERP_DELAY_MIN;
     this.stepCount = 0;
     this.stepHead = 0;
     this.lowerMax = 0;
     this.lateness.fill(0);
+    this.lags.fill(0);
+    this.lagHead = 0;
   }
 
-  /** After `clock.onSnapshot`: `step` ticks since the previous newest snapshot (0 for the first). */
-  onSnapshot(clock: RenderClock, step: number): void {
+  /**
+   * After `clock.onSnapshot`: `step` ticks since the previous newest snapshot (0 for the first),
+   * and the snapshot's defer lag in ticks (0 when it left nobody out).
+   */
+  onSnapshot(clock: RenderClock, step: number, deferLag = 0): void {
     const t = this.t;
     if (step > 0) {
       this.steps[this.stepHead] = Math.min(step, SNAPSHOT_HISTORY);
       this.stepHead = this.stepHead + 1 === INTERVAL_WINDOW ? 0 : this.stepHead + 1;
       if (this.stepCount < INTERVAL_WINDOW) this.stepCount++;
     }
+    const lags = this.lags;
+    lags[this.lagHead] = Math.min(255, Math.max(0, deferLag));
+    this.lagHead = this.lagHead + 1 === LATENESS_WINDOW ? 0 : this.lagHead + 1;
+    let lag = 0;
+    for (let i = 0; i < LATENESS_WINDOW; i++) lag = Math.max(lag, lags[i] as number);
+    t[ID_DEFER_LAG] = lag;
     const hist = this.lateness;
     hist.fill(0);
     const n = clock.count;
@@ -359,7 +385,10 @@ export class InterpDelay {
     t[ID_INTERVAL] = this.medianStep();
     const formula = Math.min(
       INTERP_DELAY_MAX,
-      Math.max(INTERP_DELAY_MIN, Math.ceil(2 * (t[ID_INTERVAL] as number) + (t[ID_P95] as number))),
+      Math.max(
+        INTERP_DELAY_MIN,
+        Math.ceil(2 * (t[ID_INTERVAL] as number) + (t[ID_P95] as number) + lag),
+      ),
     );
     t[ID_FORMULA] = formula;
     if (formula >= this.ticks) {
@@ -421,7 +450,8 @@ const CROUCH_MAXS = HULL_CROUCHED_MAXS;
  * Per slot it works on samples: a stored frame where the slot has state gives one (its stamp,
  * fields and teleport counter); frames sharing a stamp give the same one; pending frames give
  * none. a = the sample with the largest stamp ≤ the render tick, b = the smallest stamp above it,
- * searched in the stored frames from the newest back (SAMPLE_SEARCH_FRAMES).
+ * searched in the stored frames from the newest back (SAMPLE_SEARCH_FRAMES, and further while an
+ * older frame could still hold a fresher a, so a lost fresh frame never sends a back to a copy).
  * - a and b with the same teleport counter: lerp the origin, the yaw along the shorter arc, the
  *   pitch; crouch and team from a.
  * - a different counter (or a removal between them): a until the render tick reaches b, then b,
@@ -463,12 +493,14 @@ export class RemoteInterpolator {
   private readonly f = new Float64Array(F_SLOTS);
   /** The newest tick `onStored` saw. */
   private newestSeen = 0;
-  /** The stored frames searched this frame, newest first, and their ticks. */
+  /** Every stored frame this frame, newest first, and their ticks. */
   private readonly frames: (WorldFrame | null)[] = new Array<WorldFrame | null>(
     SNAPSHOT_HISTORY,
   ).fill(null);
   private readonly frameTicks = new Int32Array(SNAPSHOT_HISTORY);
   private frameCount = 0;
+  /** How many of them form the search window every slot scans (see `collectFrames`). */
+  private windowCount = 0;
   /** The stamp of the sample each slot was drawn from last frame (a), 0 for none. */
   private readonly baseStamp = new Int32Array(FRAME_SLOTS);
   private readonly lastSeq = new Uint8Array(FRAME_SLOTS);
@@ -509,7 +541,40 @@ export class RemoteInterpolator {
     const step = this.newestSeen > 0 ? tick - this.newestSeen : 0;
     this.newestSeen = tick;
     this.clock.onSnapshot(tick);
-    this.delay.onSnapshot(this.clock, step);
+    this.delay.onSnapshot(this.clock, step, this.deferLag(tick));
+  }
+
+  /**
+   * The defer lag of the stored snapshot of `tick` (M3 design §2.8, D-046): over the players it
+   * left out (present with an older stamp, or pending), the largest gap between `tick` and the
+   * newest stamp of that player's state in any stored frame, this one included; a player with no
+   * sample yet is ignored, and a snapshot that left nobody out gives 0. Each player's search runs
+   * from the newest stored frame back and stops at a frame older than the best stamp found (no
+   * older frame can hold a newer one) or one where the slot is absent (another player, or none).
+   */
+  private deferLag(tick: number): number {
+    const ring = this.store.ring;
+    const f = ring.get(tick);
+    if (f === null) return 0;
+    const newest = this.store.newestTick;
+    const from = Math.max(1, newest - (SNAPSHOT_HISTORY - 1));
+    let lag = 0;
+    for (let s = 0; s < FRAME_SLOTS; s++) {
+      if (f.present[s] !== 1 || f.stamp[s] === tick) continue;
+      let best = 0;
+      for (let k = newest; k >= from && k > best; k--) {
+        const g = ring.get(k);
+        if (g === null) continue;
+        if (g.present[s] !== 1) {
+          if (k <= tick) break;
+          continue;
+        }
+        const st = g.stamp[s] as number;
+        if (st > best) best = st;
+      }
+      if (best > 0) lag = Math.max(lag, tick - best);
+    }
+    return lag;
   }
 
   /** Hides everything and starts over (a session ended). */
@@ -582,9 +647,10 @@ export class RemoteInterpolator {
   // -------------------------------------------------------------------------------------------
 
   /**
-   * The stored frames searched this frame, newest first: at least SAMPLE_SEARCH_FRAMES, and on
-   * until one SAMPLE_STALENESS_TICKS before the render tick (at most the ring); and the slots
-   * present in any of them (lo/hi masks).
+   * Every stored frame, newest first. The first `windowCount` form the search window: at least
+   * SAMPLE_SEARCH_FRAMES, and on until one SAMPLE_STALENESS_TICKS before the render tick; the
+   * slots present in any of them are the lo/hi masks. A slot searches past the window only while
+   * an older frame could still hold a fresher sample at or before render time (`slot`).
    */
   private collectFrames(newest: number): Int32Array {
     const ring = this.store.ring;
@@ -593,17 +659,20 @@ export class RemoteInterpolator {
     let n = 0;
     let lo = 0;
     let hi = 0;
+    let span = -1;
     for (let tick = newest; tick >= from; tick--) {
       const fr = ring.get(tick);
       if (fr === null) continue;
       this.frames[n] = fr;
       this.frameTicks[n] = tick;
       n++;
+      if (span >= 0) continue;
       lo |= fr.masks[MASK_PRESENT_LO] as number;
       hi |= fr.masks[MASK_PRESENT_HI] as number;
-      if (n >= SAMPLE_SEARCH_FRAMES && tick <= until) break;
+      if (n >= SAMPLE_SEARCH_FRAMES && tick <= until) span = n;
     }
     this.frameCount = n;
+    this.windowCount = span >= 0 ? span : n;
     const p = this.presence;
     p[0] = lo;
     p[1] = hi;
@@ -633,7 +702,8 @@ export class RemoteInterpolator {
     const render = f[F_RENDER] as number;
     const frames = this.frames;
     const ticks = this.frameTicks;
-    const n = this.frameCount;
+    const all = this.frameCount;
+    const span = this.windowCount;
     const from = f[F_PREV_RENDER] as number;
     // a: the largest stamp ≤ render; b: the smallest above it; any absence seen. And the NET-05
     // speed of the path this frame crossed (from the last frame's render tick to this one's): a
@@ -650,7 +720,17 @@ export class RemoteInterpolator {
     let lastZ = 0;
     let lastSeq = -1;
     let lastSpeed = 0;
-    for (let k = 0; k < n; k++) {
+    // Past the window, on only while a fresher a could hide in an older frame (a frame's stamps
+    // are ≤ its tick): a deferred copy keeps its baseline's stamp, so with the fresh frames lost
+    // the window can end on copies far older than the sample the sent stream carried fresh within
+    // SNAP_MAX_STALENESS (D-046), and a must never move back. A slot with no a yet stops at the
+    // first absence (an older incarnation lies behind it).
+    let n = all;
+    for (let k = 0; k < all; k++) {
+      if (k >= span && (ai >= 0 ? (ticks[k] as number) <= aStamp : sawAbsent)) {
+        n = k;
+        break;
+      }
       const fr = frames[k] as WorldFrame;
       if (fr.present[s] !== 1) {
         sawAbsent = true;

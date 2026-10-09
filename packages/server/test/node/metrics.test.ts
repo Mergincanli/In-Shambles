@@ -69,6 +69,11 @@ function setCounters(s: ReturnType<typeof setup>, k: number): void {
   c.snapshots = 5 * k;
   c.fullSnapshots = 7 * k;
   c.kicks = 11 * k;
+  c.deferredEntities = 19 * k;
+  c.deferredSnapshots = 23 * k;
+  c.snapshotOverflow = 29 * k;
+  c.schedOverrun = 31 * k;
+  c.maxStaleness = k;
   s.loop.dropped = 13 * k;
   s.loop.yields = 17 * k;
   s.m.traffic.bytesIn = 1000 * k;
@@ -145,6 +150,12 @@ describe("ServerMetrics", () => {
       snapshots: 10,
       fullSnapshots: 14,
       kicks: 22,
+      deferredEntities: 38,
+      deferredSnapshots: 46,
+      snapshotOverflow: 58,
+      schedOverrun: 62,
+      // A running maximum, not a window's.
+      maxStaleness: 4,
       traffic: { bytesIn: 2000, bytesOut: 6000 },
     });
     // The second interval line (2 s from 1×), match then process.
@@ -155,6 +166,9 @@ describe("ServerMetrics", () => {
       strikes: 9,
       fullSnapshots: 21,
       kicks: 33,
+      deferredEntities: 57,
+      maxStaleness: 4,
+      snapshotOverflow: 87,
       kbInPerS: 1.5,
       kbOutPerS: 4.5,
     });

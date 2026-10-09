@@ -80,6 +80,8 @@ describe("NET-05: remote interpolation is continuous", () => {
       expect(r.watch.truthChecked).toBeGreaterThan(r.watch.frames / 2);
       expect(r.watch.yawWraps).toBeGreaterThan(0);
       if (name === "wan-150-loss2") expect(r.watch.heldShare).toBeLessThanOrEqual(0.02);
+      // Nobody is ever left out at 2 players: the delay carries no defer lag (D-046).
+      expect(r.watch.maxDeferLag).toBe(0);
     },
   );
 

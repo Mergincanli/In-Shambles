@@ -53,17 +53,22 @@ export interface BandwidthRun {
   readonly windows: ClientWindow[];
 }
 
-export function runBandwidth(seconds: number, seed: number): BandwidthRun {
+/**
+ * `bots` bots (16 for NET-08 (a), 31 for the 32-player report (b)) join 100 ms apart, then the
+ * human stand-in; once all are in, `seconds` are measured. The match keeps its default
+ * `sv_maxClients` (32).
+ */
+export function runBandwidth(seconds: number, seed: number, bots = BANDWIDTH_BOTS): BandwidthRun {
   const h = new MultiHarness({ map: "arena_greybox", seed });
   const link = findNetProfile(PROFILE) as NetProfile;
   const watch = new DeltaWatch(h, ticksIn(2 * (link.delayMs + link.jitterMs) + 100));
-  for (let i = 0; i < BANDWIDTH_BOTS; i++) {
+  for (let i = 0; i < bots; i++) {
     h.addClient({
       input: createBotInput("arena_greybox", i, seed),
       profile: link,
       frameIntervalMs: FRAMES_BOT_TIMER,
     });
-    h.run(100);
+    h.run(bots > BANDWIDTH_BOTS ? 50 : 100);
   }
   const human = h.addClient({
     input: new MixedInput(),
@@ -186,4 +191,56 @@ function mean(xs: readonly number[]): number {
   let s = 0;
   for (const x of xs) s += x;
   return xs.length === 0 ? 0 : s / xs.length;
+}
+
+/** The 32-player report's players: 31 bots and the human stand-in, the default `sv_maxClients`. */
+export const REPORT_BOTS = 31;
+
+/**
+ * NET-08 (b)'s pass conditions (M3 design §5; D-036, D-046): 32 players, the default cap, where
+ * the worst case always fits, so the byte-budget scheduler never runs: no size pass and no player
+ * left out; every snapshot ≤ 1100 B; deltas as NET-02 (b) checks them. Bandwidth, sizes and the
+ * delta share are reported, not gated (`docs/05` §9.2 budgets 16 players).
+ */
+export function expectReport32(run: BandwidthRun): string {
+  const { h, watch, human, seconds, down, up, windows } = run;
+  const clients = h.clients;
+  const m = h.match.metrics;
+  expect(clients).toHaveLength(REPORT_BOTS + 1);
+  expect(h.match.maxClients).toBe(32);
+  let snaps = 0;
+  let snapBytes = 0;
+  let fullBytes = 0;
+  for (const w of windows) {
+    snaps += w.snapshots;
+    snapBytes += w.snapshotBytes;
+    fullBytes += w.fullEquivalentBytes;
+  }
+  const kb = (b: number) => (b / 1000).toFixed(2);
+  const downRates = down.map((b) => b / seconds);
+  const largest = Math.max(...clients.map((c) => c.tap.down.maxByType[MSG_SNAPSHOT] as number));
+  const account =
+    `NET-08 (b): ${REPORT_BOTS} bots + 1 human stand-in (32 players), arena_greybox, ${PROFILE}, ` +
+    `${seconds} s window: down mean ${kb(mean(downRates))} KB/s, max ${kb(Math.max(...downRates))} ` +
+    `KB/s, up max ${kb(Math.max(...up.map((b) => b / seconds)))} KB/s; snapshots mean ` +
+    `${(snapBytes / snaps).toFixed(0)} B vs ${(fullBytes / snaps).toFixed(0)} B full, largest ` +
+    `${largest} B, the human's join ${human.tap.maxFullSnapshot} B; ${m.sizePasses} size passes, ` +
+    `${m.deferredEntities} players left out; ${watch.describe()}`;
+  expect(watch.failures, account).toEqual([]);
+  expect(watch.acksAhead).toBe(0);
+  expect(largest, account).toBeLessThanOrEqual(MAX_SNAPSHOT_BYTES);
+  expect([m.sizePasses, m.deferredEntities, m.deferredSnapshots], account).toEqual([0, 0, 0]);
+  // No mirror anywhere: none from the pool, none on a session (the design's heap check, by
+  // construction: a mirror exists only through the pool).
+  expect(h.match.mirrors.allocated, account).toBe(0);
+  for (const c of clients) {
+    expect(c.session?.mirror, account).toBeNull();
+    expect(c.client.store.deferred, account).toBe(0);
+    expect(c.client.store.baselineDrops, account).toBe(0);
+    expect(c.session?.stats.strikes, account).toBe(0);
+  }
+  expect(human.digestMismatches).toEqual([]);
+  // 86 + 199 + 7 + 31 × 213 bits: the human, last in, got every other player as a new body.
+  expect(human.tap.maxFullSnapshot).toBe(862);
+  return account;
 }

@@ -32,6 +32,7 @@
 | CPU | 120 ms per wall s |
 | traffic | 6.10 KB/s out, 7.30 KB/s in |
 | counters | dropped ticks 0, starved 3, full snapshots 13500, strikes 0, kicks 0 |
+| scheduler (D-046) | 2900 players left out of 120 of 13650 snapshots (0.9%), max staleness 2, snapshot overflows 0 |
 
 ## Bots (aggregate)
 

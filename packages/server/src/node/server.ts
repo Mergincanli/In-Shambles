@@ -158,16 +158,6 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     buildHash,
     matches: list.map((m) => ({ name: m.name, map: m.match.mapName })),
   });
-  // After `listening`, which scripts wait for as the first two lines.
-  if (main.match.maxClients !== maxClients) {
-    log("warn", "max_clients_clamped", {
-      match: main.name,
-      requested: maxClients,
-      maxClients: main.match.maxClients,
-      why: "every snapshot must fit 1100 B until the byte-budget scheduler (D-034, D-046)",
-    });
-  }
-
   const stopConsole =
     options.console === undefined
       ? () => {}

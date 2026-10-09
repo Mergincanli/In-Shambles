@@ -6,7 +6,7 @@ import { fromRoot } from "../src/paths";
 // The `pnpm bench` CLI part by part (docs/10 §4.4), the long tier's (D-032): each part's report
 // after the one before it, with that part's counts raised, and every refused count exiting 2. Each
 // case is a `node --import tsx bench/run.ts` child. `pnpm test` keeps one end-to-end smoke of all
-// five parts with tiny counts (`packages/tools/test/bench/trace-bench.test.ts`) and the
+// the parts with tiny counts (`packages/tools/test/bench/trace-bench.test.ts`) and the
 // workloads' and verdicts' unit tests.
 
 describe("pnpm bench entry", () => {
@@ -21,6 +21,10 @@ describe("pnpm bench entry", () => {
         "--build-ticks",
         "20",
         "--build-warmup",
+        "0",
+        "--build64-ticks",
+        "2",
+        "--build64-warmup",
         "0",
         "--pmove-ticks",
         "20",
@@ -66,6 +70,10 @@ describe("pnpm bench entry, pmove part", () => {
         "20",
         "--build-warmup",
         "0",
+        "--build64-ticks",
+        "2",
+        "--build64-warmup",
+        "0",
         "--calls",
         "1000",
         "--warmup",
@@ -108,6 +116,10 @@ describe("pnpm bench entry, codec part", () => {
         "--build-ticks",
         "20",
         "--build-warmup",
+        "0",
+        "--build64-ticks",
+        "2",
+        "--build64-warmup",
         "0",
         "--calls",
         "1000",
@@ -152,6 +164,10 @@ describe("pnpm bench entry, interp part", () => {
         "20",
         "--build-warmup",
         "0",
+        "--build64-ticks",
+        "2",
+        "--build64-warmup",
+        "0",
         "--calls",
         "1000",
         "--warmup",
@@ -175,6 +191,9 @@ describe("pnpm bench entry, interp part", () => {
     expect(out.stdout).toMatch(/budget 30000 ns: (PASS|FAIL)[\s\S]*interp frame: 5000 frames/);
     expect(out.stdout).toMatch(/clean stream: [\d.]+ ns per frame .*16\.00 drawn/);
     expect(out.stdout).toMatch(/12 of every 512 ticks lost: [\d.]+ ns per frame/);
+    expect(out.stdout).toMatch(
+      /63 remotes, a third left out of each snapshot: [\d.]+ ns per frame \(reported\), 63\.00 drawn/,
+    );
   }, 30_000);
 
   it("rejects bad interp counts with exit code 2", () => {
@@ -207,6 +226,10 @@ describe("pnpm bench entry, snapshot build part", () => {
         "1000",
         "--interp-warmup",
         "0",
+        "--build64-ticks",
+        "2",
+        "--build64-warmup",
+        "0",
         ...args,
       ],
       { cwd: fromRoot("packages", "tools"), encoding: "utf8" },
@@ -220,8 +243,21 @@ describe("pnpm bench entry, snapshot build part", () => {
     expect(out.stdout).toMatch(/failed encodes: 0/);
   }, 30_000);
 
+  it("prints the 64-player report after the 16-player one (D-046), and exits 0", () => {
+    const out = run("--build-ticks", "20", "--build-warmup", "0", "--build64-ticks", "200");
+    expect(out.status, out.stderr).toBe(0);
+    expect(out.stdout).toMatch(
+      /snapshot build: 20 ticks of 16[\s\S]*snapshot build, 64 players at their worst .*: 200 ticks of 64/,
+    );
+    expect(out.stdout).toMatch(/per client \(\d+ B, largest \d+ B\): [\d.]+ ns \(reported\)/);
+    expect(out.stdout).toMatch(/max staleness [12] \(expect ≤ 2\)/);
+    expect(out.stdout).not.toMatch(/failed encodes: [1-9]/);
+  }, 30_000);
+
   it("rejects bad snapshot build counts with exit code 2", () => {
     expect(run("--build-ticks", "0").status).toBe(2);
     expect(run("--build-warmup", "1.5").status).toBe(2);
+    expect(run("--build64-ticks", "0").status).toBe(2);
+    expect(run("--build64-warmup", "1.5").status).toBe(2);
   }, 30_000);
 });

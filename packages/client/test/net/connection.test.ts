@@ -1,6 +1,7 @@
 import {
   BitReader,
   BitWriter,
+  copySlot,
   decodeInput,
   encodeSnapshot,
   InputMsg,
@@ -22,6 +23,8 @@ import { BASELINE_MISSES_BEFORE_FULL } from "../../src/net/snapshotStore";
 import {
   NetStats,
   STAT_BASELINE_DROPS,
+  STAT_DEFERRED,
+  STAT_DEFERRED_SNAPSHOTS,
   STAT_FULL_SNAPSHOTS,
   STAT_STRIKES,
 } from "../../src/net/stats";
@@ -142,5 +145,23 @@ describe("Connection: snapshot acks and counts (M3 design §2.3, D-038)", () => 
     // A snapshot that does not decode is struck.
     transport.inject(new Uint8Array([5, 0, 0]));
     expect(stats.totals[STAT_STRIKES]).toBe(1);
+  });
+
+  it("counts the players the scheduler left out and the snapshots that left any out (D-046)", () => {
+    const { transport, stats } = setup();
+    transport.inject(snapshot(10));
+    // Tick 12 against 10 leaving players 0 and 2 out (their copies of tick 10).
+    const sent = serverFrame(12);
+    const old = serverFrame(10);
+    copySlot(sent, 0, old, 0);
+    copySlot(sent, 2, old, 2);
+    const h = new SnapshotHeader();
+    h.serverTick = 12;
+    h.baseBack = 2;
+    const w = new BitWriter(MAX_UNRELIABLE_BYTES);
+    expect(encodeSnapshot(w, h, sent, old, SELF)).toBe(true);
+    transport.inject(w.bytes.slice(0, w.byteLength));
+    transport.inject(snapshot(13, 10));
+    expect([stats.totals[STAT_DEFERRED], stats.totals[STAT_DEFERRED_SNAPSHOTS]]).toEqual([2, 1]);
   });
 });

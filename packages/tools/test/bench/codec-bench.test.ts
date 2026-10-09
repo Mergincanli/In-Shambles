@@ -25,12 +25,17 @@ import {
 import { PMOVE_PLAYERS } from "../../bench/pmove.bench";
 import {
   BUILD_FRAMES,
+  BUILD_PLAYERS_64,
+  Build64World,
   type BuildBenchResult,
   BuildBenchState,
+  build64StrictFailure,
   buildSnapshotBuildWorkload,
   buildStrictFailure,
+  formatSnapshotBuild64Bench,
   formatSnapshotBuildBench,
   runSnapshotBuild,
+  runSnapshotBuild64,
 } from "../../bench/snapshotBuild.bench";
 
 // Keeps the codec and snapshot build parts of `pnpm bench` compiling and their workloads honest
@@ -162,6 +167,20 @@ describe("snapshot build bench workload", () => {
   });
 });
 
+describe("64-player snapshot build bench workload (D-046)", () => {
+  it("runs the scheduler for most snapshots: all within 1100 B, nobody left out twice in a row", () => {
+    const s = new BuildBenchState(BUILD_PLAYERS_64);
+    expect(s.clients.every((c) => c.mirror !== null)).toBe(true);
+    runSnapshotBuild64(new Build64World(), s, 50, 0);
+    expect(s.failures).toBe(0);
+    // Ticks 1000–1049; slot 63 is away for ticks 1024–1031 (0–7 of every 128) and gets none.
+    expect(s.snapshots).toBe(50 * BUILD_PLAYERS_64 - 8);
+    expect(s.deferredSnapshots).toBeGreaterThan(s.snapshots / 2);
+    expect(s.maxStaleness).toBe(2);
+    expect(s.maxBytes).toBeLessThanOrEqual(1100);
+  });
+});
+
 describe("snapshot build bench verdict", () => {
   const buildResult = (ns: number, gcs: number, failures = 0): BuildBenchResult => ({
     ticks: 1,
@@ -181,5 +200,27 @@ describe("snapshot build bench verdict", () => {
     expect(buildStrictFailure(buildResult(60000, 0))).toBe(true);
     expect(buildStrictFailure(buildResult(5000, 1))).toBe(true);
     expect(buildStrictFailure(buildResult(5000, 0, 1))).toBe(true);
+  });
+
+  it("reports the 64-player case without a budget; --strict fails on a GC, a failure or staleness past 2", () => {
+    const r = {
+      ticks: 1,
+      nsPerBuild: 38000.04,
+      bytes: 1077.4,
+      sizePassShare: 1,
+      deferredShare: 0.9312,
+      deferredPerSnapshot: 19.08,
+      maxStaleness: 2,
+      maxBytes: 1099,
+      failures: 0,
+      gcs: 0,
+    };
+    expect(formatSnapshotBuild64Bench(r)).toContain(
+      "per client (1077 B, largest 1099 B): 38000.0 ns (reported); 100.0% size passes, 93.1% leaving players out (19.1 each), max staleness 2 (expect ≤ 2)",
+    );
+    expect(build64StrictFailure(r)).toBe(false);
+    expect(build64StrictFailure({ ...r, gcs: 1 })).toBe(true);
+    expect(build64StrictFailure({ ...r, failures: 1 })).toBe(true);
+    expect(build64StrictFailure({ ...r, maxStaleness: 3 })).toBe(true);
   });
 });

@@ -270,11 +270,11 @@ describe("match handshake", () => {
     expect(match.session(31)).toBeDefined();
   });
 
-  it("clamps sv_maxClients to 1–37 until the byte-budget scheduler (D-034)", () => {
+  it("clamps sv_maxClients to 1–64 and kicks the 65th with server full (D-034, D-046)", () => {
     expect(MATCH_MAX_CLIENTS).toBe(64);
     expect(SNAP_FIT_MAX_PLAYERS).toBe(37);
     expect([0, 1, 16, 32, 37, 38, 64, 1000].map(effectiveMaxClients)).toEqual([
-      1, 1, 16, 32, 37, 37, 37, 37,
+      1, 1, 16, 32, 37, 38, 64, 64,
     ]);
     // A non-finite request is the default, not a match that refuses everyone.
     expect([Number.NaN, Number.POSITIVE_INFINITY, -1.5, 37.9].map(effectiveMaxClients)).toEqual([
@@ -287,10 +287,14 @@ describe("match handshake", () => {
       new Match({ cmap, world, buildHash: TEST_BUILD, maxClients: Number.NaN }).maxClients,
     ).toBe(MATCH_DEFAULT_MAX_CLIENTS);
     const full = new Match({ cmap, world, buildHash: TEST_BUILD, maxClients: MATCH_MAX_CLIENTS });
-    expect(full.maxClients).toBe(37);
-    for (let i = 0; i < 37; i++) connect(full);
-    const [, serverEnd] = createLoopbackPair();
+    expect(full.maxClients).toBe(64);
+    for (let i = 0; i < 64; i++) connect(full);
+    const [clientEnd, serverEnd] = createLoopbackPair();
+    const late = new TestClient(clientEnd);
     expect(full.connect(serverEnd)).toBeNull();
+    late.poll();
+    expect(late.kicks[0]?.reason).toBe("server full");
+    expect(full.session(63)).toBeDefined();
     const duel = new Match({ cmap, world, buildHash: TEST_BUILD, maxClients: 2 });
     const left = connect(duel);
     connect(duel);

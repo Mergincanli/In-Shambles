@@ -14,9 +14,12 @@ import {
   runPmoveBench,
 } from "./pmove.bench";
 import {
+  build64StrictFailure,
   buildSnapshotBuildWorkload,
   buildStrictFailure,
+  formatSnapshotBuild64Bench,
   formatSnapshotBuildBench,
+  runSnapshotBuild64Bench,
   runSnapshotBuildBench,
 } from "./snapshotBuild.bench";
 import {
@@ -29,8 +32,9 @@ import {
 
 // `pnpm bench`: sim microbenchmarks against the docs/10 §4.4 budgets (the interp frame is
 // reported against its estimate): BVH traces, pmove, the snapshot and INPUT codecs, the remote
-// interpolation frame and the server's snapshot build. Timings vary by machine, so a miss only fails the run with
-// --strict.
+// interpolation frame (16 remotes, and 63 with deferral) and the server's snapshot build (16
+// players, and 64 at their worst with the byte-budget scheduler, reported). Timings vary by
+// machine, so a miss only fails the run with --strict.
 const { values } = parseArgs({
   options: {
     strict: { type: "boolean", default: false },
@@ -48,6 +52,9 @@ const { values } = parseArgs({
     // snapshot build: server ticks of 16 clients each.
     "build-ticks": { type: "string", default: "20000" },
     "build-warmup": { type: "string", default: "5000" },
+    // 64-player snapshot build: server ticks of 64 clients each (reported).
+    "build64-ticks": { type: "string", default: "2000" },
+    "build64-warmup": { type: "string", default: "500" },
   },
 });
 
@@ -61,6 +68,8 @@ const interpFrames = Number(values["interp-frames"]);
 const interpWarmup = Number(values["interp-warmup"]);
 const buildTicks = Number(values["build-ticks"]);
 const buildWarmup = Number(values["build-warmup"]);
+const build64Ticks = Number(values["build64-ticks"]);
+const build64Warmup = Number(values["build64-warmup"]);
 const positive = (x: number) => Number.isInteger(x) && x >= 1;
 const nonNegative = (x: number) => Number.isInteger(x) && x >= 0;
 if (
@@ -73,10 +82,12 @@ if (
   !positive(interpFrames) ||
   !nonNegative(interpWarmup) ||
   !positive(buildTicks) ||
-  !nonNegative(buildWarmup)
+  !nonNegative(buildWarmup) ||
+  !positive(build64Ticks) ||
+  !nonNegative(build64Warmup)
 ) {
   console.error(
-    "--calls, --pmove-ticks, --codec-calls, --interp-frames and --build-ticks must be positive integers, --warmup, --pmove-warmup, --codec-warmup, --interp-warmup and --build-warmup non-negative ones",
+    "--calls, --pmove-ticks, --codec-calls, --interp-frames, --build-ticks and --build64-ticks must be positive integers, --warmup, --pmove-warmup, --codec-warmup, --interp-warmup, --build-warmup and --build64-warmup non-negative ones",
   );
   process.exit(2);
 }
@@ -96,19 +107,24 @@ console.log("");
 const interpResult = await runInterpBench(loadArena(), interpFrames, interpWarmup);
 console.log(formatInterpBench(interpResult));
 console.log("");
-const buildResult = await runSnapshotBuildBench(
-  buildSnapshotBuildWorkload(),
-  buildTicks,
-  buildWarmup,
-);
+const buildWorkload = buildSnapshotBuildWorkload();
+const buildResult = await runSnapshotBuildBench(buildWorkload, buildTicks, buildWarmup);
 console.log(formatSnapshotBuildBench(buildResult));
+console.log("");
+const build64Result = await runSnapshotBuild64Bench(
+  buildWorkload.cvarHash16,
+  build64Ticks,
+  build64Warmup,
+);
+console.log(formatSnapshotBuild64Bench(build64Result));
 if (
   values.strict &&
   (strictFailure(result) ||
     pmoveStrictFailure(pmoveResult) ||
     codecStrictFailure(codecResult) ||
     interpStrictFailure(interpResult) ||
-    buildStrictFailure(buildResult))
+    buildStrictFailure(buildResult) ||
+    build64StrictFailure(build64Result))
 ) {
   process.exitCode = 1;
 }

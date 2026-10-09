@@ -79,6 +79,12 @@ describe("WorldFrame (M3 design §2.2)", () => {
     f.setPresent(32, 9);
     f.setAbsent(31);
     expect([f.presentCount, f.pendingCount, f.present[31], f.stamp[31]]).toEqual([3, 0, 0, 0]);
+    // Present here (pending included), absent there: the scheduler's removal count.
+    const g = new WorldFrame();
+    g.setPresent(0, 1);
+    g.setPresent(31, 0);
+    g.setPresent(40, 1);
+    expect([g.presentNotIn(f), f.presentNotIn(g), f.presentNotIn(f)]).toEqual([2, 2, 0]);
     f.clear();
     expect([f.presentCount, f.pendingCount, f.present[63]]).toEqual([0, 0, 0]);
     expect(Array.from(f.masks)).toEqual([0, 0, 0, 0]);

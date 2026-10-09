@@ -24,7 +24,6 @@ import {
   encodeKick,
   encodePong,
   encodePrint,
-  encodeSnapshot,
   encodeWelcome,
   entityEventValue,
   groundTrace,
@@ -73,16 +72,10 @@ import {
   type WorldFrame,
 } from "@game/shared";
 import { runServerCommand } from "./commands";
-import {
-  ACK_AHEAD,
-  ACK_AHEAD_STRIKES,
-  acceptAck,
-  baselineTick,
-  markSent,
-  markUnsent,
-  WorldHistory,
-} from "./history";
+import { ACK_AHEAD, ACK_AHEAD_STRIKES, acceptAck, WorldHistory } from "./history";
 import type { MatchLog } from "./host";
+import { MirrorPool } from "./mirror";
+import { buildSnapshot, SnapshotScheduler } from "./scheduler";
 import {
   SESSION_ACTIVE,
   SESSION_CLOSED,
@@ -99,13 +92,14 @@ export { MATCH_MAX_CLIENTS };
 export const MATCH_DEFAULT_MAX_CLIENTS = 32;
 
 /**
- * The cap a match applies for `sv_maxClients` = `requested`: at least 1, and at most
- * SNAP_FIT_MAX_PLAYERS (37) until the D-046 byte-budget scheduler, so every snapshot fits 1100 B by
- * construction (D-034). A non-finite request (NaN would pass Math.min/max) takes the default.
+ * The cap a match applies for `sv_maxClients` = `requested`: 1 to MATCH_MAX_CLIENTS (64; D-034).
+ * Above SNAP_FIT_MAX_PLAYERS (37) a snapshot's worst case no longer fits 1100 B and the byte-budget
+ * scheduler keeps it within (D-046). A non-finite request (NaN would pass Math.min/max) takes the
+ * default.
  */
 export function effectiveMaxClients(requested: number): number {
   const n = Number.isFinite(requested) ? Math.floor(requested) : MATCH_DEFAULT_MAX_CLIENTS;
-  return Math.max(1, Math.min(SNAP_FIT_MAX_PLAYERS, MATCH_MAX_CLIENTS, n));
+  return Math.max(1, Math.min(MATCH_MAX_CLIENTS, n));
 }
 
 /** Stamina at spawn, in hundredths: staminaMax = health 100 with no vest (docs/03 §5.2, FACT). */
@@ -128,7 +122,7 @@ export interface MatchOptions {
   /**
    * `sv_maxClients`: players admitted (MATCH_DEFAULT_MAX_CLIENTS when absent), clamped by
    * `effectiveMaxClients`. Client ids are the lowest free below it; a client past it is KICKed
-   * "server full".
+   * "server full". Above 37 every session gets a mirror for the byte-budget scheduler (D-046).
    */
   readonly maxClients?: number;
   readonly log?: MatchLog;
@@ -144,6 +138,19 @@ export class MatchMetrics {
   snapshots = 0;
   /** Snapshots sent without a baseline: a session's first, any without a usable ack (D-038). */
   fullSnapshots = 0;
+  /**
+   * The byte-budget scheduler (D-046): snapshots whose worst case did not fit (the size pass ran),
+   * players left out (deferred ids, plus reused slots sent as removals) and the snapshots that
+   * left any out, and the largest staleness of a remote at send (1 without deferral, 2 at most).
+   */
+  sizePasses = 0;
+  deferredEntities = 0;
+  deferredSnapshots = 0;
+  maxStaleness = 0;
+  /** Snapshots whose encode failed, so nothing went out (impossible by the bound; logged). */
+  snapshotOverflow = 0;
+  /** Snapshots that had to leave out a player due this tick (impossible by the bound). */
+  schedOverrun = 0;
   kicks = 0;
   /** CVARS messages sent (broadcasts and resends). */
   cvarsSent = 0;
@@ -183,6 +190,8 @@ function freeClientId(sessions: readonly Session[], cap: number): number {
  *    the newest valid tick the client acked (`lastSnapshotTick` of its INPUTs), or a full one when
  *    none is usable; its own state as the local block, every other active player as an entity
  *    record, inputBufferHealth = newest cmd tick received − T (clamped to i8), flagged STARVED.
+ *    When its worst case is past 1100 B the byte-budget scheduler (D-046, `scheduler.ts`) leaves
+ *    some players out, never one two ticks in a row; the tick counts as sent only once it encoded.
  * 6. Metrics.
  *
  * After warm-up a tick allocates nothing: messages decode into and encode from preallocated
@@ -201,13 +210,22 @@ export class Match {
   readonly strictBuild: boolean;
   /** The map's `info_player_start` points, taken round-robin by every spawn (D-034). */
   readonly spawns: SpawnRotation;
-  /** Players admitted: `sv_maxClients` after `effectiveMaxClients`. */
-  readonly maxClients: number;
+  /** Admitted players, `sv_maxClients` after `effectiveMaxClients` (`setMaxClients` changes it). */
+  private cap: number;
   /**
    * The world frames of the last 64 ticks (D-038): each snapshot is encoded from the newest, as a
    * delta against the one its client acked.
    */
   readonly history = new WorldHistory();
+
+  /**
+   * Spare `ClientMirror`s (D-046), and whether sessions get one: from the moment the match admits
+   * more than 37 players, and for the rest of its life (a session that joined above 37 may still
+   * be present after the cap went down). A 32-player match never allocates one.
+   */
+  readonly mirrors = new MirrorPool();
+  private mirrorsOn = false;
+  private readonly scheduler = new SnapshotScheduler();
 
   private readonly log: MatchLog;
   private readonly sessions: Session[] = [];
@@ -265,7 +283,8 @@ export class Match {
     this.cvars = cvars;
     this.buildHash = options.buildHash;
     this.strictBuild = options.strictBuild ?? true;
-    this.maxClients = effectiveMaxClients(options.maxClients ?? MATCH_DEFAULT_MAX_CLIENTS);
+    this.cap = effectiveMaxClients(options.maxClients ?? MATCH_DEFAULT_MAX_CLIENTS);
+    this.mirrorsOn = this.cap > SNAP_FIT_MAX_PLAYERS;
     this.mapName = cmap.name;
     this.mapHashHi = Number.parseInt(cmap.contentHash.slice(0, 8), 16);
     this.mapHashLo = Number.parseInt(cmap.contentHash.slice(8, 16), 16);
@@ -307,6 +326,26 @@ export class Match {
     return this.sessions.length;
   }
 
+  /** Players admitted (`sv_maxClients` after `effectiveMaxClients`). */
+  get maxClients(): number {
+    return this.cap;
+  }
+
+  /**
+   * Changes the cap: sessions already present stay; new ones take ids below the new cap. Raising
+   * it above 37 gives every session present a mirror now (outside the tick), so the scheduler
+   * never allocates during one. Returns the effective cap. The hook for a runtime admin change:
+   * none calls it yet, since `sv_maxClients` is a SERVER cvar read once at startup (docs/06 §8).
+   */
+  setMaxClients(requested: number): number {
+    this.cap = effectiveMaxClients(requested);
+    if (this.cap > SNAP_FIT_MAX_PLAYERS && !this.mirrorsOn) {
+      this.mirrorsOn = true;
+      for (const s of this.sessions) if (s.mirror === null) s.mirror = this.mirrors.acquire();
+    }
+    return this.cap;
+  }
+
   /** The session with `clientId`, or undefined. */
   session(clientId: number): Session | undefined {
     return this.sessions.find((s) => s.clientId === clientId);
@@ -323,6 +362,7 @@ export class Match {
       return null;
     }
     const s = new Session(id, transport, admin);
+    if (this.mirrorsOn) s.mirror = this.mirrors.acquire();
     const serial = ((this.serials[id] as number) + 1) & 0xffff;
     this.serials[id] = serial;
     s.serial = serial;
@@ -609,7 +649,12 @@ export class Match {
     let n = 0;
     for (let i = 0; i < sessions.length; i++) {
       const s = sessions[i] as Session;
-      if (s.state !== SESSION_CLOSED) sessions[n++] = s;
+      if (s.state !== SESSION_CLOSED) {
+        sessions[n++] = s;
+      } else if (s.mirror !== null) {
+        this.mirrors.release(s.mirror);
+        s.mirror = null;
+      }
     }
     sessions.length = n;
     this.anyClosed = false;
@@ -662,36 +707,51 @@ export class Match {
   }
 
   /**
-   * The snapshot of `t` for `s` (M3 design §2.3, D-038): a delta against the world frame of the
-   * client's acked tick while it is usable, else a full one. The tick counts as sent (ackable, a
-   * future baseline) only once the encode succeeded.
+   * The snapshot of `t` for `s` (M3 design §2.3, D-038, D-046): a delta against the frame the
+   * client holds for its acked tick while that is usable, else a full one, with the byte-budget
+   * scheduler leaving players out when the worst case is past 1100 B (`buildSnapshot`). The tick
+   * counts as sent (ackable, a future baseline) only once the encode succeeded; a failure sends
+   * nothing and is counted as `snapshot_overflow`.
    */
   private sendSnapshot(s: Session, t: number): void {
-    const history = this.history;
-    const b = baselineTick(s, t, history);
     const h = this.snapHeader;
-    h.serverTick = t;
-    h.baseBack = b === 0 ? 0 : t - b;
     h.flags = s.snapFlags;
     h.cvarHash = this.blockHash16;
     h.inputBufferHealth = Math.max(-128, Math.min(127, s.queue.newestTick - t));
     const w = this.writer;
-    w.reset();
-    // Up to SNAP_FIT_MAX_PLAYERS every snapshot fits 1100 B (D-034), and a baseline is a frame
-    // this client was sent, so it holds the client: a failure is a bug.
-    if (!encodeSnapshot(w, h, history.frameFor(t), b === 0 ? null : history.get(b), s.clientId)) {
-      markUnsent(s, t);
+    const sched = this.scheduler;
+    const m = this.metrics;
+    const ok = buildSnapshot(sched, w, h, this.history, s, s.clientId, t, this.mirrors);
+    if (sched.sizePass) m.sizePasses++;
+    if (sched.overrun) {
+      m.schedOverrun++;
+      this.log("warn", `client ${s.clientId}: sched_overrun at tick ${t}`);
+      DEV_ASSERT(false, "sched_overrun", s.clientId);
+    }
+    if (!ok) {
+      m.snapshotOverflow++;
+      this.log("warn", `client ${s.clientId}: snapshot_overflow at tick ${t}`);
       DEV_ASSERT(false, "SNAPSHOT did not encode", s.clientId);
       return;
     }
     s.transport.sendUnreliable(w.bytes, w.byteLength);
-    markSent(s, t);
-    s.stats.snapshots++;
-    this.metrics.snapshots++;
-    if (b === 0) {
-      s.stats.fullSnapshots++;
-      this.metrics.fullSnapshots++;
+    const st = s.stats;
+    st.snapshots++;
+    m.snapshots++;
+    if (h.baseBack === 0) {
+      st.fullSnapshots++;
+      m.fullSnapshots++;
     }
+    const left = sched.deferred + sched.dropped;
+    if (left > 0) {
+      st.deferredEntities += left;
+      st.deferredSnapshots++;
+      m.deferredEntities += left;
+      m.deferredSnapshots++;
+    }
+    const stale = sched.maxStaleness;
+    if (stale > st.maxStaleness) st.maxStaleness = stale;
+    if (stale > m.maxStaleness) m.maxStaleness = stale;
   }
 
   private sendPong(s: Session): void {

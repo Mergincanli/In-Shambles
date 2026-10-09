@@ -459,7 +459,12 @@ interface MetricsJson {
     string,
     {
       starved: number;
+      snapshots: number;
       fullSnapshots: number;
+      deferredSnapshots: number;
+      deferredEntities: number;
+      maxStaleness: number;
+      snapshotOverflow: number;
       strikes: number;
       kicks: number;
       traffic: { bytesIn: number; bytesOut: number; kbInPerS: number; kbOutPerS: number };
@@ -511,6 +516,12 @@ export function serverSection(
     droppedTicks: since(p.droppedTicks, b?.process.droppedTicks),
     starved: since(match.starved, bm?.starved),
     fullSnapshots: since(match.fullSnapshots, bm?.fullSnapshots),
+    snapshots: since(match.snapshots, bm?.snapshots),
+    deferredSnapshots: since(match.deferredSnapshots, bm?.deferredSnapshots),
+    deferredEntities: since(match.deferredEntities, bm?.deferredEntities),
+    // A running maximum since the match started, not a window's.
+    maxStaleness: match.maxStaleness,
+    snapshotOverflow: since(match.snapshotOverflow, bm?.snapshotOverflow),
     strikes: since(match.strikes, bm?.strikes),
     kicks: since(match.kicks, bm?.kicks),
     kbOutPerS: kb(since(match.traffic.bytesOut, bm?.traffic.bytesOut), match.traffic.kbOutPerS),

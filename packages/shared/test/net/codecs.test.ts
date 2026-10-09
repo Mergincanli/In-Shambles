@@ -27,6 +27,7 @@ import {
   WelcomeMsg,
   writeTick,
 } from "../../src/net/messages";
+import { PLAYER_STATE_BITS } from "../../src/net/playerStateCodec";
 import {
   INPUT_MAX_CMDS,
   MAX_SNAPSHOT_BYTES,
@@ -50,11 +51,16 @@ import {
   entityRecordBits,
   LOCAL_DELTA_MAX_BITS,
   localBlockBits,
+  SNAP_DEFERRED_COUNT_BITS,
+  SNAP_DEFERRED_ID_BITS,
   SNAP_DELTA_FIXED_BITS,
   SNAP_ENTITY_COUNT_BITS,
   SNAP_FIT_MAX_PLAYERS,
   SNAP_FULL_FIXED_BITS,
   SNAP_HEADER_BITS,
+  SNAP_MAX_STALENESS,
+  SNAP_MIN_CAPACITY,
+  SNAP_MIN_CAPACITY_FULL,
   SNAP_SPECTATOR_HEADER_BITS,
   SnapshotHeader,
 } from "../../src/net/snapshot";
@@ -147,6 +153,7 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
       const m = new SnapshotParts();
       const out = new SnapshotParts(m.base);
       let deltas = 0;
+      let deferredSnapshots = 0;
       const sent = new PlayerState();
       const got = new PlayerState();
       for (let i = 0; i < 1500; i++) {
@@ -164,27 +171,34 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
         ]);
         const self = m.selfId;
         if (h.baseBack > 0) deltas++;
-        // The exact size functions add up to what the encoder wrote (M3 design §2.3).
+        // The exact size functions add up to what the encoder wrote (M3 design §2.3), a left-out
+        // slot (D-046) costing its id in the deferred list instead of a record.
         let bits = spectator
           ? SNAP_SPECTATOR_HEADER_BITS
           : SNAP_HEADER_BITS + localBlockBits(m.frame, m.baseline, self);
         bits += SNAP_ENTITY_COUNT_BITS;
+        let left = 0;
         for (let s = 0; s < FRAME_SLOTS; s++) {
-          if (s !== self) bits += entityRecordBits(m.frame, m.baseline, s);
+          if (s === self) continue;
+          if (m.frame.present[s] === 1 && m.frame.stamp[s] !== h.serverTick) left++;
+          else bits += entityRecordBits(m.frame, m.baseline, s);
         }
+        if (left > 0) bits += SNAP_DEFERRED_COUNT_BITS + left * SNAP_DEFERRED_ID_BITS;
+        if (left > 0) deferredSnapshots++;
         expect(bits).toBe(w.bitLength);
+        expect(out.hdr.deferred).toBe(left);
         expect(out.hdr.inputBufferHealth).toBe(spectator ? 0 : h.inputBufferHealth);
         expect(out.hdr.teleportSeq).toBe(spectator ? 0 : m.frame.teleportSeq[self]);
         // What the receiver holds equals the frame it was encoded from, as it sees it.
         expect(frameDigest(out.frame, self)).toBe(frameDigest(m.frame, self));
         expect(out.frame.presentCount).toBe(m.frame.presentCount);
-        expect(out.frame.pendingCount).toBe(0);
+        expect(out.frame.pendingCount).toBe(m.frame.pendingCount);
         // Per-slot checks count mismatches in plain loops (an expect per slot made this test the
         // slowest of the file), then assert the count once.
         let bad = 0;
         for (let s = 0; s < FRAME_SLOTS; s++) {
           if (out.frame.present[s] !== m.frame.present[s]) bad++;
-          else if (m.frame.present[s] === 1 && out.frame.stamp[s] !== h.serverTick) bad++;
+          else if (m.frame.present[s] === 1 && out.frame.stamp[s] !== m.frame.stamp[s]) bad++;
         }
         if (!spectator) {
           slotToPlayerState(m.frame, self, sent);
@@ -195,9 +209,9 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
             expect(Object.is(got.velocity[a], sent.velocity[a])).toBe(true);
           }
         }
-        // A record's flags arrive masked, the rest as sent.
+        // A record's flags arrive masked, the rest as sent (a pending slot has none yet).
         for (let s = 0; s < FRAME_SLOTS; s++) {
-          if (m.frame.present[s] !== 1 || s === self) continue;
+          if (m.frame.present[s] !== 1 || m.frame.stamp[s] === 0 || s === self) continue;
           if (out.frame.flags[s] !== ((m.frame.flags[s] as number) & ENTITY_FLAG_MASK)) bad++;
           if (out.frame.originX[s] !== m.frame.originX[s]) bad++;
           if (out.frame.entVelZ[s] !== m.frame.entVelZ[s]) bad++;
@@ -206,6 +220,7 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
         expect(bad).toBe(0);
       }
       expect(deltas).toBeGreaterThan(500);
+      expect(deferredSnapshots).toBeGreaterThan(200);
     });
 
     it("SNAPSHOT: any quantized state with a sanitized pitch encodes, and decodes to itself", () => {
@@ -376,13 +391,21 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
         ["tick past TICK_MAX", (m) => (m.hdr.serverTick = TICK_MAX + 1)],
         ["health 128", (m) => (m.hdr.inputBufferHealth = 128)],
         ["v1's teleport bit", (m) => (m.hdr.flags = 1 << 1)],
-        ["DEFERRED (until D-046)", (m) => (m.hdr.flags = SNAP_FLAG_DEFERRED)],
         ["flag bit 7", (m) => (m.hdr.flags = 1 << 7)],
         ["spectator + starved", (m) => (m.hdr.flags = SNAP_FLAG_SPECTATOR | SNAP_FLAG_STARVED)],
         ["receiver absent", (m) => m.frame.setAbsent(SNAP_SELF)],
         ["receiver's stamp not the tick", (m) => m.frame.setPresent(SNAP_SELF, 999)],
-        ["a pending record (D-046)", (m) => m.frame.setPresent(other(m), 0)],
-        ["a record of another tick", (m) => m.frame.setPresent(other(m), 999)],
+        [
+          "a left-out slot with state in a full snapshot (D-046)",
+          (m) => m.frame.setPresent(other(m), 999),
+        ],
+        [
+          "a left-out slot in a spectator snapshot (D-046)",
+          (m) => {
+            m.hdr.flags = SNAP_FLAG_SPECTATOR;
+            m.frame.setPresent(other(m), 0);
+          },
+        ],
         ["origin past +16384 u", (m) => (m.frame.originY[other(m)] = 524289)],
         ["origin past −16384 u", (m) => (m.frame.originZ[other(m)] = -524289)],
         ["velocity −32768", (m) => (m.frame.entVelX[other(m)] = -32768)],
@@ -429,6 +452,10 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
         ],
       ];
       for (const [label, edit] of refused) expect(snapshotWith(edit), label).toBe(false);
+      // The encoder sets DEFERRED itself: a caller's bit without a left-out slot is dropped, and
+      // a pending slot in a full snapshot is left out (D-046).
+      expect(snapshotWith((m) => (m.hdr.flags = SNAP_FLAG_DEFERRED))).toBe(true);
+      expect(snapshotWith((m) => m.frame.setPresent(other(m), 0))).toBe(true);
       // A base frame needs baseBack > 0 and is never the frame itself; with one, the same frame
       // is a delta of nothing but its mask. The encoder masks the flags a record does not carry.
       const m = new SnapshotParts();
@@ -534,7 +561,8 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
         ["baseBack 63", [40, 6, 63]],
         ["a baseline before tick 1", [8, 32, 10], [40, 6, 10]],
         ["flag bit 1 (v1's teleport)", [46, 8, 2]],
-        ["DEFERRED (until D-046)", [46, 8, SNAP_FLAG_DEFERRED]],
+        ["DEFERRED with no deferred list", [46, 8, SNAP_FLAG_DEFERRED]],
+        ["spectator + deferred", [46, 8, SNAP_FLAG_SPECTATOR | SNAP_FLAG_DEFERRED]],
         ["flag bits 4–7", [46, 8, 0xf0]],
         ["spectator + starved", [46, 8, SNAP_FLAG_SPECTATOR | SNAP_FLAG_STARVED]],
         ["local origin x past +16384", [86, 21, 524289]],
@@ -823,13 +851,22 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
       return f;
     }
 
-    /** A delta of tick `tick`, `baseBack` back: the header (all 0), then what `body` writes. */
-    function handDelta(body: (w: BitWriter) => void, tick = 1000, baseBack = 10): Uint8Array {
+    /**
+     * A delta of tick `tick`, `baseBack` back (0: a full snapshot): the header (all 0 but `flags`),
+     * then what `body` writes.
+     */
+    function handDelta(
+      body: (w: BitWriter) => void,
+      tick = 1000,
+      baseBack = 10,
+      flags = 0,
+    ): Uint8Array {
       const w = newWriter();
       w.writeBits(MSG_SNAPSHOT, 8);
       writeTick(w, tick);
       w.writeBits(baseBack, 6);
-      zeros(w, 8 + 16 + 8 + 8);
+      w.writeBits(flags, 8);
+      zeros(w, 16 + 8 + 8);
       body(w);
       expect(w.error).toBe(false);
       return w.bytes.slice(0, w.byteLength);
@@ -859,8 +896,8 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
 
     const decoded = new WorldFrame();
     const hdr = new SnapshotHeader();
-    /** Decodes against `base`; an accepted packet must re-encode to the same bytes. */
-    function decodesAgainst(bytes: Uint8Array, base: WorldFrame): boolean {
+    /** Decodes against `base` (null: full); an accepted packet must re-encode to the same bytes. */
+    function decodesAgainst(bytes: Uint8Array, base: WorldFrame | null): boolean {
       const r = readerOver(bytes);
       if (!decodeSnapshotHeader(r, hdr) || !decodeSnapshotBody(r, hdr, base, SNAP_SELF, decoded)) {
         return false;
@@ -934,6 +971,153 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
       const bytes = w.bytes.slice(0, w.byteLength);
       expect(decodesAgainst(bytes, base)).toBe(true);
       expect([decoded.yaw[40], decoded.stamp[40]]).toEqual([5, 1000]);
+    });
+
+    /** A deferred list of `ids` (count 6, ids u16), as written after the records. */
+    function deferredList(ids: readonly number[], count = ids.length): (w: BitWriter) => void {
+      return (w) => {
+        w.writeBits(count, SNAP_DEFERRED_COUNT_BITS);
+        for (const id of ids) w.writeBits(id, SNAP_DEFERRED_ID_BITS);
+      };
+    }
+
+    it("keeps a deferred player's baseline state and stamp, or marks it pending (D-046)", () => {
+      // Baseline 990: 3 and 20 hold state (3 as of tick 985, a deferred copy itself), 40 pending.
+      const base = handBase(true);
+      base.setPresent(3, 985);
+      base.yaw[3] = 9;
+      // 3 and 40 left out, 50 left out (absent in the baseline), 20 unchanged.
+      const left = deferredList([3, 40, 50]);
+      const body = records(0, left);
+      expect(decodesAgainst(handDelta(body, 1000, 10, SNAP_FLAG_DEFERRED), base)).toBe(true);
+      expect(hdr.deferred).toBe(3);
+      expect([3, 20, 40, 50].map((s) => [decoded.present[s], decoded.stamp[s]])).toEqual([
+        [1, 985],
+        [1, 1000],
+        [1, 0],
+        [1, 0],
+      ]);
+      expect([decoded.yaw[3], decoded.serial[3], decoded.pendingCount]).toEqual([9, 7, 2]);
+      // A frame that holds 3's copy is a baseline like any other: 3 unlisted is unchanged and
+      // fresh, 40 still pending must be listed again (or sent new, or removed).
+      const next = new WorldFrame();
+      for (let s = 0; s < FRAME_SLOTS; s++) copySlot(next, s, decoded, s);
+      expect(decodesAgainst(handDelta(records(0, deferredList([40, 50])), 1001, 1, 8), next)).toBe(
+        true,
+      );
+      expect([decoded.stamp[3], decoded.stamp[40], decoded.stamp[50]]).toEqual([1001, 0, 0]);
+      expect(decodesAgainst(handDelta(records(0, deferredList([40])), 1001, 1, 8), next)).toBe(
+        false,
+      );
+      // In a full snapshot every left-out player is pending.
+      const full = (w: BitWriter) => {
+        zeros(w, PLAYER_STATE_BITS);
+        w.writeBits(1, 7);
+        rec(w, 3, 0, 1);
+        zeros(w, ENTITY_NEW_BITS - 18);
+        deferredList([20, 40])(w);
+      };
+      expect(decodesAgainst(handDelta(full, 1000, 0, SNAP_FLAG_DEFERRED), null)).toBe(true);
+      expect([decoded.stamp[3], decoded.stamp[20], decoded.stamp[40]]).toEqual([1000, 0, 0]);
+      expect(decoded.pendingCount).toBe(2);
+    });
+
+    it("refuses a deferred list the encoder never writes (the NET-01 patched-field table, D-046)", () => {
+      const base = handBase();
+      const D = SNAP_FLAG_DEFERRED;
+      const removal3 = (w: BitWriter) => rec(w, 3, 1);
+      const refused: [string, Uint8Array][] = [
+        ["the flag with count 0", handDelta(records(0, deferredList([], 0)), 1000, 10, D)],
+        [
+          "the flag with no list",
+          handDelta(
+            records(0, () => {}),
+            1000,
+            10,
+            D,
+          ),
+        ],
+        ["a list without the flag", handDelta(records(0, deferredList([3])))],
+        ["ids unsorted", handDelta(records(0, deferredList([20, 3])), 1000, 10, D)],
+        ["a duplicate id", handDelta(records(0, deferredList([3, 3])), 1000, 10, D)],
+        ["the receiver's own id", handDelta(records(0, deferredList([SNAP_SELF])), 1000, 10, D)],
+        ["an id ≥ 64", handDelta(records(0, deferredList([64])), 1000, 10, D)],
+        ["id 0xffff", handDelta(records(0, deferredList([0xffff])), 1000, 10, D)],
+        [
+          "an id also in the records",
+          handDelta(
+            records(1, (w) => {
+              removal3(w);
+              deferredList([3])(w);
+            }),
+            1000,
+            10,
+            D,
+          ),
+        ],
+        ["a count past the ids", handDelta(records(0, deferredList([3, 20], 3)), 1000, 10, D)],
+      ];
+      for (const [label, bytes] of refused) expect(decodesAgainst(bytes, base), label).toBe(false);
+      expect(decodesAgainst(handDelta(records(0, deferredList([3, 20])), 1000, 10, D), base)).toBe(
+        true,
+      );
+    });
+
+    it("encodes a left-out player only as the receiver would rebuild it (D-046)", () => {
+      const base = handBase(true);
+      base.setPresent(3, 985);
+      const cur = new WorldFrame();
+      const h = new SnapshotHeader();
+      h.serverTick = 1000;
+      h.baseBack = 10;
+      const reset = () => {
+        cur.clear();
+        for (const s of [SNAP_SELF, 3, 20, 40]) {
+          copySlot(cur, s, base, s);
+          cur.setPresent(s, 1000);
+        }
+      };
+      const encodes = (): boolean => encodeSnapshot(newWriter(), h, cur, base, SNAP_SELF);
+      const cases: [string, () => void, boolean][] = [
+        ["a copy of the baseline's state and stamp", () => cur.setPresent(3, 985), true],
+        ["pending where the baseline is pending", () => cur.setPresent(40, 0), true],
+        ["pending where the baseline lacks the slot", () => cur.setPresent(50, 0), true],
+        ["pending where the baseline holds state", () => cur.setPresent(20, 0), false],
+        ["a copy with another stamp", () => cur.setPresent(3, 986), false],
+        [
+          "a copy whose fields differ",
+          () => {
+            cur.setPresent(3, 985);
+            cur.yaw[3] = 1;
+          },
+          false,
+        ],
+        [
+          "a copy of another incarnation",
+          () => {
+            cur.setPresent(3, 985);
+            cur.serial[3] = 8;
+          },
+          false,
+        ],
+        ["a copy where the baseline is pending", () => cur.setPresent(40, 985), false],
+        ["the receiver left out", () => cur.setPresent(SNAP_SELF, 990), false],
+      ];
+      for (const [label, edit, ok] of cases) {
+        reset();
+        edit();
+        expect(encodes(), label).toBe(ok);
+      }
+      // Two left out: the flag, a 6-bit count and two u16 ids after the records (40 still needs
+      // its full body otherwise).
+      reset();
+      cur.setPresent(3, 985);
+      cur.setPresent(40, 0);
+      const w = newWriter();
+      expect(encodeSnapshot(w, h, cur, base, SNAP_SELF)).toBe(true);
+      expect(w.bitLength).toBe(SNAP_HEADER_BITS + 8 + SNAP_ENTITY_COUNT_BITS + 6 + 2 * 16);
+      expect(decodesAgainst(w.bytes.slice(0, w.byteLength), base)).toBe(true);
+      expect(frameDigest(decoded, SNAP_SELF)).toBe(frameDigest(cur, SNAP_SELF));
     });
 
     it("refuses what the delta encoder never writes (the NET-01 patched-field table)", () => {
@@ -1227,6 +1411,8 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
     expect(size(31)).toEqual([6895, 862]);
     expect(size(36)).toEqual([7960, 995]);
     expect(size(LIVE_FULL_MAX_OTHERS)).toEqual([8599, 1075]);
+    // 64 players unscheduled: 13711 bits, past the budget (the D-046 scheduler defers).
+    expect(SNAP_FULL_FIXED_BITS + 63 * ENTITY_NEW_BITS).toBe(13711);
     // Spectator (demo files only): 70 + 7 + 213 per player, up to all 64, within 2048 B.
     expect(size(0, true)).toEqual([77, 10]);
     const allSpectated = size(64, true);
@@ -1240,14 +1426,20 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
     expect([w.bitLength, w.byteLength]).toEqual([435, 55]);
   });
 
-  it("fits the worst deltas (M3 design §2.1 goldens): 942 B at 32 players, 1088 B at 37", () => {
+  it("fits the worst deltas (M3 design §2.1 goldens): 942 B at 32 players, 1088 B at 37 and scheduled at 64", () => {
     const w = newWriter();
     const m = new SnapshotParts();
     /**
      * The worst delta with `others` remotes and `removals` players gone since the baseline: every
-     * local and entity field changed, origins and velocities absolute (D-034's bound).
+     * local and entity field changed, origins and velocities absolute (D-034's bound); the last
+     * `deferred` of the remotes left out (D-046), keeping the baseline's state.
      */
-    const worst = (others: number, spectator = false, removals = 0): [number, number] => {
+    const worst = (
+      others: number,
+      spectator = false,
+      removals = 0,
+      deferred = 0,
+    ): [number, number] => {
       const h = m.hdr;
       h.serverTick = 600;
       h.baseBack = 10;
@@ -1278,6 +1470,10 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
         if (s === self) s++;
         base.setPresent(s, 590);
         if (n >= others) continue;
+        if (n >= others - deferred) {
+          copySlot(cur, s, base, s);
+          continue;
+        }
         cur.setPresent(s, 600);
         cur.originX[s] = 524288;
         cur.originY[s] = -524288;
@@ -1320,6 +1516,11 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
     // 36 remotes and 6 removals (43 → 37 players inside the ack window) are 8802 bits: past the
     // budget, so the encoder refuses (the D-046 scheduler's case).
     expect(worst(36, false, 6)).toEqual([8802, -1]);
+    // 63 remotes (64 players): 14991 bits unscheduled. The scheduler's worst: 34 records fit
+    // (SNAP_MIN_CAPACITY), 29 deferred ids: 86 + 219 + 7 + 6 + 34 × 233 + 29 × 16.
+    expect(worst(63)).toEqual([14991, -1]);
+    expect(worst(63, false, 0, 29)).toEqual([8704, 1088]);
+    expect([SNAP_MIN_CAPACITY, SNAP_MIN_CAPACITY_FULL, SNAP_MAX_STALENESS]).toEqual([34, 37, 2]);
     // Spectator (demo files only): 70 + 7 + 233 per player.
     expect(worst(32, true)).toEqual([7533, 942]);
     const all = worst(64, true);

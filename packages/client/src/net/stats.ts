@@ -52,7 +52,13 @@ export const STAT_REMOTE_EVENTS_LOST = 20;
 export const STAT_FULL_SNAPSHOTS = 21;
 /** Delta snapshots dropped because their baseline frame was not held (D-038; not struck). */
 export const STAT_BASELINE_DROPS = 22;
-export const STAT_COUNT = 23;
+/**
+ * Players the server's byte-budget scheduler left out of the snapshots stored (deferred ids,
+ * D-046), and the snapshots that left any out: 0 at 37 players or fewer.
+ */
+export const STAT_DEFERRED = 23;
+export const STAT_DEFERRED_SNAPSHOTS = 24;
+export const STAT_COUNT = 25;
 
 const BUCKETS = 10;
 const BUCKET_MS = 100;

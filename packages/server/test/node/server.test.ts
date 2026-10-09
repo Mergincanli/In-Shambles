@@ -111,32 +111,23 @@ describe("Node server (in process, real WebSocket)", () => {
     expect(metrics.matches.main.snapshots).toBeGreaterThan(0);
   });
 
-  it("reports the effective sv_maxClients in /status, clamped to 37 with a warning (D-034)", async () => {
+  it("reports the effective sv_maxClients in /status, up to 64 (D-034, D-046)", async () => {
     const statusOf = async (port: number) =>
       ((await httpJson(port, "/status")).body as { matches: { maxClients: number }[] }).matches[0]
         ?.maxClients;
     {
-      const { server, lines, port } = await start(["--set", "sv_maxClients=4"]);
+      const { server, port } = await start(["--set", "sv_maxClients=4"]);
       expect(server.matches.main?.match.maxClients).toBe(4);
       expect(await statusOf(port)).toBe(4);
-      expect(lines.some((l) => l.ev === "max_clients_clamped")).toBe(false);
+      expect(server.matches.main?.match.mirrors.allocated).toBe(0);
       await server.stop();
     }
     const { server, lines, port } = await start(["--set", "sv_maxClients=64"]);
     expect(server.cvars.get("sv_maxClients")).toBe(64);
-    expect(server.matches.main?.match.maxClients).toBe(37);
-    expect(await statusOf(port)).toBe(37);
-    expect(lines.slice(0, 3).map((l) => l.ev)).toEqual([
-      "server_ok",
-      "listening",
-      "max_clients_clamped",
-    ]);
-    expect(lines.find((l) => l.ev === "max_clients_clamped")).toMatchObject({
-      lvl: "warn",
-      match: "main",
-      requested: 64,
-      maxClients: 37,
-    });
+    expect(server.matches.main?.match.maxClients).toBe(64);
+    expect(await statusOf(port)).toBe(64);
+    expect(lines.slice(0, 2).map((l) => l.ev)).toEqual(["server_ok", "listening"]);
+    await server.stop();
     await expect(start(["--set", "sv_maxClients=65"])).rejects.toThrow(/sv_maxClients/);
   });
 

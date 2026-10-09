@@ -23,6 +23,7 @@ import {
   InputMsg,
   KickMsg,
   LOCAL_DELTA_MAX_BITS,
+  MATCH_MAX_CLIENTS,
   MAX_CLIENT_MESSAGE_BYTES,
   MAX_RELIABLE_BYTES,
   MAX_SNAPSHOT_BYTES,
@@ -34,14 +35,18 @@ import {
   PROTOCOL_VERSION,
   PrintMsg,
   SHORT_TEXT_MAX,
+  SNAP_DEFERRED_COUNT_BITS,
+  SNAP_DEFERRED_ID_BITS,
   SNAP_DELTA_FIXED_BITS,
   SNAP_ENTITY_VELOCITY_D1,
   SNAP_ENTITY_VELOCITY_D2,
   SNAP_FIT_MAX_PLAYERS,
+  SNAP_FLAG_DEFERRED,
   SNAP_FULL_FIXED_BITS,
   SNAP_HEADER_BITS,
   SNAP_LOCAL_VELOCITY_D1,
   SNAP_LOCAL_VELOCITY_D2,
+  SNAP_MIN_CAPACITY,
   SNAP_ORIGIN_D1,
   SNAP_ORIGIN_D2,
   SnapshotHeader,
@@ -120,20 +125,22 @@ describe("docs/05 §3.6 protocol layout", () => {
     expect(layout).toContain(`the full ("new") form, ${ENTITY_NEW_BITS} bits:`);
   });
 
-  // Inc. 4 landed the full forms (D-033), inc. 8 the deltas and removals (D-038); the decoder
-  // refuses the deferred list, and the doc must say so until D-046 (inc. 10) flips it.
-  it("gives the delta forms (D-038) and marks the deferred list refused until D-046", () => {
+  // Inc. 4 landed the full forms (D-033), inc. 8 the deltas and removals (D-038), inc. 10 the
+  // deferred list and pending slots (D-046): nothing is refused "until" a later decision any more.
+  it("gives the delta forms (D-038) and the deferred list (D-046)", () => {
     expect(layout).not.toContain("until D-038");
+    expect(layout).not.toContain("until D-046");
     expect(tableRow("**Snapshot header**", "baseBack")).toContain("1–63 = a delta");
     expect(tableRow("**Entity record**", "removed")).toContain("1: the player left");
     expect(tableRow("**Entity record**", "new")).toContain("0: a delta body follows");
     expect(tableRow("**Snapshot header**", "flags")).toContain(
-      "deferred list, refused until D-046",
+      "bit 3 deferred: the deferred list follows the records (D-046)",
     );
-    expect(layout).toContain(
-      "the deferred-id list (`flags` bit 3) and pending slots join with D-046. Until then the " +
-        "decoder refuses them.",
+    expect(tableRow("**Deferred list**", "count")).toBe(
+      `count | ${SNAP_DEFERRED_COUNT_BITS} | 1–63; 0 is refused`,
     );
+    expect(tableRow("**Deferred list**", "ids")).toContain(`count × ${SNAP_DEFERRED_ID_BITS}`);
+    expect(SNAP_FLAG_DEFERRED).toBe(1 << 3);
   });
 
   it("gives the delta local block and delta record widths at their largest (D-038)", () => {
@@ -185,12 +192,27 @@ describe("docs/05 §3.6 protocol layout", () => {
     };
     const worstDelta = (others: number) =>
       (SNAP_DELTA_FIXED_BITS + others * ENTITY_DELTA_MAX_BITS + 7) >> 3;
+    // The scheduler's worst at 64 players (D-046): SNAP_MIN_CAPACITY records, the rest deferred.
+    const left = MATCH_MAX_CLIENTS - 1 - SNAP_MIN_CAPACITY;
+    const scheduledBits =
+      SNAP_DELTA_FIXED_BITS +
+      SNAP_DEFERRED_COUNT_BITS +
+      SNAP_MIN_CAPACITY * ENTITY_DELTA_MAX_BITS +
+      left * SNAP_DEFERRED_ID_BITS;
+    const scheduled = (scheduledBits + 7) >> 3;
     expect(size("SNAPSHOT")).toBe(
       `full: ${SNAP_FULL_FIXED_BITS} bits + ${ENTITY_NEW_BITS} per other player, ` +
         `${bytesWith(0)} B alone, ${bytesWith(31)} B at 32 players; worst delta: ` +
         `${SNAP_DELTA_FIXED_BITS} bits + ${ENTITY_DELTA_MAX_BITS} per other player, ` +
         `${worstDelta(31)} B at 32, ${worstDelta(SNAP_FIT_MAX_PLAYERS - 1)} B at ` +
-        `${SNAP_FIT_MAX_PLAYERS}; ≤ ${MAX_SNAPSHOT_BYTES} B`,
+        `${SNAP_FIT_MAX_PLAYERS}; worst scheduled at ${MATCH_MAX_CLIENTS}: ${scheduled} B ` +
+        `(D-046); ≤ ${MAX_SNAPSHOT_BYTES} B`,
+    );
+    expect(layout).toContain(
+      `its worst, ${SNAP_MIN_CAPACITY} records and ${left} deferred ids at ${MATCH_MAX_CLIENTS} ` +
+        `players, is ${SNAP_DELTA_FIXED_BITS} + ${SNAP_DEFERRED_COUNT_BITS} + ` +
+        `${SNAP_MIN_CAPACITY} × ${ENTITY_DELTA_MAX_BITS} + ${left} × ${SNAP_DEFERRED_ID_BITS} = ` +
+        `${scheduledBits} bits, ${scheduled} B.`,
     );
     const input = new InputMsg();
     input.count = 4;

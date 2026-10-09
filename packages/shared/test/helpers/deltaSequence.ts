@@ -142,7 +142,7 @@ export class World {
 }
 
 /** A packet in flight. */
-interface Flight {
+export interface Flight {
   at: number;
   bytes: Uint8Array;
   tick: number;
@@ -151,7 +151,7 @@ interface Flight {
 }
 
 /** A one-way link: loss, duplication and a jittered delay in ticks (so it reorders). */
-class Link {
+export class Link {
   private readonly flights: Flight[] = [];
   loss = 0.05;
   duplicate = 0.02;

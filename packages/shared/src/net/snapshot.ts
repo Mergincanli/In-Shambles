@@ -1,6 +1,6 @@
 import { PITCH_LIMIT_U16 } from "../math/angles";
 import { ORIGIN_LIMIT, ORIGIN_SCALE, toSigned16 } from "../math/quant";
-import { ENTITY_FLAG_MASK, ENTITY_WORLD, TEAM_2 } from "../sim/entity";
+import { ENTITY_FLAG_MASK, ENTITY_WORLD, MATCH_MAX_CLIENTS, TEAM_2 } from "../sim/entity";
 import { PMEV_JUMP, PMEV_LAND, PMEV_NONE } from "../sim/events";
 import { PlayerState } from "../sim/playerState";
 import type { BitReader, BitWriter } from "./bitstream";
@@ -12,6 +12,7 @@ import {
   SNAP_BUDGET_BITS,
   SNAP_ENTITY_VELOCITY_D1,
   SNAP_ENTITY_VELOCITY_D2,
+  SNAP_FLAG_DEFERRED,
   SNAP_FLAG_MASK,
   SNAP_FLAG_SPECTATOR,
   SNAP_FLAG_STARVED,
@@ -38,21 +39,25 @@ import {
  * block and a "new" record per present player. A delta (`baseBack` 1–63) is coded against the
  * frame of tick serverTick − baseBack, which the receiver holds: a delta local block, and a record
  * only for a player that left (removed), appeared or came back as a new incarnation (new), or
- * changed (a delta body); a present player with no record is unchanged since the baseline. The
- * server encodes from its world frames; the client decodes into a `WorldFrame` of its store.
+ * changed (a delta body); a present player with no record is unchanged since the baseline. Above
+ * 37 players the byte-budget scheduler (D-046) may leave players out: their ids follow the records
+ * (the deferred list), and the receiver keeps what its baseline holds of them (state and stamp) or,
+ * when it holds no state, marks them pending. The server encodes from its world frames (or a
+ * client's mirror of what it was sent); the client decodes into a `WorldFrame` of its store.
  *
  * | Field | Bits |
  * |---|---|
  * | type | 8 (5) |
  * | serverTick | 32 (1…TICK_MAX) |
  * | baseBack | 6 (0 = full; 1–63 and at most serverTick − 1 = a delta) |
- * | flags | 8 (SNAP_FLAG_*; bit 1 and bits 3–7 refused, SPECTATOR with STARVED refused) |
+ * | flags | 8 (SNAP_FLAG_*; bit 1 and bits 4–7 refused, SPECTATOR with STARVED or DEFERRED refused) |
  * | cvarHash | 16 |
  * | inputBufferHealth | 8 (i8; not when spectator) |
  * | teleportSeq | 8 (not when spectator; D-035) |
  * | local block | the full PlayerState, 199; or a delta, 8–219 (not when spectator) |
  * | entityCount | 7 (0…63; 0…64 when spectator) |
  * | entity records | 213 new, 17 removed, 28–233 a delta body |
+ * | deferred list | only with DEFERRED: count 6 (1…63), then ids u16 strictly ascending |
  *
  * A full ("new") entity record: id 16 (< 64; the receiver's own refused unless spectator), removed
  * 1 (0), new 1 (1), origin 3 × i21 (1/32 u, ±16384 u), velocity 3 × i16 (1 u/s, ±32767), yaw 16,
@@ -70,12 +75,17 @@ import {
  * encoder writes it when the baseline has no state for the slot, or holds another incarnation (a
  * different server `serial`), never by size, so the encoding stays canonical.
  *
+ * A deferred id is never the receiver's own, never also a record, and never a slot that needs a
+ * removal (removals are never deferred). In a delta, one whose baseline slot has state keeps that
+ * state and its stamp (an older tick than the snapshot's); one whose baseline slot is pending or
+ * absent, and every deferred id of a full snapshot, becomes pending (present, stamp 0).
+ *
  * Canonical: a packet the decoder accepts re-encodes to the same bytes against the same baseline
  * (NET-01): the smallest class always, no set field or group equal to the baseline, a record only
- * when one is needed. Decoding yields the frame it was encoded from, as the receiver holds it
- * (frameDigest). A live snapshot is at most MAX_SNAPSHOT_BYTES (the encoder refuses more, so the
- * decoder does too); a spectator one (demo files only) at most MAX_SPECTATOR_SNAPSHOT_BYTES.
- * Neither side allocates, refusals included.
+ * when one is needed, the DEFERRED flag exactly when an id is deferred. Decoding yields the frame
+ * it was encoded from, as the receiver holds it (frameDigest). A live snapshot is at most
+ * MAX_SNAPSHOT_BYTES (the encoder refuses more, so the decoder does too); a spectator one (demo
+ * files only) at most MAX_SPECTATOR_SNAPSHOT_BYTES. Neither side allocates, refusals included.
  */
 
 /** Header bits with the type byte (M3 design §2.1): 86, or 70 without health and teleportSeq. */
@@ -95,6 +105,14 @@ export const SNAP_FULL_FIXED_BITS = SNAP_HEADER_BITS + PLAYER_STATE_BITS + SNAP_
 /** The largest delta live snapshot with no record: header, the largest local block, count (312). */
 export const SNAP_DELTA_FIXED_BITS =
   SNAP_HEADER_BITS + LOCAL_DELTA_MAX_BITS + SNAP_ENTITY_COUNT_BITS;
+/** The deferred list's count (1…63) and each deferred id (u16, `docs/05` §4.2) (D-046). */
+export const SNAP_DEFERRED_COUNT_BITS = 6;
+export const SNAP_DEFERRED_ID_BITS = 16;
+/**
+ * What leaving out a reused slot costs (a new player in a slot whose baseline still holds the one
+ * who left): it is sent as a removal, so the departed player disappears on time (D-046).
+ */
+export const SNAP_REUSED_OUT_BITS = ENTITY_REMOVED_BITS;
 
 /**
  * The most players whose every snapshot fits SNAP_BUDGET_BITS without a scheduler (D-034): the
@@ -113,6 +131,48 @@ if (
   throw new Error("snapshot layout: SNAP_FIT_MAX_PLAYERS is not the most whose worst case fits");
 }
 
+/**
+ * The fewest records the byte-budget scheduler fits in any delta snapshot, whatever else it holds
+ * (M3 design §2.3, D-046; derived, 34): every other slot costs at most 17 bits when it is left out
+ * (a removal, a reused slot sent as removed, a deferred id), and a record at most 216 more, after
+ * the fixed bits and the deferred count. With 63 other players and none of them free, ⌊(8800 −
+ * 318 − 63 × 17) / (233 − 17)⌋ = 34.
+ */
+export const SNAP_MIN_CAPACITY = Math.floor(
+  (SNAP_BUDGET_BITS -
+    SNAP_DELTA_FIXED_BITS -
+    SNAP_DEFERRED_COUNT_BITS -
+    (MATCH_MAX_CLIENTS - 1) * ENTITY_REMOVED_BITS) /
+    (ENTITY_DELTA_MAX_BITS - ENTITY_REMOVED_BITS),
+);
+/** The same for a full snapshot, every record a new body (37). */
+export const SNAP_MIN_CAPACITY_FULL = Math.floor(
+  (SNAP_BUDGET_BITS -
+    SNAP_FULL_FIXED_BITS -
+    SNAP_DEFERRED_COUNT_BITS -
+    (MATCH_MAX_CLIENTS - 1) * ENTITY_REMOVED_BITS) /
+    (ENTITY_NEW_BITS - ENTITY_REMOVED_BITS),
+);
+/**
+ * The most ticks a remote's freshest state in a client's sent stream may lag the snapshot
+ * (D-046): the scheduler includes every player left out last tick first, and since at least
+ * SNAP_MIN_CAPACITY records fit, at most 63 − 34 = 29 are ever left out, which always fit the next
+ * snapshot. So nobody is left out two ticks in a row.
+ */
+export const SNAP_MAX_STALENESS = 2;
+
+// The bound holds only while two snapshots carry every other player: a cap or layout change that
+// breaks it fails here, at load.
+if (
+  SNAP_DEFERRED_ID_BITS > ENTITY_REMOVED_BITS ||
+  SNAP_REUSED_OUT_BITS > ENTITY_REMOVED_BITS ||
+  2 * SNAP_MIN_CAPACITY < MATCH_MAX_CLIENTS - 1 ||
+  2 * SNAP_MIN_CAPACITY_FULL < MATCH_MAX_CLIENTS - 1 ||
+  (1 << SNAP_DEFERRED_COUNT_BITS) - 1 < MATCH_MAX_CLIENTS - 1
+) {
+  throw new Error("snapshot layout: the byte-budget scheduler's staleness bound does not hold");
+}
+
 /** The fields before the local block, and `teleportSeq` (decode only: the own slot's, D-035). */
 export class SnapshotHeader {
   serverTick = 0;
@@ -129,6 +189,8 @@ export class SnapshotHeader {
    * sets this and the own slot's to what it read.
    */
   teleportSeq = 0;
+  /** Decode only: the ids the body's deferred list held (D-046; the encoder derives its own). */
+  deferred = 0;
 }
 
 const ORIGIN_BITS = 21;
@@ -170,6 +232,8 @@ const REC_NONE = 0;
 const REC_REMOVED = 1;
 const REC_NEW = 2;
 const REC_DELTA = 3;
+/** Left out by the scheduler (D-046): listed by id after the records. */
+const REC_DEFERRED = 4;
 
 /**
  * readAxis's refusal: a non-minimal class. It is outside every axis range, so the range check
@@ -185,6 +249,10 @@ const scratch = new PlayerState();
  */
 const recordKinds = new Uint8Array(FRAME_SLOTS);
 const recordMasks = new Uint8Array(FRAME_SLOTS);
+/** The decoder's per-slot marks: 0 unlisted, LISTED_RECORD, LISTED_DEFERRED. */
+const listed = new Uint8Array(FRAME_SLOTS);
+const LISTED_RECORD = 1;
+const LISTED_DEFERRED = 2;
 
 /** Whether an entity's two event slots are canonical (kinds 0–3, empty slots last and zero). */
 function eventsValid(k0: number, v0: number, k1: number, v1: number): boolean {
@@ -616,14 +684,35 @@ function writeLocalDelta(w: BitWriter, cur: WorldFrame, base: WorldFrame, s: num
 }
 
 /**
+ * Whether present slot `s` of `cur`, whose stamp is not the tick, may be left out against `base`
+ * (D-046): a pending slot only where the receiver holds no state for it (a full snapshot, or a
+ * baseline slot absent or pending), a slot with older state only as an exact copy of the
+ * baseline's (same stamp, incarnation and entity fields), which is what the receiver keeps.
+ */
+function deferrable(cur: WorldFrame, base: WorldFrame | null, s: number): boolean {
+  const st = cur.stamp[s] as number;
+  if (st === 0) return base === null || !hasState(base, s);
+  return (
+    base !== null &&
+    hasState(base, s) &&
+    base.stamp[s] === st &&
+    base.serial[s] === cur.serial[s] &&
+    entityMask(cur, base, s) === 0
+  );
+}
+
+/**
  * Encodes the snapshot of tick `hdr.serverTick` for receiver `selfId` from frame `cur`: its own
  * slot as the local block, every other slot that needs one as a record. `base` null is a full
  * snapshot (`hdr.baseBack` 0); otherwise `base` is the frame of tick serverTick − `hdr.baseBack`
- * (1–63, the tick ≥ 1) as the receiver holds it, and the snapshot is a delta against it. With
- * SNAP_FLAG_SPECTATOR there is no receiver and every slot is a record. Returns false (the writer's
- * error flag) on anything the layout can't carry: a receiver absent from `cur` (or without state in
- * `base`), a present slot whose stamp is not the tick (pending or deferred, D-046), a value out of
- * range, or a live snapshot over MAX_SNAPSHOT_BYTES.
+ * (1–63, the tick ≥ 1) as the receiver holds it, and the snapshot is a delta against it. A present
+ * slot whose stamp is not the tick was left out by the scheduler (D-046) and goes in the deferred
+ * list; the encoder sets SNAP_FLAG_DEFERRED exactly when that list is not empty (the caller's bit
+ * is ignored). With SNAP_FLAG_SPECTATOR there is no receiver and every slot is a record. Returns
+ * false (the writer's error flag) on anything the layout can't carry: a receiver absent from `cur`
+ * (or without state in `base`), a left-out slot the receiver would not rebuild (`deferrable`), a
+ * left-out slot in a spectator snapshot, a value out of range, or a live snapshot over
+ * MAX_SNAPSHOT_BYTES.
  */
 export function encodeSnapshot(
   w: BitWriter,
@@ -632,8 +721,7 @@ export function encodeSnapshot(
   base: WorldFrame | null,
   selfId: number,
 ): boolean {
-  const flags = hdr.flags;
-  const spectator = (flags & SNAP_FLAG_SPECTATOR) !== 0;
+  const spectator = (hdr.flags & SNAP_FLAG_SPECTATOR) !== 0;
   const t = hdr.serverTick;
   const back = hdr.baseBack;
   if (t < 1) w.fail();
@@ -642,6 +730,33 @@ export function encodeSnapshot(
   ) {
     w.fail();
   }
+  const self = spectator ? -1 : selfId;
+  if (!spectator && !(selfId >= 0 && selfId < FRAME_SLOTS)) {
+    w.fail();
+    return false;
+  }
+  // One pass classifies (the flags and the count lead the records), the second writes from it.
+  const kinds = recordKinds;
+  const masks = recordMasks;
+  let count = 0;
+  let deferred = 0;
+  for (let s = 0; s < FRAME_SLOTS; s++) {
+    if (s === self) {
+      kinds[s] = REC_NONE;
+      continue;
+    }
+    if (cur.present[s] === 1 && cur.stamp[s] !== t) {
+      if (spectator || !deferrable(cur, base, s)) w.fail();
+      kinds[s] = REC_DEFERRED;
+      deferred++;
+      continue;
+    }
+    const kind = recordKind(cur, base, s);
+    kinds[s] = kind;
+    if (kind === REC_NONE) continue;
+    count++;
+  }
+  const flags = (hdr.flags & ~SNAP_FLAG_DEFERRED) | (deferred > 0 ? SNAP_FLAG_DEFERRED : 0);
   if ((flags & ~SNAP_FLAG_MASK) !== 0 || (spectator && (flags & SNAP_FLAG_STARVED) !== 0)) {
     w.fail();
   }
@@ -650,9 +765,8 @@ export function encodeSnapshot(
   w.writeBits(back, 6);
   w.writeBits(flags, 8);
   w.writeBits(hdr.cvarHash, 16);
-  const self = spectator ? -1 : selfId;
   if (!spectator) {
-    if (!(selfId >= 0 && selfId < FRAME_SLOTS) || cur.present[selfId] !== 1) {
+    if (cur.present[selfId] !== 1) {
       w.fail();
       return false;
     }
@@ -669,21 +783,6 @@ export function encodeSnapshot(
       writeLocalDelta(w, cur, base, selfId);
     }
   }
-  // One pass classifies (the count leads the records), the second writes from what it found.
-  const kinds = recordKinds;
-  const masks = recordMasks;
-  let count = 0;
-  for (let s = 0; s < FRAME_SLOTS; s++) {
-    if (s === self) {
-      kinds[s] = REC_NONE;
-      continue;
-    }
-    if (cur.present[s] === 1 && cur.stamp[s] !== t) w.fail();
-    const kind = recordKind(cur, base, s);
-    kinds[s] = kind;
-    if (kind === REC_NONE) continue;
-    count++;
-  }
   w.writeBits(count, SNAP_ENTITY_COUNT_BITS);
   for (let s = 0; s < FRAME_SLOTS; s++) {
     const kind = kinds[s];
@@ -696,6 +795,12 @@ export function encodeSnapshot(
       writeDeltaRecord(w, cur, base, s, masks[s] as number);
     }
   }
+  if (deferred > 0) {
+    w.writeBits(deferred, SNAP_DEFERRED_COUNT_BITS);
+    for (let s = 0; s < FRAME_SLOTS; s++) {
+      if (kinds[s] === REC_DEFERRED) w.writeBits(s, SNAP_DEFERRED_ID_BITS);
+    }
+  }
   if (w.bitLength > (spectator ? SPECTATOR_MAX_BITS : SNAP_BUDGET_BITS)) w.fail();
   return !w.error;
 }
@@ -703,7 +808,8 @@ export function encodeSnapshot(
 /**
  * Reads the fields before the local block (and health and teleportSeq) into `out`. False on a
  * short read, a tick of 0 or past TICK_MAX, a baseline before tick 1 (baseBack ≥ serverTick), or
- * flags the protocol refuses. `out` is then partial.
+ * flags the protocol refuses (bit 1, bits 4–7, SPECTATOR with STARVED or DEFERRED). `out` is then
+ * partial.
  */
 export function decodeSnapshotHeader(r: BitReader, out: SnapshotHeader): boolean {
   if (r.readBits(8) !== MSG_SNAPSHOT) return false;
@@ -713,11 +819,12 @@ export function decodeSnapshotHeader(r: BitReader, out: SnapshotHeader): boolean
   const cvarHash = r.readBits(16);
   const spectator = (flags & SNAP_FLAG_SPECTATOR) !== 0;
   if (t < 1 || baseBack >= t || (flags & ~SNAP_FLAG_MASK) !== 0) return false;
-  if (spectator && (flags & SNAP_FLAG_STARVED) !== 0) return false;
+  if (spectator && (flags & (SNAP_FLAG_STARVED | SNAP_FLAG_DEFERRED)) !== 0) return false;
   out.serverTick = t;
   out.baseBack = baseBack;
   out.flags = flags;
   out.cvarHash = cvarHash;
+  out.deferred = 0;
   if (spectator) {
     out.inputBufferHealth = 0;
     out.teleportSeq = 0;
@@ -761,20 +868,59 @@ function copyEntity(out: WorldFrame, s: number, base: WorldFrame, t: number): vo
 }
 
 /**
- * The slots `from` … `to` − 1 a delta lists no record for: one the baseline holds (but the
- * receiver's own) is unchanged, so it is copied with stamp `t`; one the baseline holds as pending
- * would need a record (the encoder never leaves it out), so it refuses the packet.
+ * Slot `s` as pending (present, no state yet; D-046): left out of a snapshot whose baseline holds
+ * no state for it. Its fields are zeroed, so a frame's unused fields never depend on history.
  */
-function fillUnlisted(
-  base: WorldFrame,
+function setPending(out: WorldFrame, s: number): void {
+  out.setPresent(s, 0);
+  out.serial[s] = 0;
+  out.originX[s] = 0;
+  out.originY[s] = 0;
+  out.originZ[s] = 0;
+  out.vel16X[s] = 0;
+  out.vel16Y[s] = 0;
+  out.vel16Z[s] = 0;
+  out.entVelX[s] = 0;
+  out.entVelY[s] = 0;
+  out.entVelZ[s] = 0;
+  out.yaw[s] = 0;
+  out.pitch[s] = 0;
+  out.flags[s] = 0;
+  out.ground1[s] = 0;
+  out.waterLevel[s] = 0;
+  out.stamina[s] = 0;
+  out.team[s] = 0;
+  out.teleportSeq[s] = 0;
+  out.eventSeq[s] = 0;
+  const e = s * ENTITY_EVENT_SLOTS;
+  out.evKind[e] = 0;
+  out.evValue[e] = 0;
+  out.evKind[e + 1] = 0;
+  out.evValue[e + 1] = 0;
+}
+
+/**
+ * Every slot but the receiver's that no record listed: a deferred one keeps the baseline's state
+ * and stamp, or turns pending where the baseline holds no state for it (or there is none); an
+ * unlisted one the baseline holds is unchanged, copied with stamp `t`, and one the baseline holds
+ * as pending would have needed a record or a deferral (the encoder never leaves it out), so it
+ * refuses the packet; anything else stays absent.
+ */
+function finishUnlisted(
+  base: WorldFrame | null,
   out: WorldFrame,
-  from: number,
-  to: number,
   self: number,
   t: number,
 ): boolean {
-  for (let s = from; s < to; s++) {
-    if (s === self || base.present[s] !== 1) continue;
+  for (let s = 0; s < FRAME_SLOTS; s++) {
+    const mark = listed[s] as number;
+    if (s === self || mark === LISTED_RECORD) continue;
+    if (mark === LISTED_DEFERRED) {
+      if (base !== null && hasState(base, s)) copyEntity(out, s, base, base.stamp[s] as number);
+      else setPending(out, s);
+      continue;
+    }
+    if (base === null || base.present[s] !== 1) continue;
     if (base.stamp[s] === 0) return false;
     copyEntity(out, s, base, t);
   }
@@ -1052,15 +1198,18 @@ function readLocalDelta(r: BitReader, base: WorldFrame, out: WorldFrame, s: numb
  * tick serverTick − `hdr.baseBack` (never `out` itself). The own slot comes from the local block
  * (present, stamp = the tick, teleportSeq from the header; team and events not carried), each
  * full or delta record's slot is present with stamp = the tick, an unlisted slot the baseline
- * holds is unchanged (copied, stamp = the tick), a removed or unlisted-and-not-held slot is absent.
+ * holds is unchanged (copied, stamp = the tick), a removed or unlisted-and-not-held slot is absent,
+ * a deferred slot (D-046) keeps the baseline's state and stamp or turns pending; `hdr.deferred` is
+ * set to the number of deferred ids.
  * With SNAP_FLAG_SPECTATOR, `selfId` is ignored. A decoded slot's `serial` is the baseline's, + 1
  * for a "new" record over a slot the baseline holds and 0 for one it doesn't, so a re-encode
  * against the same baseline picks the same body forms (the client reads no serial otherwise).
  * False on anything the encoder never writes (ids not strictly ascending or ≥ 64, the receiver's
  * own id, a removal in a full snapshot or of a slot the baseline lacks, a delta record for a slot
  * without state in the baseline or in a full snapshot, a non-canonical delta, out-of-range fields,
- * too many records, a live snapshot over MAX_SNAPSHOT_BYTES, bits after the last byte); `out` is
- * then partial and must be dropped.
+ * too many records, a deferred list that is empty, unsorted, holds the own id, an id ≥ 64 or one
+ * already listed as a record, a live snapshot over MAX_SNAPSHOT_BYTES, bits after the last byte);
+ * `out` is then partial and must be dropped.
  */
 export function decodeSnapshotBody(
   r: BitReader,
@@ -1071,6 +1220,7 @@ export function decodeSnapshotBody(
 ): boolean {
   if ((hdr.baseBack === 0) !== (base === null) || out === base) return false;
   const spectator = (hdr.flags & SNAP_FLAG_SPECTATOR) !== 0;
+  if (spectator && (hdr.flags & SNAP_FLAG_DEFERRED) !== 0) return false;
   const t = hdr.serverTick;
   const self = spectator ? -1 : selfId;
   out.clear();
@@ -1095,12 +1245,14 @@ export function decodeSnapshotBody(
   }
   const count = r.readBits(SNAP_ENTITY_COUNT_BITS);
   if (count > (spectator ? FRAME_SLOTS : FRAME_SLOTS - 1)) return false;
+  const marks = listed;
+  marks.fill(0);
   let prev = -1;
   for (let i = 0; i < count; i++) {
     const id = r.readBits(16);
     if (id <= prev || id >= FRAME_SLOTS || id === self) return false;
-    if (base !== null && !fillUnlisted(base, out, prev + 1, id, self, t)) return false;
     prev = id;
+    marks[id] = LISTED_RECORD;
     if (r.readBits(1) === 1) {
       // A removal needs a baseline that holds the slot (pending included); the slot stays absent.
       if (base === null || base.present[id] !== 1) return false;
@@ -1115,7 +1267,20 @@ export function decodeSnapshotBody(
       return false;
     }
   }
-  if (base !== null && !fillUnlisted(base, out, prev + 1, FRAME_SLOTS, self, t)) return false;
+  let deferred = 0;
+  if ((hdr.flags & SNAP_FLAG_DEFERRED) !== 0) {
+    deferred = r.readBits(SNAP_DEFERRED_COUNT_BITS);
+    if (deferred === 0) return false;
+    prev = -1;
+    for (let i = 0; i < deferred; i++) {
+      const id = r.readBits(SNAP_DEFERRED_ID_BITS);
+      if (id <= prev || id >= FRAME_SLOTS || id === self || marks[id] !== 0) return false;
+      prev = id;
+      marks[id] = LISTED_DEFERRED;
+    }
+  }
+  if (r.error || !finishUnlisted(base, out, self, t)) return false;
+  hdr.deferred = deferred;
   if (r.bitPosition > (spectator ? SPECTATOR_MAX_BITS : SNAP_BUDGET_BITS)) return false;
   return r.atEnd();
 }

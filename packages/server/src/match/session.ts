@@ -1,6 +1,14 @@
-import { PlayerState, SNAPSHOT_HISTORY, TEAM_NONE, type Transport, UserCmd } from "@game/shared";
-import type { SentState } from "./history";
+import {
+  FRAME_SLOTS,
+  PlayerState,
+  SNAPSHOT_HISTORY,
+  TEAM_NONE,
+  type Transport,
+  UserCmd,
+} from "@game/shared";
 import { InputQueue } from "./inputQueue";
+import type { ClientMirror } from "./mirror";
+import type { SnapshotClient } from "./scheduler";
 
 /** Waiting for HELLO. */
 export const SESSION_CONNECTING = 0;
@@ -22,14 +30,20 @@ export class SessionStats {
   snapshots = 0;
   /** Snapshots sent without a baseline (the first, and whenever no usable ack was held; D-038). */
   fullSnapshots = 0;
+  /** Players the byte-budget scheduler left out of its snapshots (D-046), and those snapshots. */
+  deferredEntities = 0;
+  deferredSnapshots = 0;
+  /** The largest staleness of a remote at send (2 at most by D-046's bound; 1 without deferral). */
+  maxStaleness = 0;
 }
 
 /**
  * One connected client (M2 design §1): its transport, handshake state, player, input queue,
- * counters and admin flag, and what it was sent and acked (`SentState`, D-038). Fixed shape;
- * everything per-tick is preallocated here.
+ * counters and admin flag, what it was sent and acked (`SentState`, D-038), and the byte-budget
+ * scheduler's rows and mirror (`SnapshotClient`, D-046). Fixed shape; everything per-tick is
+ * preallocated here.
  */
-export class Session implements SentState {
+export class Session implements SnapshotClient {
   state = SESSION_CONNECTING;
   readonly player = new PlayerState();
   readonly queue = new InputQueue();
@@ -50,6 +64,17 @@ export class Session implements SentState {
   newestSent = 0;
   /** The newest valid tick the client acked: the next snapshot's baseline, 0 for a full one. */
   ackTick = 0;
+  /** Per slot: the last tick a snapshot carried that player fresh (D-046). */
+  readonly lastSent = new Int32Array(FRAME_SLOTS);
+  /** Per slot: the last tick a snapshot left that player out (0: never). */
+  readonly lastDeferred = new Int32Array(FRAME_SLOTS);
+  /** Per slot: the serial of the player the last snapshot saw there (−1: none yet). */
+  readonly sentSerial = new Int32Array(FRAME_SLOTS).fill(-1);
+  /**
+   * What it holds of each mirrored sent tick (D-046): only in a match that admits more than 37
+   * players, from the match's pool; null otherwise (every frame plain).
+   */
+  mirror: ClientMirror | null = null;
   /** The client's nonce from HELLO. */
   nonce = 0;
   buildHash = "";

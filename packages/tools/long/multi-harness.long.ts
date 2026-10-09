@@ -1,7 +1,7 @@
 import { MixedInput, NeutralInput, StrafeCircuit } from "@game/client/net";
-import { findNetProfile, MSG_SNAPSHOT, type NetProfile } from "@game/shared";
+import { findNetProfile, MSG_SNAPSHOT, type NetProfile, SNAP_FIT_MAX_PLAYERS } from "@game/shared";
 import { describe, expect, it } from "vitest";
-import { type HarnessClient, MAX_HARNESS_CLIENTS, MultiHarness } from "../test/net/multiHarness";
+import { type HarnessClient, MultiHarness } from "../test/net/multiHarness";
 
 // The multi-client harness's long run (M3 design §5 "Harness", §6 increment 3), the long tier's
 // (D-032): a full 37-player match. The 16-client baseline that also lived here (30 s of 16 clients
@@ -12,8 +12,10 @@ import { type HarnessClient, MAX_HARNESS_CLIENTS, MultiHarness } from "../test/n
 const profile = (name: string) => findNetProfile(name) as NetProfile;
 
 describe("MultiHarness: clients", () => {
-  it("plays a full 37-player match (sv_maxClients 64, clamped until D-046), refuses a 38th, and refills a slot", () => {
-    const h = new MultiHarness({ map: "arena_greybox", seed: 9, maxClients: MAX_HARNESS_CLIENTS });
+  // 37 players, the largest match whose every snapshot fits 1100 B by construction (D-034): the
+  // byte-budget scheduler (D-046) never runs; the 64-player matches are NET-02's and NET-05's.
+  it("plays a full 37-player match (sv_maxClients 37, every snapshot fitting by construction), refuses a 38th, and refills a slot", () => {
+    const h = new MultiHarness({ map: "arena_greybox", seed: 9, maxClients: SNAP_FIT_MAX_PLAYERS });
     const full = h.match.maxClients;
     expect(full).toBe(37);
     const wan = profile("wan-100-loss1");
@@ -45,6 +47,7 @@ describe("MultiHarness: clients", () => {
     expect(watched.digestsChecked).toBeGreaterThan(50);
     expect(watched.digestMismatches).toEqual([]);
     expect(h.match.metrics.strikes).toBe(0);
+    expect([h.match.metrics.sizePasses, h.match.mirrors.allocated]).toEqual([0, 0]);
     // The match KICKs a 38th connection itself; the harness refuses a 38th client.
     const extra = h.addRaw();
     h.run(100);

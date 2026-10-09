@@ -47,6 +47,8 @@ import {
   STAT_BASELINE_DROPS,
   STAT_BYTES_IN,
   STAT_BYTES_OUT,
+  STAT_DEFERRED,
+  STAT_DEFERRED_SNAPSHOTS,
   STAT_FULL_SNAPSHOTS,
   STAT_PACKETS_OUT,
   STAT_STRIKES,
@@ -257,6 +259,11 @@ export class Connection {
         const result = store.receive(r, this.clientId);
         if (result === STORE_STORED) {
           if (store.header.baseBack === 0) this.stats.add(STAT_FULL_SNAPSHOTS, 1);
+          const deferred = store.header.deferred;
+          if (deferred > 0) {
+            this.stats.add(STAT_DEFERRED, deferred);
+            this.stats.add(STAT_DEFERRED_SNAPSHOTS, 1);
+          }
           this.handler.onSnapshot(store.header, store.lastStored as WorldFrame);
         } else if (result === STORE_NO_BASELINE) {
           this.stats.add(STAT_BASELINE_DROPS, 1);

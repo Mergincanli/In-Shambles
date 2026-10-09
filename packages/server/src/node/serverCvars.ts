@@ -35,8 +35,8 @@ export function registerServerCvars(reg: CvarRegistry): void {
   reg.register({
     name: "sv_maxClients",
     type: "int",
-    // design (D-034, Mustafa's decision: "Cap 64, default 32"); the match clamps it to 37 until
-    // the byte-budget scheduler (D-046), so every snapshot fits 1100 B by construction.
+    // design (D-034, Mustafa's decision: "Cap 64, default 32"); above 37 the byte-budget
+    // scheduler keeps every snapshot within 1100 B (D-046).
     default: MATCH_DEFAULT_MAX_CLIENTS,
     min: 1,
     max: MATCH_MAX_CLIENTS,

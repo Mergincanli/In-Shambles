@@ -65,16 +65,18 @@ const MILESTONES: Readonly<Record<string, Milestone>> = {
       "NET-12": "long",
       "NET-09": "load",
     },
-    // NET-01's fast test covers the v2 full snapshots since increment 4 and the deltas since
-    // increment 8 (the deferred list extends it in increment 10); NET-02's fast unit (the codec
-    // and the store's rules over a long impaired world sequence) landed in increment 8, its match
-    // legs (fast smoke, long file) in increment 9, as did NET-08 (a) and NET-12 (fast and long);
+    // NET-01's fast test covers the v2 full snapshots since increment 4, the deltas since
+    // increment 8 and the deferred list since increment 10; NET-02's fast unit (the codec and the
+    // store's rules over a long impaired world sequence) landed in increment 8, its match legs
+    // (fast smoke, long file) in increment 9, as did NET-08 (a) and NET-12 (fast and long), and
+    // increment 10 added its scheduled sequences (fast, `packages/server/test/match/
+    // scheduler.test.ts`) and the 64-player legs (`net-02-sixty-four-players.long.ts`);
     // NET-04 keeps its M2 fast test, and increment 9 added its 16-client legs to its long file
     // (`net-04-reconciliation.long.ts`, holding the M2 runs the fast tier leaves out since
     // D-032's amendment); NET-09's fast in-process proxy landed in increment 6, its load leg
     // comes in increment 18; NET-05's fast matrix and its long file (the rest of the matrix, 16
-    // clients) landed in increment 7, its 64-player leg joins the long file in increment 10, as
-    // does NET-08's 32-player report (b).
+    // clients) landed in increment 7, its 64-player legs (with a late joiner) joined the long
+    // file in increment 10, as did NET-08's 32-player report (b), fast and long.
     pending: {
       "NET-07": "increment 11",
       "NET-09 load": "increment 18",

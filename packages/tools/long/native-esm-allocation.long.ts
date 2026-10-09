@@ -6,12 +6,13 @@ import { fromRoot } from "../src/paths";
 // The per-tick paths (quantizePlayerState, snapOrigin, the state ring, copy/equals,
 // sanitizeUserCmd, the pmove params refresh and basics, whole pmove ticks in every M2 move mode,
 // the scenario runner and bots, the per-tick message codecs, delta snapshots through the client's
-// snapshot store, the transports, the server's match tick (one session, and several with delta
-// snapshots and reconnects) and the Node server's timing wrapper,
-// both ends of the WebSocket transport, the client's prediction and reconciliation, the remote
-// interpolation, and the BVH queries) must not allocate under native ES modules either, where V8
-// boxes a double returned by a call it doesn't inline or joined with a module constant in a
-// ternary. Vitest's module runner hides that, so this runs a child process.
+// snapshot store (64 slots with deferred lists and pending slots too), the byte-budget scheduler
+// with its mirrors, the transports, the server's match tick (one session, and several with delta
+// snapshots and reconnects) and the Node server's timing wrapper, both ends of the WebSocket
+// transport, the client's prediction and reconciliation, the remote interpolation (16 and 63
+// remotes), and the BVH queries) must not allocate under native ES modules either, where V8 boxes
+// a double returned by a call it doesn't inline or joined with a module constant in a ternary.
+// Vitest's module runner hides that, so this runs a child process.
 //
 // The children run two at a time: one after another this file took some 16 s alone (it set the
 // floor of `pnpm test`, where it ran until D-032 moved it to `pnpm test:long`). Each child counts
@@ -24,8 +25,10 @@ interface ChildResult {
   outcomes: number[];
   /**
    * wsTransport: the client end's outcomes; predict: [0] teleports; interp: [0] held; deltaCodec:
-   * [0] full snapshots stored; match: [0] deltas stored; matchMulti: [0] stored frames that
-   * differed from the server's.
+   * [0] full snapshots stored, [1] 64-slot snapshots stored as sent, [2] those that were not;
+   * match: [0] deltas stored; matchMulti: [0] stored frames that differed from the server's;
+   * snapshotSchedule: [0] failed builds, [1] builds past staleness 2, [2] the largest snapshot
+   * (B); interp64: [0] NET-05 jumps.
    */
   extra: number[];
   /** codec and deltaCodec: hostile packets the decoders refused. */
@@ -140,6 +143,23 @@ describe.concurrent("per-tick paths under native ES modules", () => {
     // Every hostile delta, one per call, was refused, in each run of 200000 calls.
     expect(r.rejected).toBeGreaterThan(0);
     expect(r.rejected % 200_000).toBe(0);
+    // The 64-slot snapshots with deferred lists and pending slots (D-046): each stored frame
+    // equals what was sent, field by field; none failed or differed.
+    expect(r.extra[1]).toBeGreaterThan(0);
+    expect(r.extra[2]).toBe(0);
+    expect(r.clean, r.attempts.join("; ")).toBe(true);
+  }, 30_000);
+
+  it("the byte-budget scheduler allocates nothing: 63 receivers with mirrors, worst-motion frames, rotating acks, the worst-case check, the size pass, deferrals, reused slots, the encoder (D-046)", async ({
+    expect,
+  }) => {
+    const r = await runChild("snapshotSchedule");
+    // Snapshots built, those that left players out (most: the motion is at its worst two ticks
+    // in three), full ones; none failed, none left a player out twice in a row, none past 1100 B.
+    for (const n of r.outcomes) expect(n).toBeGreaterThan(0);
+    expect(r.outcomes[1]).toBeGreaterThan(0.3 * (r.outcomes[0] as number));
+    expect([r.extra[0], r.extra[1]]).toEqual([0, 0]);
+    expect(r.extra[2]).toBeLessThanOrEqual(1100);
     expect(r.clean, r.attempts.join("; ")).toBe(true);
   }, 30_000);
 
@@ -214,6 +234,19 @@ describe.concurrent("per-tick paths under native ES modules", () => {
     // judged; held ones among the first.
     for (const n of r.outcomes) expect(n).toBeGreaterThan(0);
     expect(r.extra[0]).toBeGreaterThan(0);
+    expect(r.clean, r.attempts.join("; ")).toBe(true);
+  }, 30_000);
+
+  it("remote interpolation of 63 remotes allocates nothing per frame: deferred copies, pending slots, the defer lag, outages (D-046)", async ({
+    expect,
+  }) => {
+    const r = await runChild("interp64");
+    // Remote-frames drawn and judged by the NET-05 meter, none of them a jump; the defer lag 1
+    // (a slot left out at T went fresh at T − 1).
+    expect(r.outcomes[0]).toBeGreaterThan(0);
+    expect(r.outcomes[1]).toBeGreaterThan(0);
+    expect(r.outcomes[2]).toBe(1);
+    expect(r.extra[0]).toBe(0);
     expect(r.clean, r.attempts.join("; ")).toBe(true);
   }, 30_000);
 

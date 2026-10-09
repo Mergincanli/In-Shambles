@@ -74,6 +74,10 @@ class MatchCounts {
   strikes = 0;
   snapshots = 0;
   fullSnapshots = 0;
+  deferredEntities = 0;
+  deferredSnapshots = 0;
+  snapshotOverflow = 0;
+  schedOverrun = 0;
   kicks = 0;
   bytesIn = 0;
   bytesOut = 0;
@@ -84,6 +88,10 @@ class MatchCounts {
     this.strikes = c.strikes;
     this.snapshots = c.snapshots;
     this.fullSnapshots = c.fullSnapshots;
+    this.deferredEntities = c.deferredEntities;
+    this.deferredSnapshots = c.deferredSnapshots;
+    this.snapshotOverflow = c.snapshotOverflow;
+    this.schedOverrun = c.schedOverrun;
     this.kicks = c.kicks;
     this.bytesIn = m.traffic.bytesIn;
     this.bytesOut = m.traffic.bytesOut;
@@ -267,6 +275,13 @@ export class ServerMetrics {
         strikes: c.strikes - b.strikes,
         snapshots: c.snapshots - b.snapshots,
         fullSnapshots: c.fullSnapshots - b.fullSnapshots,
+        // The byte-budget scheduler (D-046): players left out and the snapshots that left any
+        // out; the largest staleness since the match started (1 without deferral, 2 at most).
+        deferredEntities: c.deferredEntities - b.deferredEntities,
+        deferredSnapshots: c.deferredSnapshots - b.deferredSnapshots,
+        maxStaleness: m.match.metrics.maxStaleness,
+        snapshotOverflow: c.snapshotOverflow - b.snapshotOverflow,
+        schedOverrun: c.schedOverrun - b.schedOverrun,
         kicks: c.kicks - b.kicks,
         traffic: trafficJson(c.bytesIn - b.bytesIn, c.bytesOut - b.bytesOut, runS),
       };
@@ -315,6 +330,9 @@ export class ServerMetrics {
         starved: c.starved - b.starved,
         strikes: c.strikes - b.strikes,
         fullSnapshots: c.fullSnapshots - b.fullSnapshots,
+        deferredEntities: c.deferredEntities - b.deferredEntities,
+        maxStaleness: m.match.metrics.maxStaleness,
+        snapshotOverflow: c.snapshotOverflow - b.snapshotOverflow,
         kicks: c.kicks - b.kicks,
         kbInPerS: kbPerS(c.bytesIn - b.bytesIn, s),
         kbOutPerS: kbPerS(c.bytesOut - b.bytesOut, s),

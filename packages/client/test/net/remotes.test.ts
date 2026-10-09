@@ -17,6 +17,7 @@ import { TICK_MS } from "../../src/net/clock";
 import { ClientNetSettings } from "../../src/net/cvars";
 import {
   DELAY_FALL_MS,
+  ID_DEFER_LAG,
   ID_FORMULA,
   ID_INTERVAL,
   ID_P95,
@@ -414,6 +415,148 @@ describe("InterpDelay (M3 design §2.8)", () => {
     expect([...formulas].sort()).toEqual([3, 4]);
     expect(fell).toBe(4);
   });
+});
+
+describe("InterpDelay's defer lag (M3 design §2.8, D-046)", () => {
+  it("adds the defer lag to the formula: 0 without deferral, 1 when the scheduler alternates", () => {
+    const now = new Float64Array(1);
+    const c = new RenderClock(now);
+    const d = new InterpDelay(now);
+    for (let tick = 1; tick <= 120; tick++) {
+      now[0] = tick * TICK_MS;
+      c.onSnapshot(tick);
+      d.onSnapshot(c, tick === 1 ? 0 : 1, 0);
+    }
+    expect([d.t[ID_DEFER_LAG], d.ticks]).toEqual([0, 2]);
+    // One snapshot with a lag of 1: ceil(2 + 0 + 1) = 3 at once, for the next 120 arrivals.
+    now[0] = 121 * TICK_MS;
+    c.onSnapshot(121);
+    d.onSnapshot(c, 1, 1);
+    expect([d.t[ID_DEFER_LAG], d.t[ID_FORMULA], d.ticks]).toEqual([1, 3, 3]);
+    for (let tick = 122; tick < 241; tick++) {
+      now[0] = tick * TICK_MS;
+      c.onSnapshot(tick);
+      d.onSnapshot(c, 1, 0);
+    }
+    expect(d.t[ID_DEFER_LAG]).toBe(1);
+    now[0] = 241 * TICK_MS;
+    c.onSnapshot(241);
+    d.onSnapshot(c, 1, 0);
+    expect([d.t[ID_DEFER_LAG], d.t[ID_FORMULA]]).toEqual([0, 2]);
+  });
+
+  it("is 1 for a deferred copy carrying an old baseline stamp when the slot went fresh last tick", () => {
+    const r = new Rig();
+    for (let t = 1; t <= 40; t++) {
+      r.snap(t, (f) => {
+        put(f, t, 3, { x: t });
+        // Slot 4 left out every other snapshot: its copy carries the stamp of a baseline 6 ticks
+        // back (an ack 6 ticks old), though the previous snapshot carried it fresh.
+        if (t % 2 === 0 && t > 8) put(f, t, 4, { x: t - 7, stamp: t - 7 });
+        else put(f, t, 4, { x: t });
+      });
+      r.frame(TICK_MS);
+    }
+    expect(r.interp.delay.t[ID_DEFER_LAG]).toBe(1);
+    expect(r.interp.delay.t[ID_FORMULA]).toBe(3);
+    // Nothing deferred: back to 0 once the window is past the deferrals.
+    for (let t = 41; t <= 160; t++) {
+      r.snap(t, (f) => {
+        put(f, t, 3, { x: t });
+        put(f, t, 4, { x: t });
+      });
+      r.frame(TICK_MS);
+    }
+    expect(r.interp.delay.t[ID_DEFER_LAG]).toBe(0);
+  });
+
+  it("ignores a pending slot with no sample yet, and an older player's samples in that slot", () => {
+    const r = new Rig();
+    for (let t = 1; t <= 30; t++) {
+      r.snap(t, (f) => {
+        put(f, t, 3, { x: t });
+        // Slot 9: a player until 20, gone at 21, a new one pending (no sample of its own) after.
+        if (t <= 20) put(f, t, 9, { x: t });
+        else if (t > 21) f.setPresent(9, 0);
+      });
+      r.frame(TICK_MS);
+      // The new player's frames defer it without a sample: no lag, neither from the pending
+      // slot itself nor from the old player's stamps behind the absent frame.
+      if (t > 21) expect(r.interp.delay.t[ID_DEFER_LAG], `tick ${t}`).toBe(0);
+    }
+    expect(r.interp.view.visible[9]).toBe(0);
+  });
+
+  it("measures 2 when a left-out slot's freshest sample is 2 ticks old (its fresh snapshot lost)", () => {
+    const r = new Rig();
+    for (let t = 1; t <= 20; t++) {
+      if (t === 19) continue;
+      r.snap(t, (f) => {
+        put(f, t, 3, { x: t });
+        // 20 leaves slot 3 out (a copy of 18's state); 19, where it went fresh, never arrived.
+        if (t === 20) put(f, t, 5, { x: 18, stamp: 18 });
+        else put(f, t, 5, { x: t });
+      });
+    }
+    expect(r.interp.delay.t[ID_DEFER_LAG]).toBe(2);
+  });
+});
+
+describe("RemoteInterpolator under deferral (M3 design §2.8, D-046)", () => {
+  /**
+   * Slot 1 runs +5 u a tick. From tick 200 the scheduler leaves it out of every even snapshot,
+   * whose copy carries an ack-old baseline's stamp (tick − 21) and state; every odd snapshot that
+   * is a multiple of 7 (one carrying it fresh) is lost. With `respawn` it teleports 5000 u on at
+   * that tick. The drawn sample must never move back to an older copy: no step backwards, no
+   * replayed events, never back on the pre-respawn side once past it.
+   */
+  it.each([
+    [0, 0],
+    [6, 0],
+    [0, 240],
+    [6, 233],
+  ])(
+    "never draws an old deferred copy over the fresher sample (cl_interpDelay %d, respawn %d)",
+    (fixed, respawn) => {
+      const r = new Rig();
+      r.settings.interpDelay = fixed;
+      const S = 1;
+      const fill = (f: WorldFrame, tick: number): void => {
+        const st = tick >= 200 && tick % 2 === 0 ? tick - 21 : tick;
+        const after = respawn > 0 && st >= respawn;
+        put(f, tick, S, { x: st * 5 + (after ? 5000 : 0), vx: 300, stamp: st, seq: after ? 2 : 1 });
+        f.eventSeq[S] = st & 0xff;
+        f.evKind[S * 2] = PMEV_JUMP;
+        f.evKind[S * 2 + 1] = PMEV_JUMP;
+      };
+      let tick = 1;
+      let nextSnap = 0;
+      let lastX = Number.NEGATIVE_INFINITY;
+      let backwards = 0;
+      let crossed = false;
+      let returned = 0;
+      for (let i = 0; i < 144 * 8; i++) {
+        while (nextSnap <= (r.now[0] as number)) {
+          const lost = tick >= 200 && tick % 2 === 1 && tick % 7 === 0;
+          const t = tick;
+          if (!lost) r.snap(t, (f) => fill(f, t));
+          tick++;
+          nextSnap += TICK_MS;
+        }
+        r.frame(1000 / 144);
+        if (r.interp.view.visible[S] !== 1 || tick <= 210) continue;
+        const x = r.interp.view.x[S] as number;
+        if (x < lastX - 0.01) backwards++;
+        if (respawn > 0 && x > respawn * 5 + 2500) crossed = true;
+        else if (crossed) returned++;
+        lastX = x;
+      }
+      expect([backwards, returned]).toEqual([0, 0]);
+      if (respawn > 0) expect(crossed).toBe(true);
+      // Only the lost frames lose events (2 each, about 1 in 14 ticks): no replay of old ones.
+      expect(r.stats.totals[STAT_REMOTE_EVENTS_LOST] as number).toBeLessThan(200);
+    },
+  );
 });
 
 describe("RemoteInterpolator (M3 design §2.8, D-037)", () => {
