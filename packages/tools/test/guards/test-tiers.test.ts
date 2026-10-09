@@ -1,13 +1,14 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { configDefaults } from "vitest/config";
 import {
   childCpuFromProcStat,
   formatTestCost,
   TestCostReporter,
 } from "../../../../scripts/test-cost-reporter.mjs";
 import fastConfig from "../../../../vitest.config";
-import longConfig, { LONG_GLOB } from "../../../../vitest.long.config";
+import longConfig, { LONG_GLOB, REALTIME_LONG } from "../../../../vitest.long.config";
 import { fromRoot } from "../../src/paths";
 
 // The test tiers (D-032, M3 design §2.16): `pnpm test` (fast, every `*.test.ts` under a package)
@@ -43,8 +44,34 @@ describe("test tiers", () => {
 
   it("give the long config exactly the long files, and the fast one every package's tests", () => {
     expect(LONG_GLOB).toBe("packages/*/long/**/*.long.ts");
-    expect(longConfig.test?.include).toEqual([LONG_GLOB]);
-    expect(longConfig.test?.projects).toBeUndefined();
+    // Two inline groups (D-032's amendment): every long file but the real-time ones, then those
+    // alone, so a wall-clock timing gate never shares the host with the CPU-bound sweeps.
+    expect(longConfig.test?.include).toBeUndefined();
+    expect(longConfig.test?.projects).toEqual([
+      {
+        extends: true,
+        test: {
+          name: "long",
+          include: [LONG_GLOB],
+          exclude: [...configDefaults.exclude, ...REALTIME_LONG],
+          sequence: { groupOrder: 0 },
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: "long-realtime",
+          include: [...REALTIME_LONG],
+          fileParallelism: false,
+          sequence: { groupOrder: 1 },
+        },
+      },
+    ]);
+    expect(REALTIME_LONG.length).toBeGreaterThan(0);
+    for (const file of REALTIME_LONG) {
+      expect(file).toMatch(/^packages\/[^/]+\/long\/.*\.long\.ts$/);
+      expect(longFiles).toContain(file.slice("packages/".length));
+    }
     expect(fastConfig.test?.projects).toEqual(["packages/*"]);
     expect(fastConfig.test?.include).toBeUndefined();
   });

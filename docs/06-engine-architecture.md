@@ -398,5 +398,5 @@ These are SERVER cvars, read at startup and never replicated.
 
 ## 11. Scripts and CI (created in M0, extended later)
 
-- `pnpm dev`, `pnpm dev:server`, `pnpm build`, `pnpm test`, `pnpm test:long` (M3, D-032), `pnpm test:movement`, `pnpm test:net`, `pnpm test:balance`, `pnpm test:browser` (M2), `pnpm typecheck`, `pnpm lint`, `pnpm format`, `pnpm greybox` (M1), `pnpm bench`, `pnpm bots`, `pnpm feel-report`, `pnpm balance-report`, `pnpm mapc` (M5).
+- `pnpm dev`, `pnpm dev:server`, `pnpm build`, `pnpm test`, `pnpm test:long` (M3, D-032), `pnpm test:movement`, `pnpm test:net` (each the fast tier, then the long tier with the same `-t` filter, D-032), `pnpm test:balance`, `pnpm test:browser` (M2), `pnpm typecheck`, `pnpm lint`, `pnpm format`, `pnpm greybox` (M1), `pnpm bench`, `pnpm bots`, `pnpm feel-report`, `pnpm balance-report`, `pnpm mapc` (M5).
 - **CI** (GitHub Actions, `.github/workflows/ci.yml`): typecheck, lint, unit tests and build since M0. Since M2, a `browsers` job replays the determinism vectors in Chromium, Firefox and WebKit (D-022) and runs the client e2e smoke test in Chromium (M2 increment 11). Since M3 the `check` job runs `pnpm test:long` right after `pnpm test`, blocking (D-032). Added in M9 (bots exist from M3): a short bot soak (2 min, 8 bots, `wan-100-loss1`) and bundle-size/perf budget checks.

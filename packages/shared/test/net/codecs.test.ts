@@ -32,7 +32,6 @@ import {
   MAX_SPECTATOR_SNAPSHOT_BYTES,
   MAX_UNRELIABLE_BYTES,
   MSG_INPUT,
-  MSG_SNAPSHOT,
   MSG_TYPE_MAX,
   PROTOCOL_VERSION,
   SNAP_FLAG_DEFERRED,
@@ -68,11 +67,18 @@ import {
 import { copyUserCmd, sanitizeUserCmd, UserCmd } from "../../src/sim/usercmd";
 import { TICK_MAX } from "../../src/time";
 import {
+  decodeEverywhere,
+  expectBitFlipsSafe,
+  expectCorruptionsSafe,
+  expectTruncationsRefused,
+  FAST_FUZZ,
+  hex,
+} from "../helpers/codecFuzz";
+import {
   decodeSnapshotParts,
   encodeSnapshotParts,
   LIVE_FULL_MAX_OTHERS,
   MESSAGE_KINDS,
-  type MessageKind,
   newWriter,
   randomCmdFields,
   randomFrame,
@@ -81,37 +87,6 @@ import {
   SNAP_SELF,
   SnapshotParts,
 } from "../helpers/netMessages";
-
-function hex(bytes: Uint8Array): string {
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-function kindOf(type: number): MessageKind {
-  const k = MESSAGE_KINDS.find((m) => m.type === type);
-  if (k === undefined) throw new Error(`no kind ${type}`);
-  return k;
-}
-
-/**
- * Decodes `bytes` with every decoder; whichever accepts it must re-encode it, and byte for byte
- * (so an accepted packet is exactly what an encoder writes: every value in range and canonical).
- * A decoder that accepts what its encoder refuses fails the test. Returns how many decoders
- * accepted it.
- */
-function decodeEverywhere(bytes: Uint8Array, length: number, w: BitWriter): number {
-  let accepted = 0;
-  for (const k of MESSAGE_KINDS) {
-    if (!k.decode(readerOver(bytes, length))) continue;
-    accepted++;
-    expect(k.type).toBe(bytes[0]);
-    expect(
-      k.decodeAndReencode(readerOver(bytes, length), w),
-      `${k.name} accepted a packet its encoder refuses: ${hex(bytes.subarray(0, length))}`,
-    ).toBe(true);
-    expect(hex(w.bytes.subarray(0, w.byteLength))).toBe(hex(bytes.subarray(0, length)));
-  }
-  return accepted;
-}
 
 /** `bytes` with the `width` bits at bit `offset` replaced by `value` (LSB-first), as a copy. */
 function patchBits(bytes: Uint8Array, offset: number, width: number, value: number): Uint8Array {
@@ -132,6 +107,10 @@ function encodedBy(encode: (w: BitWriter) => boolean): Uint8Array {
 }
 
 const kinds = MESSAGE_KINDS.map((k) => [k.name, k] as const);
+
+// Tiers (D-032): the truncation, bit-flip and corruption fuzz runs the same seeds with smaller
+// counts here (FAST_FUZZ); `packages/shared/long/net-01-codec-fuzz.long.ts` runs the full counts
+// (FULL_FUZZ) in `pnpm test:long` under its own describe, and `pnpm test:net` runs both.
 
 describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", () => {
   it("covers every message type", () => {
@@ -723,29 +702,9 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
       expect(peekHelloVersion(ping, ping.length)).toBe(-1);
     });
 
-    it.each(kinds)("%s: every truncation, an extra byte and dirty padding are refused", (_, k) => {
-      const rng = new Mulberry32(0x7a11 + k.type);
-      const w = newWriter();
-      for (let i = 0; i < 40; i++) {
-        const bytes = k.random(rng, w);
-        for (let len = 0; len < bytes.length; len++) {
-          expect(k.decode(readerOver(bytes, len)), `${len} of ${bytes.length}`).toBe(false);
-        }
-        const longer = new Uint8Array(bytes.length + 1);
-        longer.set(bytes);
-        expect(k.decode(readerOver(longer))).toBe(false);
-        // Set the first padding bit of the last byte, if the message has one.
-        w.reset();
-        expect(k.decode(readerOver(bytes))).toBe(true);
-        k.decodeAndReencode(readerOver(bytes), w);
-        const used = w.bitLength & 7;
-        if (used !== 0) {
-          const dirty = bytes.slice();
-          dirty[dirty.length - 1] = (dirty[dirty.length - 1] as number) | (1 << used);
-          expect(k.decode(readerOver(dirty))).toBe(false);
-        }
-      }
-    });
+    it.each(kinds)("%s: every truncation, an extra byte and dirty padding are refused", (_, k) =>
+      expectTruncationsRefused(k, FAST_FUZZ.truncations),
+    );
   });
 
   describe("fuzz: decoders never throw, and accept only what an encoder writes", () => {
@@ -767,35 +726,12 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
       expect(accepted).toBeLessThan(2000);
     });
 
-    it.each(kinds)("%s: every single-bit flip of valid messages", (_, k) => {
-      const rng = new Mulberry32(0xf1f + k.type);
-      const w = newWriter();
-      for (let i = 0; i < 12; i++) {
-        const bytes = k.random(rng, w);
-        // Long text and cvar messages: a seeded sample of bits instead of all of them.
-        const bits = bytes.length * 8;
-        const step = bits > 768 ? Math.ceil(bits / 768) : 1;
-        for (let bit = rng.nextInt(step); bit < bits; bit += step) {
-          const flipped = bytes.slice();
-          flipped[bit >> 3] = (flipped[bit >> 3] as number) ^ (1 << (bit & 7));
-          decodeEverywhere(flipped, flipped.length, w);
-        }
-      }
-    });
+    it.each(kinds)("%s: every single-bit flip of valid messages", (_, k) =>
+      expectBitFlipsSafe(k, FAST_FUZZ.bitFlips),
+    );
 
-    it("random multi-byte corruption of snapshots and inputs", () => {
-      const rng = new Mulberry32(0xc0de);
-      const w = newWriter();
-      for (const type of [MSG_SNAPSHOT, MSG_INPUT]) {
-        const k = kindOf(type);
-        for (let i = 0; i < 2000; i++) {
-          const bytes = k.random(rng, w);
-          const n = 1 + rng.nextInt(4);
-          for (let j = 0; j < n; j++) bytes[rng.nextInt(bytes.length)] = rng.nextInt(256);
-          decodeEverywhere(bytes, bytes.length, w);
-        }
-      }
-    });
+    it("random multi-byte corruption of snapshots and inputs", () =>
+      expectCorruptionsSafe(FAST_FUZZ.corruptions));
   });
 
   it("fits the v2 sizes (M3 design §2.1 goldens): 862 B full at 32 players, an INPUT of 4 cmds in 55 B", () => {

@@ -6,8 +6,9 @@ import { fromRoot } from "../../src/paths";
 
 // Every acceptance test ID a milestone lists in docs/09 must have a test whose top-level
 // describe starts with it, or `vitest run -t "^MV-"` would pass with the test missing (M2 design
-// §5, guards; risk "-t exits 0 when nothing matches"). From M3 an ID may also have a tier (D-032,
-// M3 design §2.16): its long legs (`pnpm test:long`, `packages/<pkg>/long/**/*.long.ts`) or
+// §5, guards; risk "-t exits 0 when nothing matches"). An ID may also have a tier (D-032, M3
+// design §2.16; from M3, and M2's MV-06 and MV-19 since D-032's amendment): its long legs
+// (`pnpm test:long`, `packages/<pkg>/long/**/*.long.ts`) or
 // real-time legs (`pnpm test:load`, `packages/tools/load/*.load.ts`) need a describe there too,
 // besides the fast smoke in a `test/` file. A test that lands in a later increment of the
 // milestone waits in `pending` ("<ID>" for the fast file, "<ID> long" or "<ID> load" for a tier),
@@ -41,13 +42,20 @@ const MILESTONES: Readonly<Record<string, Milestone>> = {
       "MV-19",
       "NET-03",
     ],
+    // D-032 (amended at M3 increment 6): MV-06's full phase sweep runs in the long tier, a sample
+    // of it in the fast one; MV-19's Vite library mode leg runs in the long tier, its in-process
+    // repeat and esbuild leg in the fast one.
+    tiers: { "MV-06": "long", "MV-19": "long" },
     pending: {},
   },
   M3: {
     ids: ["NET-01", "NET-02", "NET-04", "NET-05", "NET-07", "NET-08", "NET-09", "NET-10", "NET-12"],
     // §2.16 names NET-02, NET-04, NET-12 (long) and NET-09 (load); §5 and §6 increment 7 give
-    // NET-05 long legs too (16 clients in increment 7, 64 players in increment 10).
+    // NET-05 long legs too (16 clients in increment 7, 64 players in increment 10). D-032's
+    // amendment (increment 6) moved NET-01's full fuzz counts and NET-04's extra seeds,
+    // browser-like and onset runs to the long tier, so both have long describes now.
     tiers: {
+      "NET-01": "long",
       "NET-02": "long",
       "NET-04": "long",
       "NET-05": "long",
@@ -55,12 +63,13 @@ const MILESTONES: Readonly<Record<string, Milestone>> = {
       "NET-09": "load",
     },
     // NET-01's fast test covers the v2 full snapshots since increment 4 (deltas and the deferred
-    // list extend it in increments 8 and 10); NET-04 keeps its M2 fast test until increment 9;
-    // NET-09's fast in-process proxy landed in increment 6, its load leg comes in increment 18.
+    // list extend it in increments 8 and 10); NET-04 keeps its M2 fast test until increment 9,
+    // which adds its 16-client legs to its long file (`net-04-reconciliation.long.ts`, holding
+    // the M2 runs the fast tier leaves out since D-032's amendment); NET-09's fast in-process
+    // proxy landed in increment 6, its load leg comes in increment 18.
     pending: {
       "NET-02": "increment 8",
       "NET-02 long": "increment 9",
-      "NET-04 long": "increment 9",
       "NET-05": "increment 7",
       "NET-05 long": "increment 7",
       "NET-07": "increment 11",
@@ -206,6 +215,8 @@ describe("acceptance ID lists", () => {
     ["shared/test/net/codecs.test.ts", "fast"],
     ["tools/test/net/net-04-reconciliation.test.ts", "fast"],
     ["tools/long/net-04-sixteen-clients.long.ts", "long"],
+    ["tools/long/mv-06-slopes.long.ts", "long"],
+    ["shared/long/net-01-codec-fuzz.long.ts", "long"],
     ["client/long/perf/view-frame-allocation.long.ts", "long"],
     ["tools/load/net-09-server-perf.load.ts", "load"],
     ["tools/long/helpers.ts", null],

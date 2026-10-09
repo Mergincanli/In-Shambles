@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import {
   copyPlayerState,
   PlayerState,
@@ -20,7 +19,6 @@ import {
   runInputCodec,
   runSnapshotCodec,
 } from "../../bench/codec.bench";
-import { fromRoot } from "../../src/paths";
 
 // Keeps the codec part of `pnpm bench` compiling and its workload honest; timings are not
 // asserted (machine variance), only the cases, the round trips and the verdict logic.
@@ -104,39 +102,4 @@ describe("codec bench verdict", () => {
     expect(codecStrictFailure(fakeResult(700, 1))).toBe(true);
     expect(codecStrictFailure(fakeResult(700, 0, 1))).toBe(true);
   });
-});
-
-describe("pnpm bench entry, codec part", () => {
-  const run = (...args: string[]) =>
-    spawnSync(
-      process.execPath,
-      [
-        "--import",
-        "tsx",
-        "bench/run.ts",
-        "--calls",
-        "1000",
-        "--warmup",
-        "0",
-        "--pmove-ticks",
-        "20",
-        "--pmove-warmup",
-        "0",
-        ...args,
-      ],
-      { cwd: fromRoot("packages", "tools"), encoding: "utf8" },
-    );
-
-  it("prints the codec report after the pmove report, and exits 0", () => {
-    const out = run("--codec-calls", "2000", "--codec-warmup", "1000");
-    expect(out.status, out.stderr).toBe(0);
-    expect(out.stdout).toMatch(/budget 5000 ns: (PASS|FAIL)[\s\S]*budget 30000 ns: (PASS|FAIL)/);
-    expect(out.stdout).toMatch(/INPUT, 4 cmds \(55 B\) encode\+decode: [\d.]+ ns/);
-    expect(out.stdout).toMatch(/failed round trips: 0/);
-  }, 30_000);
-
-  it("rejects bad codec counts with exit code 2", () => {
-    expect(run("--codec-calls", "0").status).toBe(2);
-    expect(run("--codec-warmup", "1.5").status).toBe(2);
-  }, 30_000);
 });

@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import {
   BUTTON_JUMP,
   HULL_MINS,
@@ -26,7 +25,6 @@ import {
   runPmoveBench,
   runPmoveTicks,
 } from "../../bench/pmove.bench";
-import { fromRoot } from "../../src/paths";
 
 // Keeps the pmove half of `pnpm bench` compiling and its workload honest; timings are not
 // asserted (machine variance), only the workload, what the loop simulates, and the verdict logic.
@@ -177,40 +175,4 @@ describe("pmove bench verdict", () => {
     expect(pmoveStrictFailure(fakeResult(5001, 0))).toBe(true);
     expect(pmoveStrictFailure(fakeResult(2000, 1))).toBe(true);
   });
-});
-
-describe("pnpm bench entry, pmove part", () => {
-  // A short codec part: codec-bench.test.ts covers it.
-  const run = (...args: string[]) =>
-    spawnSync(
-      process.execPath,
-      [
-        "--import",
-        "tsx",
-        "bench/run.ts",
-        "--calls",
-        "1000",
-        "--warmup",
-        "1000",
-        "--codec-calls",
-        "1000",
-        "--codec-warmup",
-        "0",
-        ...args,
-      ],
-      { cwd: fromRoot("packages", "tools"), encoding: "utf8" },
-    );
-
-  it("prints the pmove report after the trace report, and exits 0", () => {
-    const out = run("--pmove-ticks", "50", "--pmove-warmup", "50");
-    expect(out.status, out.stderr).toBe(0);
-    expect(out.stdout).toMatch(/budget 1000 ns: (PASS|FAIL)[\s\S]*budget 5000 ns: (PASS|FAIL)/);
-    expect(out.stdout).toContain(`pmove on movement_lab: ${PMOVE_PLAYERS} players`);
-    expect(out.stdout).toMatch(/GCs during the pmove loop: \d+/);
-  }, 30_000);
-
-  it("rejects bad pmove counts with exit code 2", () => {
-    expect(run("--pmove-ticks", "0").status).toBe(2);
-    expect(run("--pmove-warmup", "1.5").status).toBe(2);
-  }, 30_000);
 });

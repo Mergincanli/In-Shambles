@@ -6,5 +6,5 @@
     "types": [],
     "noUncheckedIndexedAccess": true
   },
-  "include": ["src", "test"]
+  "include": ["src", "test", "long"]
 }

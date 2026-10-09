@@ -8,6 +8,9 @@ import { describe, expect, it } from "vitest";
 const clientDir = fileURLToPath(new URL("..", import.meta.url));
 const mapsDir = fileURLToPath(new URL("../../../content/maps", import.meta.url));
 
+// The client's production build (Vite, the page, the app with its build hash, the server Worker
+// chunk and every committed map), the long tier's (D-032): a whole Vite build, about 3 s of CPU.
+
 describe("client production build", () => {
   it("builds the page, the app with the build hash, the server Worker and every map", async () => {
     const outDir = mkdtempSync(join(tmpdir(), "client-build-"));

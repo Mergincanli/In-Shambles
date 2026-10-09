@@ -1,18 +1,14 @@
 import { spawnSync } from "node:child_process";
 import {
   type CollisionWorld,
-  HULL_CROUCHED_MAXS,
   HULL_MINS,
-  HULL_STANDING_MAXS,
   MASK_PLAYERSOLID,
   MASK_SOLID,
-  pointContents,
   positionTest,
   quantizeOrigin,
   TraceResult,
   traceBox,
   traceRay,
-  vec3,
 } from "@game/shared";
 import { describe, expect, it } from "vitest";
 import {
@@ -26,7 +22,6 @@ import {
   DEFAULT_SEED,
   formatTraceBench,
   GROUND_PROBE,
-  loadMovementLab,
   MOVE_MAX,
   meetsBudget,
   RAY_MAX,
@@ -36,37 +31,18 @@ import {
   STEP,
   strictFailure,
   type TraceBenchResult,
-  type TraceWorkload,
   WARMUP_ROUNDS,
   warmupCalls,
   weightedAverageNs,
 } from "../../bench/trace.bench";
 import { fromRoot } from "../../src/paths";
+import { endOf, expectStartsClear, maxsOf, set, startOf, startsClear, world } from "./traceCases";
 
 // Keeps `pnpm bench` compiling and its workload honest; timings are not asserted (machine
 // variance), only the workload's shape, what the loops compute, and the verdict logic.
 
-const world = loadMovementLab();
 const small = buildTraceWorkload(world, DEFAULT_SEED, 256);
 const full = buildTraceWorkload(world);
-
-function set(w: TraceWorkload, name: string): CaseSet {
-  const s = w.sets.find((c) => c.category.name === name);
-  if (s === undefined) throw new Error(`no ${name} cases`);
-  return s;
-}
-
-function maxsOf(s: CaseSet, i: number) {
-  return s.hull[i] === 0 ? HULL_STANDING_MAXS : HULL_CROUCHED_MAXS;
-}
-
-function startOf(s: CaseSet, i: number) {
-  return vec3(s.start[3 * i] as number, s.start[3 * i + 1] as number, s.start[3 * i + 2] as number);
-}
-
-function endOf(s: CaseSet, i: number) {
-  return vec3(s.end[3 * i] as number, s.end[3 * i + 1] as number, s.end[3 * i + 2] as number);
-}
 
 /** Horizontal length and signed vertical change of case i. */
 function delta(s: CaseSet, i: number): [number, number] {
@@ -76,11 +52,6 @@ function delta(s: CaseSet, i: number): [number, number] {
     Math.hypot((b[0] as number) - (a[0] as number), (b[1] as number) - (a[1] as number)),
     (b[2] as number) - (a[2] as number),
   ];
-}
-
-function startsClear(s: CaseSet, i: number): boolean {
-  if (s.category.query === "ray") return (pointContents(world, startOf(s, i)) & MASK_SOLID) === 0;
-  return positionTest(world, startOf(s, i), HULL_MINS, maxsOf(s, i), MASK_PLAYERSOLID);
 }
 
 /** The sink a timed loop must return, from the queries called directly. */
@@ -145,14 +116,9 @@ describe("trace bench workload", () => {
     expect(buildTraceWorkload(world, 1, 256).sets[0]?.start).not.toEqual(small.sets[0]?.start);
   });
 
-  it.each([DEFAULT_SEED, 1, 2])("starts every trace clear (seed %i, full size)", (seed) => {
-    const w = seed === DEFAULT_SEED ? full : buildTraceWorkload(world, seed);
-    for (const name of ["move", "ground", "step", "ray"]) {
-      const s = set(w, name);
-      let solid = 0;
-      for (let i = 0; i < w.size; i++) if (!startsClear(s, i)) solid++;
-      expect(solid, name).toBe(0);
-    }
+  // Seeds 1 and 2 at full size are the long tier's (D-032, `trace-bench-workload.long.ts`).
+  it.each([DEFAULT_SEED])("starts every trace clear (seed %i, full size)", () => {
+    expectStartsClear(full);
   });
 
   it("keeps pmove-sized moves, probes and steps", () => {
@@ -322,14 +288,19 @@ describe("trace bench verdict", () => {
 });
 
 describe("pnpm bench entry", () => {
-  // Short pmove and codec parts: pmove-bench.test.ts and codec-bench.test.ts cover them.
-  const run = (...args: string[]) =>
-    spawnSync(
+  // One end-to-end smoke of the whole CLI with tiny counts (D-032). Each part's own run and the
+  // refused counts are the long tier's (`packages/tools/long/bench-cli.long.ts`).
+  it("runs the trace, pmove and codec parts in order with tiny counts, and exits 0", () => {
+    const out = spawnSync(
       process.execPath,
       [
         "--import",
         "tsx",
         "bench/run.ts",
+        "--calls",
+        "1000",
+        "--warmup",
+        "1000",
         "--pmove-ticks",
         "20",
         "--pmove-warmup",
@@ -338,21 +309,15 @@ describe("pnpm bench entry", () => {
         "1000",
         "--codec-warmup",
         "0",
-        ...args,
       ],
       { cwd: fromRoot("packages", "tools"), encoding: "utf8" },
     );
-
-  it("prints the machine, the table and the verdict, and exits 0", () => {
-    const out = run("--calls", "1000", "--warmup", "1000");
     expect(out.status, out.stderr).toBe(0);
     expect(out.stdout).toMatch(/^node v\d+\.\d+\.\d+, \S/);
-    expect(out.stdout).toMatch(/budget 1000 ns: (PASS|FAIL)/);
+    expect(out.stdout).toMatch(
+      /budget 1000 ns: (PASS|FAIL)[\s\S]*budget 5000 ns: (PASS|FAIL)[\s\S]*budget 30000 ns: (PASS|FAIL)/,
+    );
     expect(out.stdout).toMatch(/GCs during timed loops: \d+/);
-  }, 30_000);
-
-  it("rejects bad counts with exit code 2", () => {
-    expect(run("--calls", "0").status).toBe(2);
-    expect(run("--warmup", "1.5").status).toBe(2);
+    expect(out.stdout).toMatch(/failed round trips: 0/);
   }, 30_000);
 });

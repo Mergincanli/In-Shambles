@@ -11,11 +11,7 @@ import {
   runDeterminismProbe,
 } from "../../src/scenarios/determinismProbe";
 import { logMeasured } from "../../src/scenarios/metrics";
-import {
-  bundleProbeWithServerBuild,
-  bundleProbeWithVite,
-  runProbeBundle,
-} from "../../src/scenarios/probeBuilds";
+import { bundleProbeWithServerBuild, runProbeBundle } from "../../src/scenarios/probeBuilds";
 
 /** The first line `packages/server/build.mjs` writes into every bundle (its esbuild banner). */
 const SERVER_BUILD_BANNER =
@@ -24,7 +20,9 @@ const SERVER_BUILD_BANNER =
 // docs/03 §8 MV-19, M2 design §5: the same inputs give bit-identical states over 10k ticks, run
 // twice and across the client and server builds. A seeded sticky cmd stream on movement_lab, with
 // a teleport to the next anchor every 1000 ticks, is digested every tick. The browser leg is the
-// pmove vectors, which `pnpm test:browser` replays in Chromium, Firefox and WebKit (D-022).
+// pmove vectors, which `pnpm test:browser` replays in Chromium, Firefox and WebKit (D-022). Tiers
+// (D-032): the client build's leg (Vite library mode) runs in `pnpm test:long`; `pnpm test:movement`
+// runs both.
 
 const cmapPath = coursePath("movement_lab");
 const bytes = () => new Uint8Array(readFileSync(cmapPath));
@@ -79,10 +77,9 @@ describe("MV-19: determinism across runs and builds", () => {
       if (outDir !== "") rmSync(outDir, { recursive: true, force: true, maxRetries: 5 });
     });
 
-    it.each([
-      ["the server's esbuild build", async () => bundleProbeWithServerBuild(outDir)],
-      ["Vite library mode, minified", () => bundleProbeWithVite(outDir)],
-    ])(
+    // Vite library mode, minified (the client's build), is the long tier's (D-032,
+    // `packages/tools/long/mv-19-determinism.long.ts`).
+    it.each([["the server's esbuild build", async () => bundleProbeWithServerBuild(outDir)]])(
       "%s gives the same digests",
       async (_name, bundle) => {
         const file = await bundle();

@@ -27,9 +27,9 @@ pnpm typecheck && pnpm lint && pnpm test
 | `pnpm dev:server` | Dedicated server from source on port 28700 (stop with Ctrl+C); JSON log lines on stdout |
 | `pnpm build` | Production client build and server bundle (`packages/server/dist/main.js`) |
 | `pnpm test` | The fast tests (about 40 s); the last line gives the run's wall and CPU time against its budget |
-| `pnpm test:long` | The long tier: long deterministic runs and the native-ESM allocation guards (CI runs both) |
-| `pnpm test:movement` | Movement tests (MV-xx) on the greybox courses, each printing measured vs. target |
-| `pnpm test:net` | Netcode tests (NET-xx): codec checks, and the real match and client net code under the network profiles; NET-04 prints a summary line per profile |
+| `pnpm test:long` | The long tier: long deterministic runs and full sweeps, the native-ESM allocation guards, the real-process smokes (server, bots, bench CLI) and the client production build; run it too when you change those entry points (CI runs both) |
+| `pnpm test:movement` | Movement tests (MV-xx) on the greybox courses, each printing measured vs. target; runs the fast tier, then the long tier's MV legs |
+| `pnpm test:net` | Netcode tests (NET-xx): codec checks, and the real match and client net code under the network profiles; NET-04 prints a summary line per profile; runs the fast tier, then the long tier's NET legs |
 | `pnpm test:balance` | Balance tests (BAL-xx) |
 | `pnpm test:browser` | Determinism, trace and pmove vectors in headless browsers (`BROWSERS=chromium,firefox,webkit`, default `chromium`), plus the client e2e smoke test in headless Chromium |
 | `pnpm typecheck` | Type-check all packages |
