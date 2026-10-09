@@ -38,6 +38,8 @@ export const CAPSULE_STANDING_HEIGHT = (HULL_STANDING_MAXS[2] as number) - (HULL
 export const CAPSULE_CROUCHED_HEIGHT = (HULL_CROUCHED_MAXS[2] as number) - (HULL_MINS[2] as number);
 /** A crouch squashes the capsule to the crouched hull's height. */
 export const CROUCH_SCALE = CAPSULE_CROUCHED_HEIGHT / CAPSULE_STANDING_HEIGHT;
+/** How much a crouch takes off the height scale. */
+const CROUCH_DROP = 1 - CROUCH_SCALE;
 /** The facing nub: a small dark block at eye height on the capsule's front, u. */
 const NUB_SIZE: readonly [number, number, number] = [8, 6, 6];
 /** The nub's centre above the feet: the standing eye (origin − mins + view height). */
@@ -45,6 +47,10 @@ const NUB_HEIGHT = VIEW_HEIGHT_STANDING - (HULL_MINS[2] as number);
 const NUB_COLOR = 0x202020;
 /** Max instances: one per player slot. */
 export const PLAYER_INSTANCES = FRAME_SLOTS;
+
+/** `PlayerCapsules.update`'s crouch blend: this frame's time and the blend's length, ms. */
+export const BLEND_DT_MS = 0;
+export const BLEND_MS = 1;
 
 /** Team ids with a colour row in `rgb` (anything else draws neutral). */
 const TEAMS = [TEAM_NONE, TEAM_1, TEAM_2] as const;
@@ -57,8 +63,9 @@ const TEAMS = [TEAM_NONE, TEAM_1, TEAM_2] as const;
  * feet and turns with the view yaw, the nub showing where it faces. Placement goes through
  * `space.ts`. `update` packs the visible slots into the first instances and allocates nothing.
  *
- * Remote interpolation (increment 7) blends the crouch and feeds a smooth `RemoteView`; until then
- * the view is the newest snapshot as it stands.
+ * The view is the interpolated one (D-037); a crouch or a stand-up blends the height over
+ * `cl_remoteCrouchBlendMs` (the M3 design §2.8 "renderer blends crouch height"), at once on a
+ * slot's appearance or teleport.
  */
 export class PlayerCapsules {
   /** Add this to the scene. */
@@ -78,6 +85,9 @@ export class PlayerCapsules {
   /** The team each instance's colour holds (−1: none written). */
   private readonly instanceTeam = new Int16Array(PLAYER_INSTANCES).fill(-1);
   private readonly pose = new Float64Array(UPRIGHT_SLOTS);
+  /** Each slot's drawn height scale (1 standing, CROUCH_SCALE crouched, between while blending). */
+  readonly height = new Float64Array(PLAYER_INSTANCES).fill(1);
+  private readonly blendStep = new Float64Array(1);
 
   constructor() {
     const r = unitsToMeters(CAPSULE_RADIUS);
@@ -119,22 +129,40 @@ export class PlayerCapsules {
     }
   }
 
-  /** Draws every visible slot of `view`. */
-  update(view: RemoteView): void {
+  /**
+   * Draws every visible slot of `view`. `blend` ([BLEND_DT_MS], [BLEND_MS]) times the crouch
+   * blend; without it (or with a 0 length) a crouch squashes the capsule at once.
+   */
+  update(view: RemoteView, blend: Float64Array | null = null): void {
     const pose = this.pose;
     const out = this.matrices.array as Float32Array;
     const colors = this.colors.array as Float32Array;
     const rgb = this.rgb;
     const feet = HULL_MINS[2] as number;
+    const heights = this.height;
+    // The blend's step per frame in height scale, in a slot: a ternary joining a module constant
+    // double would box it per frame under native ES modules.
+    const b = this.blendStep;
+    b[0] = 1;
+    if (blend !== null && (blend[BLEND_MS] as number) > 0) {
+      b[0] = ((blend[BLEND_DT_MS] as number) / (blend[BLEND_MS] as number)) * CROUCH_DROP;
+    }
+    const step = b[0] as number;
     let n = 0;
     let recolored = false;
     for (let s = 0; s < FRAME_SLOTS; s++) {
       if (view.visible[s] !== 1) continue;
+      const want = 1 - (view.crouched[s] as number) * CROUCH_DROP;
+      let h = heights[s] as number;
+      if (view.teleported[s] === 1 || step >= CROUCH_DROP) h = want;
+      else if (h < want) h = Math.min(want, h + step);
+      else if (h > want) h = Math.max(want, h - step);
+      heights[s] = h;
       pose[UPRIGHT_X] = view.x[s] as number;
       pose[UPRIGHT_Y] = view.y[s] as number;
       pose[UPRIGHT_Z] = (view.z[s] as number) + feet;
       pose[UPRIGHT_YAW] = view.yaw[s] as number;
-      pose[UPRIGHT_HEIGHT] = view.crouched[s] === 1 ? CROUCH_SCALE : 1;
+      pose[UPRIGHT_HEIGHT] = h;
       uprightToThree(pose, out, n * 16);
       const team = view.team[s] as number;
       if (this.instanceTeam[n] !== team) {

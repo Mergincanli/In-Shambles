@@ -1,14 +1,23 @@
 import { PerformanceObserver } from "node:perf_hooks";
 import {
+  ClientNetSettings,
   ClientSim,
+  JM_CHECKED,
+  NetStats,
   type PortLike,
   PortTransport,
   RandomWalk,
+  RemoteInterpolator,
+  RemoteJumpMeter,
   RouteInput,
+  SnapshotStore,
   type SocketLike,
   STAT_CLOCK_ADJUSTMENTS,
   STAT_CORRECTIONS,
   STAT_HARD_RESYNCS,
+  STAT_REMOTE_EVENTS,
+  STAT_REMOTE_EXTRAPOLATED,
+  STAT_REMOTE_HELD,
   STAT_TELEPORTS,
   StrafeCircuit,
   WebSocketTransport,
@@ -99,6 +108,7 @@ import {
   pointContents,
   positionContents,
   positionTest,
+  pushEntityEvent,
   quantizePlayerState,
   refreshPmoveParams,
   registerPmoveCvars,
@@ -1185,9 +1195,97 @@ function runWsTransport(n: number): void {
   extra[3] = wsClient.stats().sent;
 }
 
+// The remote interpolation per frame (D-037): 16 remotes in a client snapshot store, filled as the
+// store would hold them (every tick at 60 Hz, frames at 144 Hz on a fractional fake clock), moving
+// at up to 600 u/s across the walled room (the slope and the rotated box clamp the extrapolation
+// traces), crouching, with movement events, a teleport-counter step every 64 ticks (one remote
+// in turn), one remote removed for 30 ticks every 300 and back, and every 512 ticks a 12-tick
+// snapshot outage, so slots extrapolate, hold and rejoin with an offset; the NET-05 meter runs
+// on every frame. The auto delay sizes itself from the arrivals.
+class InterpRig {
+  readonly now = new Float64Array(2);
+  readonly store = new SnapshotStore();
+  readonly settings = new ClientNetSettings();
+  readonly stats = new NetStats(this.now);
+  readonly interp: RemoteInterpolator;
+  readonly meter = new RemoteJumpMeter();
+  tick = 0;
+
+  constructor() {
+    this.interp = new RemoteInterpolator(this.store, this.now, this.settings, this.stats, world);
+  }
+
+  /** Stores tick `t`'s frame: the receiver (slot 0) and 16 remotes (slots 3, 6, …, 48). */
+  store1(t: number): void {
+    const ring = this.store.ring;
+    const f = ring.slot(t);
+    f.clear();
+    f.setPresent(0, t);
+    for (let k = 1; k <= 16; k++) {
+      const s = k * 3;
+      if (k === 16 && t % 300 < 30) continue;
+      f.setPresent(s, t);
+      // Back and forth along x over 768 u at 300–600 u/s, one row of y per remote.
+      const period = 80 + 5 * k;
+      const phase = t % (2 * period);
+      const dir = phase < period ? 1 : -1;
+      const along = phase < period ? phase : 2 * period - phase;
+      f.originX[s] = (-384 + (along * 768) / period) * 32;
+      f.originY[s] = (-480 + 60 * k) * 32;
+      f.originZ[s] = 24 * 32 + ((t + k) & 3) * 16;
+      f.entVelX[s] = (dir * 768 * 60) / period;
+      f.entVelY[s] = 0;
+      f.entVelZ[s] = 0;
+      f.yaw[s] = (t * 300 + k * 4000) & 0xffff;
+      f.pitch[s] = ((t + k) % 200) - 100;
+      f.flags[s] = PMF_GROUNDED | (((t >> 5) + k) % 3 === 0 ? PMF_CROUCHED : 0);
+      f.team[s] = 1 + (k & 1);
+      f.teleportSeq[s] = ((t >> 10) + (k === ((t >> 6) & 15) + 1 ? 1 : 0)) & 0xff;
+      if ((t + k) % 7 === 0) pushEntityEvent(eventSeqs, evKinds, evValues, s, PMEV_LAND, t & 0xff);
+      f.eventSeq[s] = eventSeqs[s] as number;
+      f.evKind[s * 2] = evKinds[s * 2] as number;
+      f.evKind[s * 2 + 1] = evKinds[s * 2 + 1] as number;
+      f.evValue[s * 2] = evValues[s * 2] as number;
+      f.evValue[s * 2 + 1] = evValues[s * 2 + 1] as number;
+    }
+    ring.store(t);
+    this.store.newestTick = t;
+    this.interp.onStored(t);
+  }
+}
+
+const eventSeqs = new Uint8Array(64);
+const evKinds = new Uint8Array(128);
+const evValues = new Uint8Array(128);
+let interpRig: InterpRig | null = null;
+
+function runInterp(n: number): void {
+  if (interpRig === null) interpRig = new InterpRig();
+  const rig = interpRig;
+  const now = rig.now;
+  for (let i = 0; i < n; i++) {
+    now[0] = (now[0] as number) + 1000 / 144;
+    now[1] = (now[1] as number) + 1000 / 144;
+    while ((now[1] as number) >= 1000 / 60) {
+      now[1] = (now[1] as number) - 1000 / 60;
+      const t = ++rig.tick;
+      if ((t & 511) >= 12) rig.store1(t);
+    }
+    rig.stats.advance();
+    rig.interp.update(0);
+    rig.meter.measure(rig.interp, true);
+  }
+  const totals = rig.stats.totals;
+  outcomes[0] = (totals[STAT_REMOTE_EXTRAPOLATED] as number) + (totals[STAT_REMOTE_HELD] as number);
+  outcomes[1] = totals[STAT_REMOTE_EVENTS] as number;
+  outcomes[2] = rig.meter.t[JM_CHECKED] as number;
+  extra[0] = totals[STAT_REMOTE_HELD] as number;
+}
+
 const WORKLOADS: Record<string, (n: number) => void> = {
   botInput: runBotInput,
   codec: runCodec,
+  interp: runInterp,
   match: runMatch,
   pmove: runPmove,
   pmoveModes: runPmoveModes,

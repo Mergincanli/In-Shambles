@@ -3,8 +3,8 @@ import { CvarFlag, type CvarRegistry } from "@game/shared";
 /**
  * The client-side net settings (docs/06 §7, M2 design §4): ARCHIVE cvars, saved per player and
  * never replicated, so they shape only this client's clock and smoothing, never the simulation.
- * The rest of the client cvars (sensitivity, field of view, view smoothing, HUD toggles) register
- * with the console.
+ * The remote players' interpolation reads the last three (D-037). The rest of the client cvars
+ * (sensitivity, field of view, view smoothing, HUD toggles) register with the console.
  */
 export const CLIENT_NET_CVARS = Object.freeze([
   Object.freeze({
@@ -31,6 +31,30 @@ export const CLIENT_NET_CVARS = Object.freeze([
     max: 16384,
     description: "A correction farther than this snaps instead of smoothing, u",
   }),
+  Object.freeze({
+    name: "cl_interpDelay",
+    type: "int" as const,
+    default: 0, // design value (D-037: 0 sizes it from the snapshot stream)
+    min: 0,
+    max: 6,
+    description: "Remote players' interpolation delay, ticks: 0 auto, else 2–6 (1 counts as 2)",
+  }),
+  Object.freeze({
+    name: "cl_remoteSmoothMs",
+    type: "float" as const,
+    default: 100, // ESTIMATE (M3 design §2.8)
+    min: 0,
+    max: 1000,
+    description: "Time a remote player's rejoin offset takes to decay after extrapolating, ms",
+  }),
+  Object.freeze({
+    name: "cl_remoteCrouchBlendMs",
+    type: "float" as const,
+    default: 100, // ESTIMATE (M3 design §2.8)
+    min: 0,
+    max: 1000,
+    description: "Time a remote player's capsule takes to crouch or stand up, ms",
+  }),
 ]);
 
 /** Registers CLIENT_NET_CVARS as ARCHIVE cvars. */
@@ -53,6 +77,10 @@ export class ClientNetSettings {
   inputBuffer = 2;
   correctionSmoothMs = 100;
   teleportDist = 64;
+  /** 0 = auto (InterpDelay), else the fixed delay in ticks. */
+  interpDelay = 0;
+  remoteSmoothMs = 100;
+  remoteCrouchBlendMs = 100;
   version = -1;
   registry: CvarRegistry | null = null;
 }
@@ -63,6 +91,9 @@ export function refreshClientNetSettings(reg: CvarRegistry, out: ClientNetSettin
   out.inputBuffer = reg.getNumber("cl_inputBuffer", 2);
   out.correctionSmoothMs = reg.getNumber("cl_correctionSmoothMs", 100);
   out.teleportDist = reg.getNumber("cl_teleportDist", 64);
+  out.interpDelay = reg.getNumber("cl_interpDelay", 0);
+  out.remoteSmoothMs = reg.getNumber("cl_remoteSmoothMs", 100);
+  out.remoteCrouchBlendMs = reg.getNumber("cl_remoteCrouchBlendMs", 100);
   out.version = reg.version;
   out.registry = reg;
   return true;

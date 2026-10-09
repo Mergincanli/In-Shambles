@@ -13,8 +13,8 @@ import {
 } from "../../src/bots/summary";
 
 // The bots summary (M3 design §2.15, §6 increment 6 "summary golden"): the aggregate over the bots
-// that joined, PASS/FAIL against docs/10 §4 and the prediction's health (D-036), and the
-// markdown, pinned by a golden file.
+// that joined, PASS/FAIL against docs/10 §4, the prediction's health (D-036) and smooth remotes
+// (NET-05 violations, D-037), and the markdown, pinned by a golden file.
 
 const config: SummaryConfig = {
   count: 2,
@@ -71,6 +71,10 @@ function bot(id: number, over: Partial<BotNumbers> = {}): BotNumbers {
     kbUpPerS: 3.65,
     snapshotBytes: { p50: 63, p95: 63, max: 63 },
     deltaShare: 0,
+    interpDelay: { mean: 3.5, max: 4 },
+    extrapolatedShare: 0.0025,
+    remoteJumps: 0,
+    remoteJudged: 7000,
     laps: id % 5 < 3 ? 6 : null,
     stuckShare: id % 5 < 3 ? 0.01 : null,
     ...over,
@@ -110,6 +114,10 @@ describe("bots summary", () => {
         maxCorrection: 3.5,
         mispredictions: 2,
         snapshotBytes: { p50: 80, p95: 85, max: 99 },
+        interpDelay: { mean: 4.5, max: 6 },
+        extrapolatedShare: 0.01,
+        remoteJumps: 3,
+        remoteJudged: 6000,
       }),
       bot(2, { joined: false, closed: "kicked: server full", kbDownPerS: 99, maxCorrection: 50 }),
     ]);
@@ -126,6 +134,10 @@ describe("bots summary", () => {
       bufferLow: -1,
       starved: 4,
       mispredictions: 2,
+      interpDelay: { mean: 4, max: 6 },
+      extrapolatedShare: 0.01,
+      remoteJumps: 3,
+      remoteJudged: 13000,
     });
   });
 
@@ -183,11 +195,14 @@ describe("bots summary", () => {
     expect(failing(bots, edge)).toEqual([]);
   });
 
-  it("fails a strike on either side and a correction the server's starve does not explain", () => {
+  it("fails a strike on either side, a correction the server's starve does not explain, and a remote jump", () => {
     expect(failing([bot(0), bot(1)], { ...server, strikes: 1 })).toEqual(["server strikes"]);
     expect(failing([bot(0), bot(1, { strikes: 2 })])).toEqual(["bot strikes"]);
     expect(failing([bot(0), bot(1, { mispredictions: 1 })])).toEqual([
       "mispredictions (corrections not on a starved snapshot)",
+    ]);
+    expect(failing([bot(0), bot(1, { remoteJumps: 1 })])).toEqual([
+      "remote jumps (NET-05 violations)",
     ]);
   });
 

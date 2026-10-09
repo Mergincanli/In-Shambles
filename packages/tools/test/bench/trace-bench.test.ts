@@ -309,6 +309,10 @@ describe("pnpm bench entry", () => {
         "1000",
         "--codec-warmup",
         "0",
+        "--interp-frames",
+        "1000",
+        "--interp-warmup",
+        "0",
       ],
       { cwd: fromRoot("packages", "tools"), encoding: "utf8" },
     );
@@ -319,5 +323,6 @@ describe("pnpm bench entry", () => {
     );
     expect(out.stdout).toMatch(/GCs during timed loops: \d+/);
     expect(out.stdout).toMatch(/failed round trips: 0/);
+    expect(out.stdout).toMatch(/clean stream: [\d.]+ ns per frame \(estimate 20000 ns, reported\)/);
   }, 30_000);
 });

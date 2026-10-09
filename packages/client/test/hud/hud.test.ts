@@ -11,7 +11,10 @@ import {
   NG_CORRECTION_MEAN,
   NG_CORRECTIONS,
   NG_COUNT,
+  NG_EXTRAPOLATED,
   NG_HARD_RESYNCS,
+  NG_HELD,
+  NG_INTERP_DELAY,
   NG_JITTER,
   NG_LOSS,
   NG_OFFSET,
@@ -34,6 +37,9 @@ import {
   STAT_COUNT,
   STAT_HARD_RESYNCS,
   STAT_PARAM_RESYNCS,
+  STAT_REMOTE_EXTRAPOLATED,
+  STAT_REMOTE_FRAMES,
+  STAT_REMOTE_HELD,
   STAT_SNAPSHOTS,
   STAT_SNAPSHOTS_LOST,
   STAT_STARVED,
@@ -62,23 +68,26 @@ describe("renderer panel", () => {
 });
 
 describe("netgraph", () => {
-  it("prints the link, correction, input, traffic and resync lines", () => {
+  it("prints the link, remote, correction, input, traffic and resync lines", () => {
     const v = new Float64Array(NG_COUNT);
     v[NG_RTT] = 151.6;
     v[NG_LOSS] = 2;
     v[NG_CORRECTION_MEAN] = 0.5;
     v[NG_BUFFER] = 4.04;
     v[NG_BUFFER_LOW] = 1;
+    v[NG_INTERP_DELAY] = 3;
+    v[NG_EXTRAPOLATED] = 1.25;
     const lines = netgraphLines(v, "wan-150-loss2");
-    expect(lines).toHaveLength(5);
+    expect(lines).toHaveLength(6);
     expect(lines[0]).toBe("link   rtt 152 ms  jitter 0.0 ms  loss 2.0%  snaps 0/s");
-    expect(lines[1]).toBe("corr   0/s  mean 0.50 u  max 0.00 u  offset 0.00 u");
-    expect(lines[2]).toBe("input  buffer 4.0 low 1 ticks  starved 0/s  clock adj 0");
-    expect(lines[3]).toBe("bytes  in 0.0 kB/s  out 0.0 kB/s");
-    expect(lines[4]).toBe("resync hard 0  params 0  net wan-150-loss2");
+    expect(lines[1]).toBe("remote interp 3 ticks (50 ms)  extrap 1.3%  held 0.0%");
+    expect(lines[2]).toBe("corr   0/s  mean 0.50 u  max 0.00 u  offset 0.00 u");
+    expect(lines[3]).toBe("input  buffer 4.0 low 1 ticks  starved 0/s  clock adj 0");
+    expect(lines[4]).toBe("bytes  in 0.0 kB/s  out 0.0 kB/s");
+    expect(lines[5]).toBe("resync hard 0  params 0  net wan-150-loss2");
     v[NG_RTT] = Number.NaN;
     expect(netgraphLines(v, null)[0]).toMatch(/^link {3}rtt - ms/);
-    expect(netgraphLines(v, null)[4]).toBe("resync hard 0  params 0");
+    expect(netgraphLines(v, null)[5]).toBe("resync hard 0  params 0");
   });
 });
 
@@ -93,6 +102,9 @@ describe("netgraph readout", () => {
     second[STAT_STARVED] = 3;
     second[STAT_BYTES_IN] = 5000;
     second[STAT_BYTES_OUT] = 700;
+    second[STAT_REMOTE_FRAMES] = 400;
+    second[STAT_REMOTE_EXTRAPOLATED] = 6;
+    second[STAT_REMOTE_HELD] = 2;
     // Totals differ from the last second, so a figure read from the wrong one shows.
     const totals = new Float64Array(STAT_COUNT).fill(1000);
     totals[STAT_CLOCK_ADJUSTMENTS] = 7;
@@ -101,6 +113,7 @@ describe("netgraph readout", () => {
     const stub = {
       stats: { totals, lastSecond: (out: Float64Array) => out.set(second) },
       clock: { rttMs: 101, jitterMs: 4.5, bufferHealth: 2.25, bufferLow: 1 },
+      remotes: { delayTicks: 4 },
       offset: {
         sample: (out: Float64Array) => {
           out[0] = 3;
@@ -129,12 +142,17 @@ describe("netgraph readout", () => {
       [NG_HARD_RESYNCS, 5],
       [NG_PARAM_RESYNCS, 6],
       [NG_BUFFER_LOW, 1],
+      [NG_INTERP_DELAY, 4],
+      [NG_EXTRAPOLATED, 1.5],
+      [NG_HELD, 0.5],
     ];
     expect(want).toHaveLength(NG_COUNT);
     for (const [i, x] of want) expect([i, v[i]]).toEqual([i, x]);
     // No snapshots due, no corrections: zeros, not NaN.
     second.fill(0);
     r.read(stub as unknown as ClientSim);
-    expect([v[NG_LOSS], v[NG_CORRECTION_MEAN]]).toEqual([0, 0]);
+    expect([v[NG_LOSS], v[NG_CORRECTION_MEAN], v[NG_EXTRAPOLATED], v[NG_HELD]]).toEqual([
+      0, 0, 0, 0,
+    ]);
   });
 });

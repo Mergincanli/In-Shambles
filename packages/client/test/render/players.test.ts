@@ -118,6 +118,46 @@ describe("PlayerCapsules (M3 design §1, render/players.ts)", () => {
     expect(standing.max.y - standing.min.y).toBeCloseTo(56 * METERS_PER_UNIT, 6);
   });
 
+  it("blends a crouch and a stand-up over cl_remoteCrouchBlendMs, at once on a teleport", () => {
+    const p = new PlayerCapsules();
+    const view = new RemoteView();
+    put(view, 0, 0, 0, 24);
+    const blend = new Float64Array([25, 100]);
+    p.update(view, blend);
+    expect(p.height[0]).toBe(1);
+    view.crouched[0] = 1;
+    // A quarter of the way per 25 ms frame: 1 → 0.714… after 100 ms.
+    const heights: number[] = [];
+    for (let i = 0; i < 5; i++) {
+      p.update(view, blend);
+      heights.push(p.height[0] as number);
+    }
+    expect(heights[0]).toBeCloseTo(1 - 0.25 * (1 - CROUCH_SCALE), 9);
+    expect(heights[3]).toBeCloseTo(CROUCH_SCALE, 9);
+    expect(heights[4]).toBeCloseTo(CROUCH_SCALE, 9);
+    for (let i = 1; i < heights.length; i++) {
+      expect(heights[i] as number).toBeLessThanOrEqual(heights[i - 1] as number);
+    }
+    // The capsule's matrix carries the blended height.
+    p.capsules.geometry.computeBoundingBox();
+    view.crouched[0] = 0;
+    p.update(view, blend);
+    const half = (p.capsules.geometry.boundingBox as Box3).clone().applyMatrix4(matrixOf(p, 0));
+    expect(half.max.y - half.min.y).toBeCloseTo(
+      56 * (CROUCH_SCALE + 0.25 * (1 - CROUCH_SCALE)) * METERS_PER_UNIT,
+      6,
+    );
+    // A teleport (or an appearance) takes the stance at once; so does no blend at all.
+    view.crouched[0] = 1;
+    view.teleported[0] = 1;
+    p.update(view, blend);
+    expect(p.height[0]).toBe(CROUCH_SCALE);
+    view.teleported[0] = 0;
+    view.crouched[0] = 0;
+    p.update(view, new Float64Array([25, 0]));
+    expect(p.height[0]).toBe(1);
+  });
+
   it("colours each capsule by team: orange, blue, neutral grey for none or an unknown team", () => {
     expect(TEAM_COLORS).toEqual({ [TEAM_NONE]: 0x9a9a9a, [TEAM_1]: 0xd9652b, [TEAM_2]: 0x2b8fd9 });
     expect(teamColor(3)).toBe(0x9a9a9a);

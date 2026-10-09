@@ -10,9 +10,13 @@ import {
   STAT_COUNT,
   STAT_HARD_RESYNCS,
   STAT_PARAM_RESYNCS,
+  STAT_REMOTE_EXTRAPOLATED,
+  STAT_REMOTE_FRAMES,
+  STAT_REMOTE_HELD,
   STAT_SNAPSHOTS,
   STAT_SNAPSHOTS_LOST,
   STAT_STARVED,
+  TICK_MS,
 } from "../net";
 
 /**
@@ -20,8 +24,10 @@ import {
  * snapshots per second), corrections (per second, mean and largest size, the render offset
  * left), the input buffer (the mean health and its low edge, which the clock steers, so a buffer
  * grown for bursty frames shows why; starved cmds per second, clock adjustments) and traffic
- * (bytes in and out per second). Rates are over the last second (NetStats' rolling window). The readout
- * is DOM-free; the lines are text for the HUD's ≤ 15 Hz update.
+ * (bytes in and out per second), and since M3 the remote players (D-037: the interpolation delay
+ * and the share of remote-frames drawn past the newest snapshot, extrapolated or held). Rates are
+ * over the last second (NetStats' rolling window). The readout is DOM-free; the lines are text for
+ * the HUD's ≤ 15 Hz update. The full 7-line netgraph comes with D-043.
  */
 
 export const NG_RTT = 0;
@@ -45,7 +51,12 @@ export const NG_HARD_RESYNCS = 13;
 export const NG_PARAM_RESYNCS = 14;
 /** The low edge of the input buffer health (its lowest over the last 1.5 s), ticks. */
 export const NG_BUFFER_LOW = 15;
-export const NG_COUNT = 16;
+/** The remote interpolation delay, ticks (D-037). */
+export const NG_INTERP_DELAY = 16;
+/** Of the remote-frames drawn over the last second, % extrapolated and % held. */
+export const NG_EXTRAPOLATED = 17;
+export const NG_HELD = 18;
+export const NG_COUNT = 19;
 
 export class NetgraphReadout {
   readonly values = new Float64Array(NG_COUNT);
@@ -78,6 +89,10 @@ export class NetgraphReadout {
     v[NG_BYTES_OUT] = s[STAT_BYTES_OUT] as number;
     v[NG_HARD_RESYNCS] = totals[STAT_HARD_RESYNCS] as number;
     v[NG_PARAM_RESYNCS] = totals[STAT_PARAM_RESYNCS] as number;
+    v[NG_INTERP_DELAY] = client.remotes.delayTicks;
+    const drawn = s[STAT_REMOTE_FRAMES] as number;
+    v[NG_EXTRAPOLATED] = drawn > 0 ? (100 * (s[STAT_REMOTE_EXTRAPOLATED] as number)) / drawn : 0;
+    v[NG_HELD] = drawn > 0 ? (100 * (s[STAT_REMOTE_HELD] as number)) / drawn : 0;
   }
 }
 
@@ -95,6 +110,8 @@ export function netgraphLines(v: Float64Array, profile: string | null): string[]
   return [
     `link   rtt ${fixed(at(NG_RTT), 0)} ms  jitter ${fixed(at(NG_JITTER), 1)} ms  ` +
       `loss ${fixed(at(NG_LOSS), 1)}%  snaps ${fixed(at(NG_SNAPSHOTS), 0)}/s`,
+    `remote interp ${fixed(at(NG_INTERP_DELAY), 0)} ticks (${fixed(at(NG_INTERP_DELAY) * TICK_MS, 0)} ms)  ` +
+      `extrap ${fixed(at(NG_EXTRAPOLATED), 1)}%  held ${fixed(at(NG_HELD), 1)}%`,
     `corr   ${fixed(at(NG_CORRECTIONS), 0)}/s  mean ${fixed(at(NG_CORRECTION_MEAN), 2)} u  ` +
       `max ${fixed(at(NG_CORRECTION_MAX), 2)} u  offset ${fixed(at(NG_OFFSET), 2)} u`,
     `input  buffer ${fixed(at(NG_BUFFER), 1)} low ${fixed(at(NG_BUFFER_LOW), 0)} ticks  ` +

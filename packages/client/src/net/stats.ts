@@ -37,7 +37,18 @@ export const STAT_STARVED_CORRECTIONS = 13;
  * the render offset dropped, not counted as corrections.
  */
 export const STAT_TELEPORTS = 14;
-export const STAT_COUNT = 15;
+/** Remote players drawn, summed over frames (D-037): the base of the two shares below. */
+export const STAT_REMOTE_FRAMES = 15;
+/** Of those, drawn past their newest snapshot along their velocity (at most 2 ticks). */
+export const STAT_REMOTE_EXTRAPOLATED = 16;
+/** Of those, held where the extrapolation stopped (no newer snapshot yet). */
+export const STAT_REMOTE_HELD = 17;
+/** Render-clock snaps after the first (the first places the clock): a remote jumped in time. */
+export const STAT_RENDER_SNAPS = 18;
+/** Remote movement events surfaced, and those lost (more than 2 in one step of a slot). */
+export const STAT_REMOTE_EVENTS = 19;
+export const STAT_REMOTE_EVENTS_LOST = 20;
+export const STAT_COUNT = 21;
 
 const BUCKETS = 10;
 const BUCKET_MS = 100;

@@ -253,6 +253,14 @@ describe.concurrent("a bots run", () => {
     expect(s.fullSnapshots).toBeLessThan(summary.bots.reduce((n, b) => n + b.snapshots, 0) * 1.1);
     expect(summary.checks.find((c) => c.name === "server tick p99")?.judged).toBe(false);
     expect(summary.aggregate.mispredictions).toBe(0);
+    // Each bot drew the two others interpolated and smooth (D-037), NET-05 judging most of its
+    // remote-frames (2 others on every frame that was not long).
+    expect(summary.aggregate.remoteJumps).toBe(0);
+    for (const b of summary.bots) {
+      expect(b.remoteJudged, `bot ${b.id}`).toBeGreaterThan(b.snapshots);
+      expect(b.interpDelay.max, `bot ${b.id}`).toBeGreaterThanOrEqual(2);
+      expect(b.interpDelay.max, `bot ${b.id}`).toBeLessThanOrEqual(6);
+    }
     // Every bot left at the end.
     await expect.poll(() => server.matches.main?.match.sessionCount).toBe(0);
     if (files === null) throw new Error("no files");

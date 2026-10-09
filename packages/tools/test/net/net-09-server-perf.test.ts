@@ -85,5 +85,6 @@ describe("NET-09 proxy: 16 clients on arena_greybox, the match tick in process",
     expect(r.gcMax, detail).toBeLessThanOrEqual(GC_MS);
     expect(h.match.metrics.strikes).toBe(0);
     expect(h.active.length).toBe(CLIENTS);
-  });
+    // Two windows on a busy host (the full fast run) take longer than Vitest's default 5 s.
+  }, 30_000);
 });

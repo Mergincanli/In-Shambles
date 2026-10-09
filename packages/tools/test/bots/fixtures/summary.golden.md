@@ -18,6 +18,7 @@
 | snapshot size | ≤ 1100 B | 63 B | PASS |
 | bot strikes | 0 | 0 | PASS |
 | mispredictions (corrections not on a starved snapshot) | 0 | 0 | PASS |
+| remote jumps (NET-05 violations) | 0 | 0 | PASS |
 
 ## Server (run window)
 
@@ -45,10 +46,12 @@
 | up per client (mean / worst) | 3.65 / 3.65 KB/s |
 | snapshot p50 / p95 / max | 63 / 63 / 63 B |
 | delta share | 0.0% |
+| interp delay (mean / max) | 3.50 / 4 ticks |
+| remotes extrapolated or held (worst) / NET-05 violations | 0.25% / 0 of 14000 judged |
 
 ## Bots
 
-| Bot | Kind | Corr/s | Mean / max corr (u) | Starved | Resyncs | Buffer mean / low | Down / peak / up (KB/s) | Snapshot p50 / max (B) | Laps / stuck | Closed |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 0 | route | 0.025 | 0.40 / 1.20 | 2 | 0 | 1.80 / 0 | 3.05 / 3.20 / 3.65 | 63 / 63 | 6 / 1.0% | – |
-| 3 | walk | 0.025 | 0.40 / 1.20 | 2 | 0 | 1.80 / 0 | 3.05 / 3.20 / 3.65 | 63 / 63 | – | timed out |
+| Bot | Kind | Corr/s | Mean / max corr (u) | Starved | Resyncs | Buffer mean / low | Down / peak / up (KB/s) | Snapshot p50 / max (B) | Interp (ticks) / extrap / jumps | Laps / stuck | Closed |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 0 | route | 0.025 | 0.40 / 1.20 | 2 | 0 | 1.80 / 0 | 3.05 / 3.20 / 3.65 | 63 / 63 | 3.5 / 0.25% / 0 | 6 / 1.0% | – |
+| 3 | walk | 0.025 | 0.40 / 1.20 | 2 | 0 | 1.80 / 0 | 3.05 / 3.20 / 3.65 | 63 / 63 | 3.5 / 0.25% / 0 | – | timed out |

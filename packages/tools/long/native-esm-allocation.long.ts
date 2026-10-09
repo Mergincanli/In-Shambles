@@ -7,9 +7,10 @@ import { fromRoot } from "../src/paths";
 // sanitizeUserCmd, the pmove params refresh and basics, whole pmove ticks in every M2 move mode,
 // the scenario runner and bots, the per-tick message codecs, the transports, the server's match
 // tick and the Node server's timing wrapper, both ends of the WebSocket transport, the client's
-// prediction and reconciliation, and the BVH queries) must not allocate under native ES modules
-// either, where V8 boxes a double returned by a call it doesn't inline or joined with a module
-// constant in a ternary. Vitest's module runner hides that, so this runs a child process.
+// prediction and reconciliation, the remote interpolation, and the BVH queries) must not
+// allocate under native ES modules either, where V8 boxes a double returned by a call it doesn't
+// inline or joined with a module constant in a ternary. Vitest's module runner hides that, so
+// this runs a child process.
 //
 // The children run two at a time: one after another this file took some 16 s alone (it set the
 // floor of `pnpm test`, where it ran until D-032 moved it to `pnpm test:long`). Each child counts
@@ -20,7 +21,7 @@ interface ChildResult {
   clean: boolean;
   attempts: string[];
   outcomes: number[];
-  /** wsTransport: the client end's outcomes; predict: [0] teleports. */
+  /** wsTransport: the client end's outcomes; predict: [0] teleports; interp: [0] held. */
   extra: number[];
   /** codec only: hostile packets the decoders refused. */
   rejected: number;
@@ -168,6 +169,17 @@ describe.concurrent("per-tick paths under native ES modules", () => {
     // Corrections (dropped inputs), clock steps (the delay steps run every phase; this counts the
     // ones in the slow-host phase, the low edge's), hard resyncs (frame hitches); teleports
     // (respawns, D-035).
+    for (const n of r.outcomes) expect(n).toBeGreaterThan(0);
+    expect(r.extra[0]).toBeGreaterThan(0);
+    expect(r.clean, r.attempts.join("; ")).toBe(true);
+  }, 30_000);
+
+  it("remote interpolation allocates nothing per frame: 16 remotes, extrapolation traces, holds, rejoins, teleports, removals, events (D-037)", async ({
+    expect,
+  }) => {
+    const r = await runChild("interp");
+    // Extrapolated or held remote-frames (the outages), surfaced events, frames the NET-05 meter
+    // judged; held ones among the first.
     for (const n of r.outcomes) expect(n).toBeGreaterThan(0);
     expect(r.extra[0]).toBeGreaterThan(0);
     expect(r.clean, r.attempts.join("; ")).toBe(true);

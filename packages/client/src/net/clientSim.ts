@@ -38,6 +38,7 @@ import {
   SNAPSHOT_PARAMS_RESYNC,
   SNAPSHOT_STALE,
 } from "./predictor";
+import { RemoteInterpolator } from "./remotes";
 import { RenderOffset } from "./smoothing";
 import type { SnapshotStore } from "./snapshotStore";
 import {
@@ -226,6 +227,11 @@ export class ClientSim {
   readonly offset: RenderOffset;
   readonly predictor: Predictor;
   readonly connection: Connection;
+  /**
+   * The other players (D-037): every stored snapshot times its render clock as it arrives;
+   * whoever draws them (the page, a bot, a test) calls `updateRemotes` once per frame.
+   */
+  readonly remotes: RemoteInterpolator;
   input: CmdSampler;
   /** The last tick of the startup fill: snapshots up to it may be starved without harm. */
   startTick = -1;
@@ -278,6 +284,7 @@ export class ClientSim {
   /** This frame came more than HITCH_FRAME_MS after the last: a stall. */
   private hitch = false;
   private started = false;
+  private remotesShown = false;
 
   constructor(options: ClientSimOptions) {
     this.cmap = options.cmap ?? null;
@@ -322,6 +329,13 @@ export class ClientSim {
       handler,
       options.buildHash,
       options.nonce ?? 0,
+    );
+    this.remotes = new RemoteInterpolator(
+      this.connection.store,
+      this.now,
+      this.settings,
+      this.stats,
+      this.currentWorld,
     );
   }
 
@@ -373,6 +387,7 @@ export class ClientSim {
     this.cmap = cmap;
     this.currentWorld = world ?? buildCollisionWorld(cmap);
     this.predictor.world = this.currentWorld;
+    this.remotes.world = this.currentWorld;
     return null;
   }
 
@@ -468,6 +483,16 @@ export class ClientSim {
   renderTick(out: Float64Array, index: number): void {
     const a = Math.min(1, Math.max(0, (this.t[ACC] as number) / TICK_MS));
     out[index] = this.predictor.latestTick - 1 + a;
+  }
+
+  /**
+   * Interpolates the other players into `remotes.view` for this frame (after `frame`); while the
+   * session is not active they are hidden and the interpolation starts over.
+   */
+  updateRemotes(): void {
+    if (this.connection.state === CONN_ACTIVE) this.remotes.update(this.connection.clientId);
+    else if (this.remotesShown) this.remotes.clear();
+    this.remotesShown = this.connection.state === CONN_ACTIVE;
   }
 
   /** A console command for the server (CMD); false when there is no session or it doesn't fit. */
@@ -645,6 +670,7 @@ export class ClientSim {
     const state = this.snapState;
     // Prediction reads the local slot, bit for bit (M3 design §2.3).
     slotToPlayerState(frame, this.connection.clientId, state);
+    this.remotes.onStored(tick);
     stats.add(STAT_SNAPSHOTS, 1);
     if (this.connection.state === CONN_SPAWNING) {
       // The first snapshot is the spawn: adopted whole, and its counter is the one to watch.

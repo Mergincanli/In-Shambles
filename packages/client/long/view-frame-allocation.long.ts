@@ -3,14 +3,15 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 // The render frame's sim side (Game.frame: the client frame, step smoothing, eye height, the
-// pose) must not allocate under native ES modules, where V8 boxes a double returned by a call it
-// doesn't inline (a getter, say). Vitest's module runner hides that, so this runs a child process
-// (as packages/tools/long/native-esm-allocation.long.ts does for the per-tick paths).
+// pose, the remote interpolation of 16 other players) must not allocate under native ES modules,
+// where V8 boxes a double returned by a call it doesn't inline (a getter, say). Vitest's module
+// runner hides that, so this runs a child process (as
+// packages/tools/long/native-esm-allocation.long.ts does for the per-tick paths).
 
 const clientDir = fileURLToPath(new URL("..", import.meta.url));
 
 describe("view frame under native ES modules", () => {
-  it("Game.frame allocates nothing: steps, crouch, turns, resyncs, mouse look, debug draw", () => {
+  it("Game.frame allocates nothing, 16 interpolated remotes included", () => {
     const out = spawnSync(
       process.execPath,
       ["--import", "tsx", "test/perf/viewFrameAllocation.ts"],
@@ -18,7 +19,8 @@ describe("view frame under native ES modules", () => {
     );
     expect(out.status, out.stderr).toBe(0);
     const r = JSON.parse(out.stdout) as { clean: boolean; attempts: string[]; outcomes: number[] };
-    // STEP events, crouched frames, hard resyncs, frames, debug traces and shapes.
+    // STEP events, crouched frames, hard resyncs, frames, debug traces and shapes, remote-frames
+    // drawn and judged by the NET-05 meter.
     for (const n of r.outcomes) expect(n).toBeGreaterThan(0);
     expect(r.clean, r.attempts.join("; ")).toBe(true);
   }, 60_000);

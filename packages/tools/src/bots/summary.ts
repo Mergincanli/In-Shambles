@@ -91,6 +91,14 @@ export interface BotNumbers {
   readonly snapshotBytes: { readonly p50: number; readonly p95: number; readonly max: number };
   /** Share of the snapshots that were deltas (0 until D-038). */
   readonly deltaShare: number;
+  /** The remote interpolation delay over the 1 s samples, ticks (D-037). */
+  readonly interpDelay: { readonly mean: number; readonly max: number };
+  /** Share of the remote-frames drawn extrapolated or held (past the newest snapshot). */
+  readonly extrapolatedShare: number;
+  /** NET-05 violations: frames where a remote it drew jumped (M3 design §2.8 criterion). */
+  readonly remoteJumps: number;
+  /** The remote-frames NET-05 judged (those of frames that were not long): what 0 jumps is of. */
+  readonly remoteJudged: number;
   /** Route bots: laps and the share of moving time spent stuck. */
   readonly laps: number | null;
   readonly stuckShare: number | null;
@@ -113,6 +121,13 @@ export interface SummaryAggregate {
   readonly kbUpPerS: { readonly mean: number; readonly max: number };
   readonly snapshotBytes: { readonly p50: number; readonly p95: number; readonly max: number };
   readonly deltaShare: number;
+  readonly interpDelay: { readonly mean: number; readonly max: number };
+  /** The worst bot's. */
+  readonly extrapolatedShare: number;
+  /** Summed over the bots. */
+  readonly remoteJumps: number;
+  /** Summed over the bots. */
+  readonly remoteJudged: number;
 }
 
 export interface SummaryHost {
@@ -184,15 +199,23 @@ export function aggregate(bots: readonly BotNumbers[]): SummaryAggregate {
       max: max(of((x) => x.snapshotBytes.max)),
     },
     deltaShare: r3(mean(of((x) => x.deltaShare))),
+    interpDelay: {
+      mean: r3(mean(of((x) => x.interpDelay.mean))),
+      max: max(of((x) => x.interpDelay.max)),
+    },
+    extrapolatedShare: max(of((x) => x.extrapolatedShare)),
+    remoteJumps: of((x) => x.remoteJumps).reduce((a, c) => a + c, 0),
+    remoteJudged: of((x) => x.remoteJudged).reduce((a, c) => a + c, 0),
   };
 }
 
 /**
  * PASS/FAIL against docs/10 §4: the server's tick p50/p99, GC pause and memory (§4.1, judged on
  * its run window; the window's peak heapUsed + external, RSS reported) and each client's down/up
- * bandwidth and snapshot size (§4.2, the worst bot); plus every bot joined and stayed, and the
+ * bandwidth and snapshot size (§4.2, the worst bot); plus every bot joined and stayed, the
  * prediction's health (D-036): no strike on either side and no misprediction, a correction on a
- * snapshot the server did not flag starved (the e2e rule, docs/10 §1). The §4.1 numbers of a run
+ * snapshot the server did not flag starved (the e2e rule, docs/10 §1), and smooth remotes
+ * (D-037): no NET-05 violation in what the bots drew of each other. The §4.1 numbers of a run
  * window that began before the bots are reported, not judged. `serverMissing` says why there are
  * no server numbers, when there are none.
  */
@@ -267,6 +290,7 @@ export function evaluateChecks(
     `${agg.mispredictions}`,
     agg.mispredictions === 0,
   );
+  add("remote jumps (NET-05 violations)", "0", `${agg.remoteJumps}`, agg.remoteJumps === 0);
   return checks;
 }
 
@@ -392,6 +416,18 @@ export function summaryMarkdown(s: BotsSummary): string {
     ]),
   );
   out.push(row(["delta share", `${(a.deltaShare * 100).toFixed(1)}%`]));
+  out.push(
+    row([
+      "interp delay (mean / max)",
+      `${a.interpDelay.mean.toFixed(2)} / ${a.interpDelay.max} ticks`,
+    ]),
+  );
+  out.push(
+    row([
+      "remotes extrapolated or held (worst) / NET-05 violations",
+      `${(a.extrapolatedShare * 100).toFixed(2)}% / ${a.remoteJumps} of ${a.remoteJudged} judged`,
+    ]),
+  );
   out.push("");
   out.push("## Bots");
   out.push("");
@@ -406,6 +442,7 @@ export function summaryMarkdown(s: BotsSummary): string {
       "Buffer mean / low",
       "Down / peak / up (KB/s)",
       "Snapshot p50 / max (B)",
+      "Interp (ticks) / extrap / jumps",
       "Laps / stuck",
       "Closed",
     ]),
@@ -422,6 +459,7 @@ export function summaryMarkdown(s: BotsSummary): string {
         `${b.bufferMean.toFixed(2)} / ${b.bufferLow}`,
         `${b.kbDownPerS.toFixed(2)} / ${b.kbDownPeak.toFixed(2)} / ${b.kbUpPerS.toFixed(2)}`,
         `${b.snapshotBytes.p50} / ${b.snapshotBytes.max}`,
+        `${b.interpDelay.mean.toFixed(1)} / ${(b.extrapolatedShare * 100).toFixed(2)}% / ${b.remoteJumps}`,
         b.laps === null ? "–" : `${b.laps} / ${((b.stuckShare ?? 0) * 100).toFixed(1)}%`,
         b.joined ? (b.closed ?? "–") : "never joined",
       ]),

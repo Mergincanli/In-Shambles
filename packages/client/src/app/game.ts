@@ -21,9 +21,18 @@ import type { GameHud } from "../hud/overlay";
 import type { MouseLook } from "../input/mouse";
 import {
   type ClientSim,
-  RemoteView,
+  ID_P95,
+  JM_CHECKED,
+  JM_VIOLATIONS,
+  RC_DT_MS,
+  RemoteJumpMeter,
+  type RemoteView,
   STAT_CORRECTIONS,
   STAT_HARD_RESYNCS,
+  STAT_REMOTE_EXTRAPOLATED,
+  STAT_REMOTE_FRAMES,
+  STAT_REMOTE_HELD,
+  STAT_RENDER_SNAPS,
   STAT_SNAPSHOTS,
   STAT_SNAPSHOTS_LOST,
   STAT_STARVED,
@@ -33,6 +42,7 @@ import {
   ViewHeight,
 } from "../net";
 import { DebugLines } from "../render/debug/debugDraw";
+import { BLEND_DT_MS, BLEND_MS } from "../render/players";
 import type { GameRenderer } from "../render/renderer";
 import { refreshViewSettings, ViewSettings } from "../render/viewCvars";
 
@@ -126,10 +136,10 @@ export class Game {
   /** The view this frame: [0..2] eye position (sim u), [3] yaw, [4] pitch (degrees). */
   readonly pose = new Float64Array(5);
   /**
-   * The other players this frame, as the renderer draws them: the newest stored snapshot as it
-   * stands until remote interpolation (increment 7).
+   * NET-05's step criterion on the drawn remotes (D-037), judged on the frames that are not long
+   * (a long frame's gap is the host's, as for the prediction's health): `remoteJumps`.
    */
-  readonly remotes = new RemoteView();
+  readonly remoteJumps = new RemoteJumpMeter();
   frames = 0;
   /**
    * Frames that came longer after the previous one than the input buffer (`cl_inputBuffer` ticks,
@@ -193,6 +203,8 @@ export class Game {
   private readonly camStart = vec3();
   private readonly camEnd = vec3();
   private readonly camTrace = new TraceResult();
+  /** The capsules' crouch blend: [BLEND_DT_MS] this frame's time, [BLEND_MS] its length. */
+  private readonly blend = new Float64Array(2);
 
   constructor(options: GameOptions) {
     this.client = options.client;
@@ -205,6 +217,11 @@ export class Game {
     this.steps = new StepSmoother(this.renderTick);
     this.eye = new ViewHeight(this.client.now);
     this.frameCb = () => this.loop();
+  }
+
+  /** The other players this frame, as the renderer draws them (D-037). */
+  get remotes(): RemoteView {
+    return this.client.remotes.view;
   }
 
   start(): void {
@@ -270,17 +287,22 @@ export class Game {
       cam[1] = this.pose[1] as number;
       cam[2] = this.pose[2] as number;
       this.underwater = (pointContents(c.world, cam) & CONTENTS_WATER) !== 0;
-      const newest = c.store.newest;
-      if (newest !== null) this.remotes.fillFromFrame(newest, c.connection.clientId);
-      else this.remotes.clear();
+    }
+    c.updateRemotes();
+    if (active) {
+      const long = (c.remotes.clock.t[RC_DT_MS] as number) > c.settings.inputBuffer * TICK_MS;
+      this.remoteJumps.measure(c.remotes, !long);
     } else if (this.wasActive) {
-      this.remotes.clear();
+      this.remoteJumps.reset();
     }
     this.wasActive = active;
     const r = this.renderer;
     if (r !== null && active) {
       r.view.pose.set(this.pose);
-      r.players.update(this.remotes);
+      const blend = this.blend;
+      blend[BLEND_DT_MS] = c.remotes.clock.t[RC_DT_MS] as number;
+      blend[BLEND_MS] = c.settings.remoteCrouchBlendMs;
+      r.players.update(c.remotes.view, blend);
       r.debug.update(this.debugLines, cs.debugTraces);
       r.render(this.settings.fov);
     }
@@ -500,6 +522,8 @@ export class Game {
         `dt ${Math.round(st[4] as number)} snapGap ${Math.round(st[5] as number)} rtt ${Math.round(st[6] as number)}`;
     s.drawCalls = String(this.renderer?.drawCalls ?? 0);
     s.triangles = String(this.renderer?.triangles ?? 0);
+    // Capsule instances drawn (the e2e's "4 capsules": what the renderer drew, not the view).
+    s.capsules = String(this.renderer?.players.count ?? 0);
     // How far the player went (u, horizontal, sampled per report): proof a bot moves.
     const tr = this.travel;
     if (c.active) {
@@ -514,7 +538,20 @@ export class Game {
       tr[2] = o[2] as number;
     }
     s.distance = String(Math.round(tr[3] as number));
-    // Other players drawn this frame (two tabs on one server see 1 each).
-    s.remotes = String(this.remotes.count);
+    // Other players drawn this frame (two tabs on one server see 1 each), and how smoothly
+    // (D-037): NET-05 violations on frames that were not long and the remote-frames judged, the
+    // remote-frames drawn past the newest snapshot (extrapolated or held) and the render clock's
+    // snaps after the first, the interpolation delay (ticks) and its lateness p95.
+    const remotes = c.remotes;
+    s.remotes = String(remotes.view.count);
+    s.remoteJumps = String(this.remoteJumps.t[JM_VIOLATIONS]);
+    s.remoteJudged = String(this.remoteJumps.t[JM_CHECKED]);
+    s.remoteFrames = String(t[STAT_REMOTE_FRAMES]);
+    s.extrapolations = String(
+      (t[STAT_REMOTE_EXTRAPOLATED] as number) + (t[STAT_REMOTE_HELD] as number),
+    );
+    s.renderSnaps = String(t[STAT_RENDER_SNAPS]);
+    s.interpDelay = String(remotes.delayTicks);
+    s.interpP95 = (remotes.delay.t[ID_P95] as number).toFixed(3);
   }
 }

@@ -1,8 +1,6 @@
-import { type ChildProcess, spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import type { Browser } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
@@ -15,6 +13,7 @@ import {
   watchErrors,
 } from "../scripts/browser";
 import { expectHealthy, sample, VIEW, waitForMoving } from "./health";
+import { buildServerBundle, type ServerChild, startServer } from "./serverBundle";
 
 // The connect e2e (M3 design §5, D-031): the production server bundle as a child process (strict
 // about builds, sv_strictBuild 1) and the production client built from the same checkout, in
@@ -23,36 +22,6 @@ import { expectHealthy, sample, VIEW, waitForMoving } from "./health";
 // e2e prediction-health rule.
 
 const RUN_MS = 3000;
-const serverDir = fileURLToPath(new URL("../../server", import.meta.url));
-
-interface ServerChild {
-  readonly child: ChildProcess;
-  readonly port: number;
-  readonly buildHash: string;
-  output(): string;
-}
-
-/** Starts the bundle on a free port and resolves with the port its `listening` line names. */
-function startServer(bundle: string): Promise<ServerChild> {
-  // From packages/server, so the bundle (built outside the repository) finds content/maps.
-  const child = spawn(process.execPath, [bundle, "--port", "0"], { cwd: serverDir });
-  let output = "";
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`no listening line:\n${output}`)), 15_000);
-    child.stderr?.on("data", (chunk) => {
-      output += String(chunk);
-    });
-    child.stdout?.on("data", (chunk) => {
-      output += String(chunk);
-      const line = output.split("\n").find((l) => l.includes('"ev":"listening"'));
-      if (line === undefined) return;
-      clearTimeout(timer);
-      const l = JSON.parse(line) as { port: number; buildHash: string };
-      resolve({ child, port: l.port, buildHash: l.buildHash, output: () => output });
-    });
-    child.once("exit", (code) => reject(new Error(`server exited (${code}):\n${output}`)));
-  });
-}
 
 describe("client e2e: connect to a Node server (D-031)", () => {
   let dir = "";
@@ -62,17 +31,7 @@ describe("client e2e: connect to a Node server (D-031)", () => {
 
   beforeAll(async () => {
     dir = mkdtempSync(join(tmpdir(), "client-connect-e2e-"));
-    // The bundle runs outside the workspace (as in the server's smoke test), so it can't lean on
-    // node_modules.
-    writeFileSync(join(dir, "package.json"), JSON.stringify({ type: "module" }));
-    const bundle = join(dir, "server", "main.js");
-    const build = spawnSync(process.execPath, ["build.mjs", bundle], {
-      cwd: serverDir,
-      encoding: "utf8",
-    });
-    if (build.status !== 0) throw new Error(`server build failed:\n${build.stderr}`);
-    writeFileSync(join(dir, "server", "package.json"), JSON.stringify({ type: "module" }));
-    server = await startServer(bundle);
+    server = await startServer(buildServerBundle(dir));
     await buildClient(join(dir, "dist"));
     served = await servePreview(join(dir, "dist"));
     browser = await launchChromium();

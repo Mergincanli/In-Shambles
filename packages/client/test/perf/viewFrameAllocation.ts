@@ -13,6 +13,15 @@
  * The player's per-frame paths run too (M2 increment 12): mouse look with counts every frame,
  * the cmd sampler with keys going up and down, the third-person pull-back, the underwater test,
  * every `r_debug*` line (hull, ground normal, pmove's trace log) and their three.js upload.
+ *
+ * And 16 other players (M3 increment 7, D-037): every snapshot the client stores gets 16 remote
+ * rows written into its frame as it is stored (moving on circles around the spawn, crouching, with
+ * movement events, a teleport-counter step every 1024 ticks for one of them, one removed for 30
+ * ticks every 300 and back), so every frame interpolates 16 remotes from the snapshot store, with
+ * the NET-05 meter. They are written client-side because 16 real sessions make the match's side
+ * of each frame some 8 times dearer and slower to settle (it took the full warm-up below, about
+ * 50 s); the 16-entity decode is the codec workload's (`packages/tools/test/perf`), the match with
+ * many sessions the `matchMulti` one's (M3 increment 9).
  */
 import { readFileSync } from "node:fs";
 import { PerformanceObserver } from "node:perf_hooks";
@@ -27,6 +36,8 @@ import {
   type PlayerState,
   PMEV_STEP,
   PMF_CROUCHED,
+  PMF_GROUNDED,
+  pushEntityEvent,
   registerPmoveCvars,
   TRACE_EPSILON,
   UserCmd,
@@ -36,7 +47,14 @@ import { ACTION_FORWARD, ACTION_JUMP } from "../../src/console/binds";
 import { registerClientCvars } from "../../src/console/clientCvars";
 import { MouseLook } from "../../src/input/mouse";
 import { ActionState, PlayerInput } from "../../src/input/sampler";
-import { ClientSim, type CmdSampler, MixedInput, STAT_HARD_RESYNCS } from "../../src/net";
+import {
+  ClientSim,
+  type CmdSampler,
+  JM_CHECKED,
+  MixedInput,
+  STAT_HARD_RESYNCS,
+  STAT_REMOTE_FRAMES,
+} from "../../src/net";
 import { DebugDraw } from "../../src/render/debug/debugDraw";
 
 const FRAMES = 20_000;
@@ -74,6 +92,12 @@ const input = new Cycle();
 const [clientEnd, serverEnd] = createLoopbackPair();
 const match = new Match({ cmap, world, buildHash: "alloc" });
 match.connect(serverEnd, true);
+/** The other players: slots 1–16 of every stored frame. */
+const REMOTES = 16;
+const spawn = cmap.entities.find((e) => e.classname === "info_player_start")?.origin;
+if (spawn === undefined) throw new Error("movement_lab has no info_player_start");
+/** The remotes' circle centre (sim u), 400 u north of the spawn on the open floor. */
+const centre = new Float64Array([spawn[0], spawn[1] + 400]);
 const cvars = new CvarRegistry();
 registerPmoveCvars(cvars);
 registerClientCvars(cvars);
@@ -139,6 +163,52 @@ function run(frames: number): void {
   }
 }
 
+/** Each remote's movement events so far (eventSeq and the two newest, as an entity keeps them). */
+const eventSeqs = new Uint8Array(64);
+const evKinds = new Uint8Array(128);
+const evValues = new Uint8Array(128);
+
+/**
+ * Writes the 16 remotes into the frame of `tick` as the store holds it: remote i (slot i) on a
+ * circle of 64–304 u around `centre`, a lap every 4–8 s, at the velocity of that lap.
+ */
+function addRemotes(tick: number): void {
+  const f = client.store.ring.get(tick);
+  if (f === null) return;
+  for (let i = 1; i <= REMOTES; i++) {
+    if (i === 16 && tick % 300 < 30) continue;
+    const r = 64 + 16 * i;
+    const w = 6.283185307179586 / (240 + 15 * i);
+    const a = tick * w;
+    f.setPresent(i, tick);
+    f.originX[i] = Math.round(((centre[0] as number) + r * Math.cos(a)) * 32);
+    f.originY[i] = Math.round(((centre[1] as number) + r * Math.sin(a)) * 32);
+    f.originZ[i] = 24 * 32;
+    f.entVelX[i] = Math.round(-r * w * 60 * Math.sin(a));
+    f.entVelY[i] = Math.round(r * w * 60 * Math.cos(a));
+    f.entVelZ[i] = 0;
+    f.yaw[i] = (tick * 113 + i * 4096) & 0xffff;
+    f.pitch[i] = ((tick + i) % 400) - 200;
+    f.flags[i] = PMF_GROUNDED | (((tick >> 5) + i) % 3 === 0 ? PMF_CROUCHED : 0);
+    f.team[i] = 1 + (i & 1);
+    f.teleportSeq[i] = ((tick >> 10) + (i === ((tick >> 6) & 15) + 1 ? 1 : 0)) & 0xff;
+    if ((tick + i) % 9 === 0) pushEntityEvent(eventSeqs, evKinds, evValues, i, PMEV_STEP, 16);
+    f.eventSeq[i] = eventSeqs[i] as number;
+    f.evKind[i * 2] = evKinds[i * 2] as number;
+    f.evKind[i * 2 + 1] = evKinds[i * 2 + 1] as number;
+    f.evValue[i * 2] = evValues[i * 2] as number;
+    f.evValue[i * 2 + 1] = evValues[i * 2 + 1] as number;
+  }
+}
+
+// Every stored snapshot gets its remotes before the interpolation sees it.
+const remotes = client.remotes;
+const onStored = remotes.onStored.bind(remotes);
+remotes.onStored = (tick: number) => {
+  addRemotes(tick);
+  onStored(tick);
+};
+
 let gcs = 0;
 const observer = new PerformanceObserver((list) => {
   gcs += list.getEntries().length;
@@ -167,5 +237,9 @@ const outcomes = [
   game.frames,
   game.debugLines.traces.count,
   game.debugLines.shapes.count,
+  client.stats.totals[STAT_REMOTE_FRAMES],
+  game.remoteJumps.t[JM_CHECKED],
 ];
+// Every remote drawn at the end (the 16th may be out).
+if (game.remotes.count < REMOTES - 1) throw new Error(`drew ${game.remotes.count} of ${REMOTES}`);
 console.log(JSON.stringify({ clean, attempts, outcomes }));

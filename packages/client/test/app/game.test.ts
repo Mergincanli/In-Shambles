@@ -540,7 +540,7 @@ describe("game frame loop (M2 design §2)", () => {
   });
 });
 
-describe("other players in the frame (M3 increment 5, D-034)", () => {
+describe("other players in the frame (M3 increments 5 and 7, D-034, D-037)", () => {
   /** A second player on `match` that only joins (HELLO, READY) and then stands still. */
   function joinBystander(match: Match): void {
     const [end, serverEnd] = createLoopbackPair();
@@ -556,12 +556,18 @@ describe("other players in the frame (M3 increment 5, D-034)", () => {
     end.sendReliable(w.bytes, w.byteLength);
   }
 
-  it("draws every other player of the newest snapshot, never its own, and clears them on close", () => {
+  it("draws every other player interpolated from the snapshots, never its own, and clears them on close", () => {
     // A renderer stand-in that records what Game hands the capsules each frame.
     const drawn: number[] = [];
     const renderer = {
       view: { pose: new Float64Array(5) },
-      players: { update: (v: RemoteView) => drawn.push(v.count) },
+      players: {
+        count: 0,
+        update(v: RemoteView) {
+          this.count = v.count;
+          drawn.push(v.count);
+        },
+      },
       debug: { update: () => {} },
       render: () => {},
       drawCalls: 0,
@@ -582,8 +588,18 @@ describe("other players in the frame (M3 increment 5, D-034)", () => {
     expect([v.visible[0], v.visible[1]]).toEqual([0, 1]);
     // The second joiner is on team 2; it stands where the server has it.
     expect(v.team[1]).toBe(TEAM_2);
+    // Standing still, so the interpolated position is the server's exactly.
     expect([v.x[1], v.y[1], v.z[1]]).toEqual(Array.from(other.origin));
     expect(status.remotes).toBe("1");
+    expect(status.capsules).toBe("1");
+    // Smooth, interpolated (not extrapolated) at a delay the snapshot stream sized.
+    expect(status.remoteJumps).toBe("0");
+    expect(Number(status.remoteJudged)).toBeGreaterThan(50);
+    expect(status.extrapolations).toBe("0");
+    expect(status.renderSnaps).toBe("0");
+    expect(Number(status.remoteFrames)).toBeGreaterThan(50);
+    expect(Number(status.interpDelay)).toBeGreaterThanOrEqual(2);
+    expect(Number(status.interpDelay)).toBeLessThanOrEqual(6);
     expect(drawn.at(-1)).toBe(1);
     // The session ends: nobody is drawn any more.
     const frames = drawn.length;

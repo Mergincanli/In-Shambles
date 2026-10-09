@@ -4,18 +4,26 @@ import { join } from "node:path";
 import {
   ClientSim,
   type CmdSampler,
+  JM_CHECKED,
+  JM_VIOLATIONS,
+  RC_DT_MS,
+  RemoteJumpMeter,
   RouteInput,
   STAT_CORRECTION_DIST,
   STAT_CORRECTION_MAX,
   STAT_CORRECTIONS,
   STAT_COUNT,
   STAT_HARD_RESYNCS,
+  STAT_REMOTE_EXTRAPOLATED,
+  STAT_REMOTE_FRAMES,
+  STAT_REMOTE_HELD,
   STAT_SNAPSHOTS,
   STAT_SNAPSHOTS_LOST,
   STAT_STARVED,
   STAT_STARVED_CORRECTIONS,
   STAT_STRIKES,
   STAT_TELEPORTS,
+  TICK_MS,
   WebSocketTransport,
 } from "@game/client/net";
 import { findNetProfile, NET_PROFILES, type NetProfile, NetSimTransport } from "@game/shared";
@@ -212,6 +220,17 @@ class Bot {
   private bufferLow = Number.POSITIVE_INFINITY;
   private maxCorrection = 0;
   private measuring = false;
+  /**
+   * NET-05's criterion on what this bot draws of the others (D-037), judged on its frames that
+   * are not long (past the input buffer: the event loop's stall, as the page leaves out its own).
+   */
+  private readonly jumps = new RemoteJumpMeter();
+  private jumpsBase = 0;
+  private judgedBase = 0;
+  /** The interpolation delay at each 1 s sample: sum, count and largest (ticks). */
+  private delaySum = 0;
+  private delaySamples = 0;
+  private delayMax = 0;
 
   constructor(
     readonly id: number,
@@ -252,9 +271,14 @@ class Bot {
   }
 
   frame(): void {
-    if (this.client.closed) return;
-    this.client.frame();
-    if (this.client.active) this.joined = true;
+    const c = this.client;
+    if (c.closed) return;
+    c.frame();
+    c.updateRemotes();
+    if (!c.active) return;
+    this.joined = true;
+    const long = (c.remotes.clock.t[RC_DT_MS] as number) > c.settings.inputBuffer * TICK_MS;
+    this.jumps.measure(c.remotes, !long);
   }
 
   /**
@@ -274,6 +298,12 @@ class Bot {
     this.bufferSum += clock.bufferHealth;
     this.bufferSamples++;
     this.bufferLow = Math.min(this.bufferLow, clock.bufferLow);
+    if (this.client.active) {
+      const d = this.client.remotes.delayTicks;
+      this.delaySum += d;
+      this.delaySamples++;
+      this.delayMax = Math.max(this.delayMax, d);
+    }
   }
 
   begin(): void {
@@ -287,6 +317,8 @@ class Bot {
     this.tapBase[3] = t.fullSnapshots;
     this.lastDown = t.bytesDown;
     this.lastSampleAt = performance.now();
+    this.jumpsBase = this.jumps.t[JM_VIOLATIONS] as number;
+    this.judgedBase = this.jumps.t[JM_CHECKED] as number;
   }
 
   numbers(seconds: number): BotNumbers {
@@ -300,6 +332,7 @@ class Bot {
     const snapshots = this.tap.snapshots - (this.tapBase[2] as number);
     const full = this.tap.fullSnapshots - (this.tapBase[3] as number);
     const route = this.input instanceof RouteInput ? this.input : null;
+    const remoteFrames = d(STAT_REMOTE_FRAMES);
     return {
       id: this.id,
       behaviour: route === null ? "walk" : "route",
@@ -331,6 +364,15 @@ class Bot {
         max: histogramMax(sizes),
       },
       deltaShare: r3(snapshots > 0 ? (snapshots - full) / snapshots : 0),
+      interpDelay: {
+        mean: r3(this.delaySamples > 0 ? this.delaySum / this.delaySamples : 0),
+        max: this.delayMax,
+      },
+      extrapolatedShare: r3(
+        remoteFrames > 0 ? (d(STAT_REMOTE_EXTRAPOLATED) + d(STAT_REMOTE_HELD)) / remoteFrames : 0,
+      ),
+      remoteJumps: (this.jumps.t[JM_VIOLATIONS] as number) - this.jumpsBase,
+      remoteJudged: (this.jumps.t[JM_CHECKED] as number) - this.judgedBase,
       laps: route === null ? null : route.laps,
       stuckShare:
         route === null

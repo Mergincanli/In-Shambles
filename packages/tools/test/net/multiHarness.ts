@@ -232,6 +232,11 @@ export interface ClientOptions {
   readonly admin?: boolean;
   /** Keeps per-tick states, predictions and a frame log (see `HarnessClient`). Default false. */
   readonly record?: boolean;
+  /**
+   * Runs after each of the client's frames (NET-05 samples its remote interpolation here, as the
+   * page does after `ClientSim.frame`).
+   */
+  readonly onFrame?: (c: HarnessClient) => void;
 }
 
 interface TimerHeap {
@@ -277,6 +282,7 @@ export class HarnessClient {
 
   private readonly rng: Mulberry32;
   private readonly frameModel: FrameModel;
+  private readonly onFrame: ((c: HarnessClient) => void) | null;
   private lastFirst = -1;
   private lastFinal = -1;
   private readonly pos = vec3();
@@ -296,6 +302,7 @@ export class HarnessClient {
     const h = harness;
     const seed = options.seed ?? clientSeed(h.seed, index);
     this.record = options.record ?? false;
+    this.onFrame = options.onFrame ?? null;
     this.joinedAt = h.now;
     this.profile = options.profile ?? NET_PROFILE_LAN;
     const frameHz = options.frameHz ?? FRAME_HZ;
@@ -440,6 +447,7 @@ export class HarnessClient {
     const c = this.client;
     c.frame();
     if (this.record) this.recordAfterFrame();
+    this.onFrame?.(this);
     h.at(h.now + this.frameInterval(), () => this.frame());
   }
 
