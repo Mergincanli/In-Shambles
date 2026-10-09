@@ -38,8 +38,9 @@ pnpm typecheck && pnpm lint && pnpm test
 | `pnpm greybox` | Recompile the greybox courses into `content/maps/` (commit the result) |
 | `pnpm bench` | Sim microbenchmarks against the `docs/10` §4.4 budgets (`--strict` exits 1 on a miss) |
 | `pnpm feel-report` | Base movement metrics vs. their targets on `movement_lab`; also writes `reports/feel.md` (git-ignored) |
+| `pnpm bots --count 16 --profile wan-100-loss1 --minutes 2` | Headless bots over real WebSockets on a server it starts (or `--server ws://host:port`), then a JSON + markdown summary in `reports/bots/` (git-ignored) with PASS/FAIL against the `docs/10` §4 budgets and the prediction's health (`--strict` exits 1 on a FAIL) |
 
-`pnpm dev:server` reads `packages/server/server.cfg` and takes flags such as `--port 0` (any free port), `--map movement_lab` and `--set <cvar>=<value>` (`docs/06` §8). It answers `GET /status` and `GET /metrics` with JSON on its port, and runs console commands typed on stdin (`set pm_gravity 400`). It runs under pnpm, which doesn't forward signals to the server. To stop it from a script or process manager, signal its process group (Ctrl+C does this), or run the bundle directly with `node packages/server/dist/main.js`.
+`pnpm dev:server` reads `packages/server/server.cfg` and takes flags such as `--port 0` (any free port), `--map movement_lab` and `--set <cvar>=<value>` (`docs/06` §8). It answers `GET /status` and `GET /metrics` with JSON on its port, logs a `metrics` line every 10 s (`sv_metricsInterval`), writes its metrics to a file at shutdown with `--metrics-out <file>` (`--metrics-discard <s>` leaves the first seconds out), and runs console commands typed on stdin (`set pm_gravity 400`, `metrics reset`). It runs under pnpm, which doesn't forward signals to the server. To stop it from a script or process manager, signal its process group (Ctrl+C does this), or run the bundle directly with `node packages/server/dist/main.js`.
 
 `pnpm test:browser` uses the Playwright browsers already on the machine. `pnpm exec playwright install chromium firefox webkit` downloads them (CI does this), and `CHROMIUM_PATH` points the Chromium run at another build.
 
@@ -47,7 +48,7 @@ pnpm typecheck && pnpm lint && pnpm test
 
 `pnpm --filter @game/client vectors-page <out.html>` builds the determinism vectors page as one self-contained HTML file: open it in any browser (a phone's Safari, say) and it replays every vector table there, showing PASS/FAIL per table. `pnpm dev` also serves it at http://localhost:5173/vectors.html.
 
-Commands for later milestones (`bots`, `balance-report`, `mapc`) already exist and print the milestone that adds them. `CLAUDE.md` has the full list.
+Commands for later milestones (`balance-report`, `mapc`) already exist and print the milestone that adds them. `CLAUDE.md` has the full list.
 
 ## Try it
 

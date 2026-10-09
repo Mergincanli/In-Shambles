@@ -55,7 +55,8 @@ const MILESTONES: Readonly<Record<string, Milestone>> = {
       "NET-09": "load",
     },
     // NET-01's fast test covers the v2 full snapshots since increment 4 (deltas and the deferred
-    // list extend it in increments 8 and 10); NET-04 keeps its M2 fast test until increment 9.
+    // list extend it in increments 8 and 10); NET-04 keeps its M2 fast test until increment 9;
+    // NET-09's fast in-process proxy landed in increment 6, its load leg comes in increment 18.
     pending: {
       "NET-02": "increment 8",
       "NET-02 long": "increment 9",
@@ -64,7 +65,6 @@ const MILESTONES: Readonly<Record<string, Milestone>> = {
       "NET-05 long": "increment 7",
       "NET-07": "increment 11",
       "NET-08": "increment 9",
-      "NET-09": "increment 6",
       "NET-09 load": "increment 18",
       "NET-10": "increment 13",
       "NET-12": "increment 9",

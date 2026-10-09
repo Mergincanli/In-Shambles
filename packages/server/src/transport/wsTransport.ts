@@ -12,6 +12,7 @@ import {
   type Transport,
   TransportStats,
   validPacketLength,
+  wsWireBytes,
 } from "@game/shared";
 import type { RawData, WebSocket } from "ws";
 
@@ -40,6 +41,19 @@ export class WsLimits {
   sendBufferDrop = 32768;
   /** Past this many, the socket closes 1008 "too slow"; reliable sends never drop. */
   sendBufferClose = 1048576;
+}
+
+/**
+ * Traffic on the wire, payload plus WebSocket framing (D-036: what a link carries; KB = 1000 B).
+ * The server gives one to each match and points its transports at it, so a match's bandwidth is
+ * counted as the bytes cross its sockets: binary messages that arrived (dropped ones included)
+ * and messages sent (not those dropped by backpressure).
+ */
+export class WireTraffic {
+  bytesIn = 0;
+  bytesOut = 0;
+  messagesIn = 0;
+  messagesOut = 0;
 }
 
 /**
@@ -93,6 +107,8 @@ export function closeReason(reason: string): string {
 export class WsTransport implements Transport {
   /** The code `close()` sends; the listener sets 1001 when the server shuts down. */
   closeCode = WS_CLOSE_NORMAL;
+  /** Where this socket's wire traffic is added up (its match's), or null. */
+  traffic: WireTraffic | null = null;
   private readonly inbox = new PacketQueue();
   private reliableQueued = 0;
   private messageCb: MessageHandler = ignoreMessage;
@@ -192,6 +208,11 @@ export class WsTransport implements Transport {
     else if (data instanceof ArrayBuffer) bytes = new Uint8Array(data);
     else bytes = Buffer.concat(data);
     const len = bytes.length;
+    const traffic = this.traffic;
+    if (traffic !== null) {
+      traffic.bytesIn += wsWireBytes(len, true);
+      traffic.messagesIn++;
+    }
     // ws refuses bigger frames (maxPayload); a socket without that cap is closed the same way.
     if (len > MAX_CLIENT_MESSAGE_BYTES) {
       this.fail(WS_CLOSE_TOO_BIG, "message too big");
@@ -235,6 +256,11 @@ export class WsTransport implements Transport {
     this.socket.send(Buffer.from(len === d.length ? d : d.subarray(0, len)));
     this.counters.sent++;
     this.counters.sentBytes += len;
+    const traffic = this.traffic;
+    if (traffic !== null) {
+      traffic.bytesOut += wsWireBytes(len, false);
+      traffic.messagesOut++;
+    }
   }
 
   /** Closes the socket with `code` now and tells the user from its next poll. */

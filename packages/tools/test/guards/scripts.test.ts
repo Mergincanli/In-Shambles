@@ -238,7 +238,7 @@ const testFiles = readdirSync(fromRoot("packages"), { recursive: true, encoding:
 const ID_SUITES = [
   ["BAL", "test:balance", ["01"]],
   ["MV", "test:movement", ["01", "03", "04", "05", "06", "07", "08", "17", "18", "19"]],
-  ["NET", "test:net", ["03", "04"]],
+  ["NET", "test:net", ["03", "04", "09"]],
 ] as const;
 
 describe.each(ID_SUITES)("naming of the %s-NN test files", (prefix, script, required) => {

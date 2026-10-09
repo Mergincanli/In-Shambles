@@ -24,12 +24,22 @@ export interface CommandLine {
   readonly mapsDir: string | null;
   /** `--port`, `--map`, then each `--set name=value`, in that order (they override the cfg). */
   readonly sets: readonly CvarAssignment[];
+  /** `--metrics-out <file>`: the run windows as JSON at shutdown (D-029); null = none. */
+  readonly metricsOut: string | null;
+  /** `--metrics-discard <s>`: the run window starts this many seconds after listen; 0 = at listen. */
+  readonly metricsDiscardS: number;
 }
 
 /**
+ * The longest `--metrics-discard`, s (a day; design value): far below `setTimeout`'s 2^31 − 1 ms,
+ * past which Node would fire the reset after 1 ms instead.
+ */
+export const METRICS_DISCARD_MAX_S = 86_400;
+
+/**
  * Parses the server's flags: `--cfg <file>`, `--port <n>` (= `--set sv_port=<n>`), `--map <name>`
- * (= `--set sv_map=<name>`), `--maps <dir>` and repeatable `--set <cvar>=<value>`. Anything else
- * is a ConfigError.
+ * (= `--set sv_map=<name>`), `--maps <dir>`, repeatable `--set <cvar>=<value>`, `--metrics-out
+ * <file>` and `--metrics-discard <s>`. Anything else is a ConfigError.
  */
 export function parseCommandLine(args: readonly string[]): CommandLine {
   let parsed: ReturnType<typeof parseFlags>;
@@ -47,7 +57,28 @@ export function parseCommandLine(args: readonly string[]): CommandLine {
     if (eq <= 0) throw new ConfigError(`--set ${item}: expected <cvar>=<value>`);
     sets.push({ name: item.slice(0, eq), value: item.slice(eq + 1), source: "--set" });
   }
-  return { cfg: v.cfg ?? null, mapsDir: v.maps ?? null, sets };
+  let metricsDiscardS = 0;
+  if (v["metrics-discard"] !== undefined) {
+    const text = v["metrics-discard"];
+    metricsDiscardS = Number(text);
+    if (
+      text.trim() === "" ||
+      !Number.isFinite(metricsDiscardS) ||
+      metricsDiscardS < 0 ||
+      metricsDiscardS > METRICS_DISCARD_MAX_S
+    ) {
+      throw new ConfigError(
+        `--metrics-discard ${text}: expected seconds from 0 to ${METRICS_DISCARD_MAX_S}`,
+      );
+    }
+  }
+  return {
+    cfg: v.cfg ?? null,
+    mapsDir: v.maps ?? null,
+    sets,
+    metricsOut: v["metrics-out"] ?? null,
+    metricsDiscardS,
+  };
 }
 
 function parseFlags(args: readonly string[]) {
@@ -61,6 +92,8 @@ function parseFlags(args: readonly string[]) {
       map: { type: "string" },
       maps: { type: "string" },
       set: { type: "string", multiple: true },
+      "metrics-out": { type: "string" },
+      "metrics-discard": { type: "string" },
     },
   });
 }

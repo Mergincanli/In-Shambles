@@ -56,6 +56,15 @@ export function registerServerCvars(reg: CvarRegistry): void {
     flags: CvarFlag.SERVER,
   });
   reg.register({
+    name: "sv_metricsInterval",
+    type: "int",
+    default: 10, // design (D-029)
+    min: 0,
+    max: 3600,
+    description: "Seconds between the metrics log lines (0 = none)",
+    flags: CvarFlag.SERVER,
+  });
+  reg.register({
     name: "sv_sendBufferDrop",
     type: "int",
     default: 32768, // ESTIMATE (D-030)

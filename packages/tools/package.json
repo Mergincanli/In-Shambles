@@ -11,7 +11,8 @@
     "greybox": "node --import tsx src/greybox/cli.ts",
     "bench": "node --import tsx bench/run.ts",
     "vectors": "node --import tsx src/vectors/generate.ts",
-    "feel-report": "node --import tsx src/reports/cli.ts"
+    "feel-report": "node --import tsx src/reports/cli.ts",
+    "bots": "node --import tsx src/bots/cli.ts"
   },
   "dependencies": {
     "@game/client": "workspace:*",

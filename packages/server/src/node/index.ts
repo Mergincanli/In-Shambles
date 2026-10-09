@@ -10,10 +10,23 @@ export {
   listen,
   WsListener,
 } from "../transport/wsListener";
-export { attachWs, WsLimits, type WsSocket, WsTransport } from "../transport/wsTransport";
+export {
+  attachWs,
+  WireTraffic,
+  WsLimits,
+  type WsSocket,
+  WsTransport,
+} from "../transport/wsTransport";
 export { isBundledServer, serverBuildHash } from "./buildHash";
 export { type CommandLine, ConfigError, parseCommandLine, parseServerCfg } from "./config";
 export { createNodeHost, type PassClock, type ServerMatch, TimedPass } from "./host";
 export { createJsonLog, type JsonLog } from "./log";
+export {
+  GcTracker,
+  GcWindow,
+  type MemorySample,
+  type MetricsSources,
+  ServerMetrics,
+} from "./metrics";
 export { DEFAULT_MATCH, type RunningServer, type StartOptions, startServer } from "./server";
 export { DEFAULT_PORT, registerServerCvars } from "./serverCvars";

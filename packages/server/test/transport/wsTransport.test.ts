@@ -14,6 +14,7 @@ import type { WebSocket } from "ws";
 import {
   attachWs,
   closeReason,
+  WireTraffic,
   WS_CLOSE_GOING_AWAY,
   WS_CLOSE_NORMAL,
   WS_CLOSE_POLICY,
@@ -202,6 +203,27 @@ describe("WsTransport (fake ws)", () => {
     ]);
     expect(t.stats().sent).toBe(2);
     expect(t.stats().sentBytes).toBe(8);
+  });
+
+  it("adds its wire traffic, payload plus framing, to its match's counter (D-036)", () => {
+    const { socket, t } = rig();
+    const traffic = new WireTraffic();
+    t.receive(msg(MSG_INPUT, 55), true);
+    t.traffic = traffic;
+    // A client's frames are masked: 55 + 2 + 4 and 200 + 4 + 4.
+    t.receive(msg(MSG_INPUT, 55), true);
+    t.receive(msg(MSG_CMD, 200), true);
+    // The server's are not: 436 + 4 and 20 + 2. A send dropped by backpressure is not counted.
+    t.sendUnreliable(msg(MSG_INPUT, 436), 436);
+    t.sendReliable(msg(MSG_CMD, 20), 20);
+    socket.bufferedAmount = new WsLimits().sendBufferDrop + 1;
+    t.sendUnreliable(msg(MSG_INPUT, 436), 436);
+    expect(traffic).toEqual({
+      bytesIn: 61 + 208,
+      bytesOut: 440 + 22,
+      messagesIn: 2,
+      messagesOut: 2,
+    });
   });
 
   it("drops unreliable sends past sv_sendBufferDrop, never reliable ones", () => {

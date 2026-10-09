@@ -178,7 +178,12 @@ describe("server smoke test", () => {
     // ws's MIT notice travels with the bundle (content/LICENSES.md).
     expect(readFileSync(join(outDir, "third-party-licenses.md"), "utf8")).toContain("## ws (MIT)");
 
-    const run = start(process.execPath, [outfile, "--port", "0"], serverDir);
+    const metricsFile = join(outDir, "metrics.json");
+    const run = start(
+      process.execPath,
+      [outfile, "--port", "0", "--metrics-out", metricsFile],
+      serverDir,
+    );
     await waitFor(run, READY, 10_000, true);
     const { port, buildHash } = listening(run);
     // The hash of the checkout it was built from, baked in: run from a temp dir, the bundle could
@@ -216,6 +221,10 @@ describe("server smoke test", () => {
         return client.closed !== null;
       }, "the client's close");
       expect(client.kicks.map((k) => k.reason)).toEqual(["server shutting down"]);
+      // The run windows, written on the way out (D-029).
+      const metrics = JSON.parse(readFileSync(metricsFile, "utf8"));
+      expect(metrics).toMatchObject({ buildHash, matches: { main: { map: "arena_greybox" } } });
+      expect(metrics.process.passes).toBeGreaterThan(0);
     }
   }, 30_000);
 

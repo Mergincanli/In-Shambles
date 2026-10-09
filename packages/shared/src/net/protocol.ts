@@ -58,6 +58,17 @@ export const MAX_RELIABLE_BYTES = 16384;
  */
 export const MAX_CLIENT_MESSAGE_BYTES = 2048;
 
+/**
+ * Bytes a message of `payload` bytes costs on a WebSocket, framing included (D-036 bandwidth
+ * accounting; FACT, RFC 6455 §5.2): a 2 B header, plus 2 B of extended length from 126 B and 8 B
+ * from 65536 B, plus the 4 B mask on every frame a client sends (`masked`). One frame per message:
+ * nothing here fragments.
+ */
+export function wsWireBytes(payload: number, masked: boolean): number {
+  const header = payload < 126 ? 2 : payload < 65536 ? 4 : 10;
+  return payload + header + (masked ? 4 : 0);
+}
+
 /** Short ASCII strings (build hash, map name, cvar names): a u6 length, 7 bits per char. */
 export const SHORT_TEXT_MAX = 63;
 

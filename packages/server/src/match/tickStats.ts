@@ -56,12 +56,14 @@ export class TickWindow {
 
 /**
  * Tick times of one match, or of the server's whole loop pass: a 1 s window the host closes once
- * a second (`endSecond`), keeping that second's p50/p99/max, and a run window that counts from
- * the start (or the last `resetRun`) for the metrics run (docs/06 §8).
+ * a second (`endSecond`), keeping that second's p50/p99/max; a run window that counts from the
+ * start (or the last `resetRun`) for the metrics run (docs/06 §8); and the window of the current
+ * metrics line, which the host reads and resets every `sv_metricsInterval` (`resetInterval`).
  */
 export class TickHistogram {
   readonly second = new TickWindow();
   readonly run = new TickWindow();
+  readonly interval = new TickWindow();
   /** p50, p99 and max (µs) of the last closed 1 s window. */
   lastP50Us = 0;
   lastP99Us = 0;
@@ -70,6 +72,7 @@ export class TickHistogram {
   record(us: number): void {
     this.second.record(us);
     this.run.record(us);
+    this.interval.record(us);
   }
 
   /** Closes the 1 s window: keeps its p50/p99/max and starts the next one. */
@@ -83,5 +86,9 @@ export class TickHistogram {
 
   resetRun(): void {
     this.run.reset();
+  }
+
+  resetInterval(): void {
+    this.interval.reset();
   }
 }

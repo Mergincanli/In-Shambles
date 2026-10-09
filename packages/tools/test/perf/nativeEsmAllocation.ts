@@ -3,6 +3,8 @@ import {
   ClientSim,
   type PortLike,
   PortTransport,
+  RandomWalk,
+  RouteInput,
   type SocketLike,
   STAT_CLOCK_ADJUSTMENTS,
   STAT_CORRECTIONS,
@@ -16,6 +18,7 @@ import {
   type PassClock,
   type ServerMatch,
   TimedPass,
+  WireTraffic,
   WsLimits,
   type WsSocket,
   WsTransport,
@@ -119,6 +122,7 @@ import {
   WorldFrame,
   wedgePlanes,
 } from "@game/shared";
+import { ARENA_RING } from "../../src/bots/routes";
 import { HoldInput, HopForward, StrafeHop } from "../../src/scenarios/bots";
 import { anchorYawU16, courseAnchor, loadCourse } from "../../src/scenarios/course";
 import { placeAtAnchor, ScenarioRecord, ScenarioRunner } from "../../src/scenarios/runner";
@@ -500,6 +504,39 @@ function runStrafeBot(n: number): void {
     outcomes[pcmd.right > 0 ? 0 : 1] = (outcomes[pcmd.right > 0 ? 0 : 1] as number) + 1;
     outcomes[2] = (outcomes[2] as number) + (pcmd.yaw & 1);
   }
+}
+
+// The bots' cmd sources (M3 increment 6, D-036), as each bot samples one per tick: a strafe-jump
+// route over arena_greybox's ring on synthetic states that circle the yard (waypoints reached),
+// stand still now and then (the stuck detector fires and random-walks out), land and take off;
+// and a random walk on its own.
+const botRoute = new RouteInput(ARENA_RING, 5, { idleTicks: 0 });
+const botWalk = new RandomWalk(6, { idleTicks: 0 });
+const botState = new PlayerState();
+
+/** Ticks `from` … `to` − 1 of the bot workload's script (whole-function optimized, not OSR). */
+function botTicks(from: number, to: number): void {
+  const ps = botState;
+  for (let i = from; i < to; i++) {
+    const k = i % 4000;
+    // A lap of the ring in 3600 ticks, then 400 ticks standing still.
+    const a = (Math.min(k, 3600) / 3600) * 2 * Math.PI;
+    const moving = k < 3600 ? 1 : 0;
+    ps.origin[0] = 900 * Math.cos(a);
+    ps.origin[1] = 560 * Math.sin(a);
+    ps.velocity[0] = -500 * moving * Math.sin(a);
+    ps.velocity[1] = 300 * moving * Math.cos(a);
+    ps.flags = (i & 31) < 3 ? PMF_GROUNDED : 0;
+    botRoute.sample(pcmd, ps);
+    botWalk.sample(pcmd, ps);
+  }
+}
+
+function runBotInput(n: number): void {
+  for (let i = 0; i < n; i += 1000) botTicks(i, Math.min(n, i + 1000));
+  outcomes[0] = botRoute.reached;
+  outcomes[1] = botRoute.stuckEvents;
+  outcomes[2] = botRoute.stuckTicks;
 }
 
 const codecWriter = new BitWriter(MAX_UNRELIABLE_BYTES);
@@ -1066,8 +1103,8 @@ const passClock: PassClock = {
 };
 const idleMatch = { tick: () => {} } as unknown as Match;
 const timedMatches: ServerMatch[] = [
-  { name: "a", match: idleMatch, ticks: new TickHistogram() },
-  { name: "b", match: idleMatch, ticks: new TickHistogram() },
+  { name: "a", match: idleMatch, ticks: new TickHistogram(), traffic: new WireTraffic() },
+  { name: "b", match: idleMatch, ticks: new TickHistogram(), traffic: new WireTraffic() },
 ];
 const timedPass = new TimedPass(timedMatches, () => {}, passClock);
 timedPass.loopStats = new LoopStats();
@@ -1085,6 +1122,8 @@ function runTimedPass(n: number): void {
 // Buffer each by design (D-030's boundary allocation) and are left out.
 const wsSocket: WsSocket = { bufferedAmount: 0, send: () => {}, close: () => {} };
 const wsTransport = new WsTransport(wsSocket, new WsLimits());
+// Counted as the server counts a match's sockets (D-036): payload plus framing per arrival.
+wsTransport.traffic = new WireTraffic();
 const wsCounts = new Int32Array(2);
 wsTransport.onMessage((_d, len, reliable) => {
   if (reliable) wsCounts[0] = (wsCounts[0] as number) + 1;
@@ -1147,6 +1186,7 @@ function runWsTransport(n: number): void {
 }
 
 const WORKLOADS: Record<string, (n: number) => void> = {
+  botInput: runBotInput,
   codec: runCodec,
   match: runMatch,
   pmove: runPmove,

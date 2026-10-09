@@ -1,12 +1,12 @@
-import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { CvarRegistry, PROTOCOL_VERSION, registerPmoveCvars } from "@game/shared";
 import { MatchLoop } from "../match/loop";
 import { MATCH_DEFAULT_MAX_CLIENTS, MATCH_MAX_CLIENTS, Match } from "../match/match";
-import { TickHistogram, type TickWindow } from "../match/tickStats";
+import { TickHistogram } from "../match/tickStats";
 import { WsListener } from "../transport/wsListener";
-import type { WsTransport } from "../transport/wsTransport";
+import { WireTraffic, type WsTransport } from "../transport/wsTransport";
 import { isBundledServer, serverBuildHash } from "./buildHash";
 import {
   applyAssignments,
@@ -19,6 +19,7 @@ import { runConsoleLine, startConsole } from "./console";
 import { createNodeHost, type ServerMatch, TimedPass } from "./host";
 import { createJsonLog, type JsonLog, matchLog } from "./log";
 import { defaultMapsDir, loadMap } from "./maps";
+import { ServerMetrics } from "./metrics";
 import { registerServerCvars } from "./serverCvars";
 
 /** The one match's name until a process runs several (D-047). */
@@ -48,28 +49,15 @@ export interface RunningServer {
   readonly cvars: CvarRegistry;
   readonly buildHash: string;
   readonly log: JsonLog;
+  /** GC, memory, traffic and the run and interval windows (D-029, D-036). */
+  readonly metrics: ServerMetrics;
   /**
    * Graceful shutdown (D-029): stop accepting, KICK every client "server shutting down" and close
-   * its socket 1001, stop the loop, and wait (bounded) for the sockets to close. Idempotent.
+   * its socket 1001, stop the loop, write `--metrics-out`, and wait (bounded) for the sockets to
+   * close. Idempotent.
    */
   stop(signal?: string): Promise<void>;
 }
-
-function windowJson(w: TickWindow) {
-  return {
-    count: w.count,
-    p50: w.percentileUs(50),
-    p95: w.percentileUs(95),
-    p99: w.percentileUs(99),
-    max: w.maxUs,
-  };
-}
-
-function lastSecondJson(h: TickHistogram) {
-  return { p50: h.lastP50Us, p99: h.lastP99Us, max: h.lastMaxUs };
-}
-
-const MB = 1024 * 1024;
 
 function round3(x: number): number {
   return Math.round(x * 1000) / 1000;
@@ -120,13 +108,13 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
       log: matchLog(log, DEFAULT_MATCH),
     }),
     ticks: new TickHistogram(),
+    traffic: new WireTraffic(),
   };
   const matches: Record<string, ServerMatch> = { [DEFAULT_MATCH]: main };
   const list = [main];
 
   const limits = sendLimits(cvars);
   const pass = new TimedPass(list, log);
-  const startedMs = performance.now();
 
   const listener = new WsListener({
     host: String(cvars.get("sv_host")),
@@ -136,6 +124,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
       hasMatch: (name) => name === "" || Object.hasOwn(matches, name),
       accept: (name, transport: WsTransport, ip) => {
         const m = matches[name === "" ? DEFAULT_MATCH : name] as ServerMatch;
+        transport.traffic = m.traffic;
         const s = m.match.connect(transport);
         log("info", "connect", { match: m.name, client: s === null ? null : s.clientId, ip });
       },
@@ -149,48 +138,19 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
           maxClients: m.match.maxClients,
         })),
       }),
-      metrics: () => {
-        const mem = process.memoryUsage();
-        return {
-          process: {
-            uptimeS: round3((performance.now() - startedMs) / 1000),
-            passes: pass.passes,
-            droppedTicks: loop.stats.dropped,
-            loopYields: loop.stats.yields,
-            tickUs: windowJson(pass.ticks.run),
-            lastSecondUs: lastSecondJson(pass.ticks),
-            cpuMsPerWallS: round3(pass.cpuMsPerWallS),
-            memoryMB: {
-              heapUsed: round3(mem.heapUsed / MB),
-              external: round3(mem.external / MB),
-              rss: round3(mem.rss / MB),
-            },
-            connections: listener.connections,
-          },
-          matches: Object.fromEntries(
-            list.map((m) => [
-              m.name,
-              {
-                map: m.match.mapName,
-                players: m.match.sessionCount,
-                serverTick: m.match.serverTick,
-                tickUs: windowJson(m.ticks.run),
-                lastSecondUs: lastSecondJson(m.ticks),
-                starved: m.match.metrics.starved,
-                strikes: m.match.metrics.strikes,
-                snapshots: m.match.metrics.snapshots,
-                kicks: m.match.metrics.kicks,
-              },
-            ]),
-          ),
-        };
-      },
+      metrics: () => metrics.json(),
     },
   });
   await listener.listen();
 
   const loop = new MatchLoop(pass, createNodeHost(log, pass));
   pass.loopStats = loop.stats;
+  const metrics = new ServerMetrics(
+    { matches: list, pass, loop: () => loop.stats, connections: () => listener.connections },
+    log,
+  );
+  metrics.gc.start();
+  const timers = startMetricsTimers(metrics, cvars.getNumber("sv_metricsInterval", 10), cli, log);
   loop.start();
   log("info", "server_ok", { startupMs: round3(performance.now()) });
   log("info", "listening", {
@@ -211,7 +171,16 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   const stopConsole =
     options.console === undefined
       ? () => {}
-      : startConsole(options.console, (line) => runConsoleLine(line, main.name, main.match, log));
+      : startConsole(options.console, (line) =>
+          runConsoleLine(line, main.name, main.match, log, {
+            metricsReset: () => {
+              metrics.resetRun();
+              log("info", "metrics_reset", { reason: "console", matches: list.length });
+              return `metrics reset: the process and ${list.length} match${list.length === 1 ? "" : "es"}`;
+            },
+          }),
+        );
+  const metricsOut = cli.metricsOut === null ? null : resolve(cwd, cli.metricsOut);
 
   let stopping: Promise<void> | null = null;
   const stop = (signal?: string): Promise<void> => {
@@ -221,11 +190,82 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     listener.stopAccepting();
     for (const m of list) kickAll(m.match, "server shutting down");
     loop.stop();
+    timers.stop();
+    metrics.gc.stop();
+    if (metricsOut !== null) writeMetrics(metricsOut, buildHash, metrics, log);
     stopping = listener.close(SHUTDOWN_CLOSE_MS);
     return stopping;
   };
 
-  return { matches, listener, loop, pass, cvars, buildHash, log, stop };
+  return { matches, listener, loop, pass, cvars, buildHash, log, metrics, stop };
+}
+
+/** Seconds between the memory samples that give the metrics windows their peaks. */
+const MEMORY_SAMPLE_S = 1;
+
+/**
+ * The metrics timers (D-029): a memory sample every second (the windows' peaks), one `metrics`
+ * line set every `intervalS` seconds (0 = none) and, with `--metrics-discard`, the run window's
+ * restart that many seconds after listen. One-shot timers, unref'd so they never keep the process
+ * alive; they run on the event loop between ticks, never inside one.
+ */
+function startMetricsTimers(
+  metrics: ServerMetrics,
+  intervalS: number,
+  cli: { readonly metricsDiscardS: number },
+  log: JsonLog,
+): { stop(): void } {
+  let line: NodeJS.Timeout | null = null;
+  let discard: NodeJS.Timeout | null = null;
+  let sample: NodeJS.Timeout | null = null;
+  const armSample = () => {
+    sample = setTimeout(() => {
+      metrics.sampleMemory();
+      armSample();
+    }, MEMORY_SAMPLE_S * 1000);
+    sample.unref();
+  };
+  armSample();
+  const arm = () => {
+    line = setTimeout(() => {
+      metrics.logInterval();
+      arm();
+    }, intervalS * 1000);
+    line.unref();
+  };
+  if (intervalS > 0) arm();
+  if (cli.metricsDiscardS > 0) {
+    discard = setTimeout(() => {
+      discard = null;
+      metrics.resetRun();
+      log("info", "metrics_reset", { reason: "discard", discardS: cli.metricsDiscardS });
+    }, cli.metricsDiscardS * 1000);
+    discard.unref();
+  }
+  return {
+    stop: () => {
+      if (line !== null) clearTimeout(line);
+      if (discard !== null) clearTimeout(discard);
+      if (sample !== null) clearTimeout(sample);
+      line = null;
+      discard = null;
+      sample = null;
+    },
+  };
+}
+
+/**
+ * Writes the run windows (`/metrics`'s JSON plus the build hash) to `file` at shutdown, creating
+ * its folder. A failure is logged, not thrown: shutdown goes on.
+ */
+function writeMetrics(file: string, buildHash: string, metrics: ServerMetrics, log: JsonLog): void {
+  try {
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, `${JSON.stringify({ buildHash, ...metrics.json() }, null, 2)}\n`);
+    log("info", "metrics_written", { file });
+  } catch (e) {
+    log("error", "error", { msg: `--metrics-out ${file}: ${e instanceof Error ? e.message : e}` });
+  }
 }
 
 /** KICKs every session of `match` with `reason` (each socket then closes). */

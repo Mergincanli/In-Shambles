@@ -102,6 +102,13 @@ describe.concurrent("per-tick paths under native ES modules", () => {
     expect(r.clean, r.attempts.join("; ")).toBe(true);
   }, 30_000);
 
+  it("the bots' route and random walk allocate nothing per tick (D-036)", async ({ expect }) => {
+    const r = await runChild("botInput");
+    // Waypoints reached, stuck detections, ticks spent random-walking out.
+    for (const n of r.outcomes) expect(n).toBeGreaterThan(0);
+    expect(r.clean, r.attempts.join("; ")).toBe(true);
+  }, 30_000);
+
   it("the INPUT, SNAPSHOT (full v2, 16 players), PING and PONG codecs allocate nothing, refusals included (D-026, D-033)", async ({
     expect,
   }) => {

@@ -4,6 +4,7 @@ import type { LogLevel, LoopHost } from "../match/host";
 import type { LoopStats, Tickable } from "../match/loop";
 import type { Match } from "../match/match";
 import { TickHistogram } from "../match/tickStats";
+import type { WireTraffic } from "../transport/wsTransport";
 import type { JsonLog } from "./log";
 
 /**
@@ -25,11 +26,12 @@ export function createNodeHost(log: JsonLog, pass?: TimedPass): LoopHost {
   };
 }
 
-/** One match the process runs, with its name and tick times. */
+/** One match the process runs, with its name, tick times and its sockets' wire traffic. */
 export interface ServerMatch {
   readonly name: string;
   readonly match: Match;
   readonly ticks: TickHistogram;
+  readonly traffic: WireTraffic;
 }
 
 /** The clocks `TimedPass` reads; tests and the allocation workload pass their own. */

@@ -392,8 +392,10 @@ The loop is driven by a monotonic clock with an accumulator. **Never `setInterva
 ### 9.2 Bandwidth budgets (16 players, 60 Hz; verify with bots)
 | Direction | Budget | Typical |
 |---|---|---|
-| Client → server | ≤ 8 KB/s | 4 cmds × 12 B × 60/s + headers ≈ 3.5–4 KB/s |
+| Client → server | ≤ 8 KB/s | one INPUT per tick with the last 4 cmds: 55 B + 6 B of masked WebSocket framing × 60/s ≈ 3.7 KB/s (D-036; the bots measure 3.6–3.7 KB/s with the clock's pings) |
 | Server → client | ≤ 32 KB/s | ≈ 300–600 B/snapshot × 60 ≈ 18–36 KB/s → **delta + relevance must keep it ≤ 32** |
+
+Bandwidth counts what crosses the link: payload plus WebSocket framing (RFC 6455: 2 B of header up to 125 B, 4 B up to 65535 B, plus a 4 B mask on every frame a client sends), with KB = 1000 B (D-036). The server counts it per match as its sockets carry it (`docs/06` §8), each bot at its own socket.
 
 **Degrade gracefully:** if a client's measured throughput can't keep up, halve that client's snapshot rate (30 Hz) before dropping entities.
 
@@ -458,7 +460,7 @@ The loop is driven by a monotonic clock with an accumulator. **Never `setInterva
 
 **Netgraph overlay** (toggle `cl_netgraph 1`): RTT, jitter, loss %, snapshots/s, interp delay, input buffer health, corrections/s and average size, bytes in/out per second, server tick time (from server stats), starved cmds. M2's netgraph shows all but interp delay and server tick time, which arrive in M3 with remote players and server stats (`docs/06` §7).
 
-**Headless bots** (`packages/tools/bots`): Node clients over the real transport, with scripted behaviors (strafe-jump circuits, wall-jump routes, firing at visible targets). They are used for load tests and NET tests.
+**Headless bots** (`packages/tools/src/bots`, `pnpm bots`; D-036): Node clients over the real transport, each a `ClientSim` behind its own net simulator (the run's profile, seeded per bot) over a `WebSocketTransport` on Node's built-in WebSocket, all in one process on one 60 Hz timer chain, each at its own phase. Behaviours: 3 in 5 strafe-jump a route (on `arena_greybox` the yard ring), the rest random-walk; a route bot with under 32 u of progress in 2 s random-walks for 1 s, then heads for the next waypoint. Without `--server` the run starts the server itself; before connecting it reads the match's `maxClients` from `GET /status` and refuses a count that does not fit; the bots send the server's build hash. Each run writes a JSON + markdown summary with PASS/FAIL against `docs/10` §4 and the prediction's health (no strike, no misprediction). Later: wall-jump routes (M4), firing at visible targets (M6). They are used for load tests and NET tests.
 
 **Demos/replays:** record the server snapshot stream + events per spectator view (`.demo` binary). A client player replays them, also used later for killcams and ghost runs. Client debug captures (cmds + received snapshots) reproduce prediction bugs offline.
 
@@ -473,11 +475,11 @@ The loop is driven by a monotonic clock with an accumulator. **Never `setInterva
 | NET-05 | Interpolation: remote player render paths are continuous under jitter (no frame-to-frame jump > speed × frame time × 1.5). |
 | NET-06 | Lag comp: bot shooter at 150 ms RTT tracking a strafing target hits ≥ 99% of scripted on-screen-aimed shots; shots older than `maxRewind` are not compensated. |
 | NET-07 | Time dilation: input buffer re-converges within 2 s after an RTT step from 50 → 150 ms. |
-| NET-08 | Bandwidth: 16 bots on the lab map, average down ≤ 32 KB/s per client, up ≤ 8 KB/s. |
+| NET-08 | Bandwidth: 16 bots + 1 human stand-in on `arena_greybox`, average down ≤ 32 KB/s per client, up ≤ 8 KB/s, counting payload plus WebSocket framing with KB = 1000 B (D-036, §9.2); a 32-player leg reports the default cap. |
 | NET-09 | Server perf: tick p99 ≤ 4 ms with 16 bots; no GC pause > 8 ms (`--trace-gc` sampling). |
 | NET-10 | Abuse: malformed/oversized packets, input floods, angle spam → server healthy, offender kicked. |
 | NET-11 | Relevance: enemies fully behind solid geometry beyond the leak radius are never sent; audio events coarse. |
-| NET-12 | Late join and reconnect: full state sync; no desync after 5 minutes of bot play. |
+| NET-12 | Late join and reconnect: full state sync; no desync after 5 minutes of bot play. A reconnect is a fresh session (a new HELLO, into the freed slot) that gets a full snapshot like a late joiner (D-036). |
 
 ## 15. Reading list (concepts, not code to copy)
 

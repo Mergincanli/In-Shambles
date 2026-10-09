@@ -7,6 +7,7 @@ import { TickHistogram } from "../../src/match/tickStats";
 import { startConsole } from "../../src/node/console";
 import { createNodeHost, type PassClock, type ServerMatch, TimedPass } from "../../src/node/host";
 import type { JsonLog } from "../../src/node/log";
+import { WireTraffic } from "../../src/transport/wsTransport";
 import { until } from "./wsClient";
 
 function fakeMatch(name: string, order: string[], tick: () => void = () => {}): ServerMatch {
@@ -16,7 +17,7 @@ function fakeMatch(name: string, order: string[], tick: () => void = () => {}): 
       tick();
     },
   } as unknown as Match;
-  return { name, match, ticks: new TickHistogram() };
+  return { name, match, ticks: new TickHistogram(), traffic: new WireTraffic() };
 }
 
 /** A clock that moves only when the test (or a fake match's tick) moves it. */

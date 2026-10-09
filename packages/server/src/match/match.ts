@@ -133,6 +133,8 @@ export class MatchMetrics {
   /** Strikes, all clients. */
   strikes = 0;
   snapshots = 0;
+  /** Snapshots sent without a baseline (every one until deltas, D-038). */
+  fullSnapshots = 0;
   kicks = 0;
   /** CVARS messages sent (broadcasts and resends). */
   cvarsSent = 0;
@@ -649,6 +651,7 @@ export class Match {
     s.transport.sendUnreliable(w.bytes, w.byteLength);
     s.stats.snapshots++;
     this.metrics.snapshots++;
+    if (h.baseBack === 0) this.metrics.fullSnapshots++;
   }
 
   private sendPong(s: Session): void {

@@ -22,7 +22,7 @@
     "format": "biome check --write .",
     "greybox": "pnpm --filter @game/tools --fail-if-no-match greybox",
     "bench": "pnpm --filter @game/tools --fail-if-no-match bench",
-    "bots": "node scripts/not-yet.mjs bots M3",
+    "bots": "pnpm --filter @game/tools --fail-if-no-match bots",
     "feel-report": "pnpm --filter @game/tools --fail-if-no-match feel-report",
     "balance-report": "node scripts/not-yet.mjs balance-report M6",
     "mapc": "node scripts/not-yet.mjs mapc M5"

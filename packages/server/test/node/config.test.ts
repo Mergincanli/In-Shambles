@@ -80,16 +80,42 @@ describe("parseCommandLine", () => {
         { name: "pm_gravity", value: "400", source: "--set" },
         { name: "sv_host", value: "a=b", source: "--set" },
       ],
+      metricsOut: null,
+      metricsDiscardS: 0,
     });
-    expect(parseCommandLine([])).toEqual({ cfg: null, mapsDir: null, sets: [] });
+    expect(parseCommandLine([])).toEqual({
+      cfg: null,
+      mapsDir: null,
+      sets: [],
+      metricsOut: null,
+      metricsDiscardS: 0,
+    });
   });
 
-  it.each([[["--bogus"]], [["--port"]], [["stray"]], [["--set", "novalue"]], [["--set", "=1"]]])(
-    "refuses %j",
-    (args) => {
-      expect(() => parseCommandLine(args)).toThrow(ConfigError);
-    },
-  );
+  it("takes the metrics file and the seconds discarded before the run window (D-029)", () => {
+    const cl = parseCommandLine(["--metrics-out", "out/m.json", "--metrics-discard", "2.5"]);
+    expect([cl.metricsOut, cl.metricsDiscardS]).toEqual(["out/m.json", 2.5]);
+    // Up to a day: setTimeout would fire a longer delay after 1 ms.
+    expect(parseCommandLine(["--metrics-discard", "86400"]).metricsDiscardS).toBe(86_400);
+    expect(() => parseCommandLine(["--metrics-discard", "86400.5"])).toThrow(
+      "--metrics-discard 86400.5: expected seconds from 0 to 86400",
+    );
+  });
+
+  it.each([
+    [["--bogus"]],
+    [["--port"]],
+    [["stray"]],
+    [["--set", "novalue"]],
+    [["--set", "=1"]],
+    [["--metrics-discard", "-1"]],
+    [["--metrics-discard", "soon"]],
+    [["--metrics-discard", " "]],
+    [["--metrics-discard", "3000000"]],
+    [["--metrics-out"]],
+  ])("refuses %j", (args) => {
+    expect(() => parseCommandLine(args)).toThrow(ConfigError);
+  });
 });
 
 describe("applyAssignments", () => {

@@ -81,6 +81,17 @@ describe("TickHistogram", () => {
     expect(h.run.count).toBe(0);
   });
 
+  it("keeps the metrics line's interval window apart from the run window", () => {
+    const h = new TickHistogram();
+    for (let i = 0; i < 10; i++) h.record(50);
+    h.resetInterval();
+    h.record(400);
+    expect([h.interval.count, h.interval.maxUs]).toEqual([1, 400]);
+    expect([h.run.count, h.run.maxUs]).toEqual([11, 400]);
+    h.resetRun();
+    expect(h.interval.count).toBe(1);
+  });
+
   it("keeps p50, p99 and max apart, each from its own rank", () => {
     const h = new TickHistogram();
     // 94 short ticks, 5 at 500 µs and one at 900 µs: p50 100, p95 500, p99 500, max 900.

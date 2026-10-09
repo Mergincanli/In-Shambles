@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { IncomingMessage } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -229,6 +229,91 @@ describe("Node server (in process, real WebSocket)", () => {
       match: "main",
       text: "pm_gravity = 400",
     });
+  });
+
+  it("keeps metrics: wire traffic, metrics lines, a discarded start, metrics reset and --metrics-out (D-029, D-036)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "server-metrics-"));
+    onTestFinished(() => rmSync(dir, { recursive: true, force: true }));
+    const input = new PassThrough();
+    const out = join(dir, "sub", "metrics.json");
+    const { server, lines, port } = await start(
+      ["--set", "sv_metricsInterval=1", "--metrics-out", out, "--metrics-discard", "0.2"],
+      input,
+    );
+    const c = await client(port);
+    c.hello(server.buildHash);
+    await poll(c, () => c.welcomes.length === 1, "WELCOME");
+    c.ready();
+    await until(
+      () => lines.some((l) => l.ev === "metrics_reset" && l.reason === "discard"),
+      "the discard's reset",
+    );
+    await poll(c, () => c.snapshots.length >= 30, "snapshots");
+    c.ping(1);
+    await poll(c, () => (server.matches.main?.traffic.messagesIn ?? 0) >= 3, "the ping");
+    // Within 1 s of listen, one line for the match and one for the process.
+    await until(() => lines.filter((l) => l.ev === "metrics").length >= 2, "metrics lines");
+    const [matchLine, processLine] = lines.filter((l) => l.ev === "metrics");
+    expect(matchLine).toMatchObject({ match: "main", players: 1, tickUs: expect.any(Object) });
+    expect(processLine).toMatchObject({ gc: expect.any(Object), memoryMB: expect.any(Object) });
+    expect(processLine?.match).toBeUndefined();
+
+    type Traffic = { bytesIn: number; bytesOut: number };
+    type Metrics = {
+      process: { runS: number; traffic: Traffic; gc: { count: number }; tickUs: { count: number } };
+      matches: {
+        main: {
+          fullSnapshots: number;
+          snapshots: number;
+          traffic: Traffic;
+          tickUs: { count: number };
+        };
+      };
+    };
+    const metrics = (await httpJson(port, "/metrics")).body as Metrics;
+    const main = metrics.matches.main;
+    expect(main.fullSnapshots).toBe(main.snapshots);
+    expect(main.snapshots).toBeGreaterThan(0);
+    // Every snapshot (37 B alone in the match) plus its 2 B frame header went out on its socket.
+    expect(main.traffic.bytesOut).toBeGreaterThanOrEqual(main.snapshots * 39);
+    expect(main.traffic.bytesIn).toBeGreaterThan(0);
+    expect(metrics.process.traffic).toEqual(main.traffic);
+    // The run window started at the discard, 0.2 s after listen.
+    expect(metrics.process.runS).toBeLessThan(
+      (Date.now() - Date.parse(lines[1]?.t as string)) / 1000 - 0.15,
+    );
+
+    input.write("metrics reset\n");
+    await until(() => lines.some((l) => l.ev === "console"), "the console reply");
+    const resetAt = performance.now();
+    // The process and the match each started their window at the reset.
+    const after = (await httpJson(port, "/metrics")).body as Metrics;
+    // Without the reset it would hold the ≥ 0.8 s since the discard (the metrics lines came first).
+    expect(after.process.runS).toBeLessThan((performance.now() - resetAt) / 1000 + 0.3);
+    expect(after.process.tickUs.count).toBeLessThan(metrics.process.tickUs.count);
+    expect(after.matches.main.tickUs.count).toBeLessThan(metrics.matches.main.tickUs.count);
+    expect(after.matches.main.snapshots).toBeLessThan(metrics.matches.main.snapshots);
+    expect(lines.find((l) => l.ev === "console")?.text).toBe(
+      "metrics reset: the process and 1 match",
+    );
+    expect(lines.filter((l) => l.ev === "metrics_reset").map((l) => l.reason)).toEqual([
+      "discard",
+      "console",
+    ]);
+
+    await server.stop("SIGTERM");
+    running = null;
+    const file = JSON.parse(readFileSync(out, "utf8")) as {
+      buildHash: string;
+      process: { passes: number; runS: number; tickUs: { count: number } };
+      matches: { main: { map: string } };
+    };
+    expect(file.buildHash).toBe(server.buildHash);
+    // The passes and the tick histogram cover the same window: the one since the reset.
+    expect(file.process.passes).toBe(file.process.tickUs.count);
+    expect(file.process.runS).toBeLessThan((performance.now() - resetAt) / 1000 + 0.3);
+    expect(file.matches.main.map).toBe("arena_greybox");
+    expect(lines.find((l) => l.ev === "metrics_written")).toMatchObject({ file: out });
   });
 
   it("refuses unknown paths and query strings with HTTP 404 before any socket opens", async () => {
