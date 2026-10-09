@@ -22,4 +22,17 @@ describe("view frame under native ES modules", () => {
     for (const n of r.outcomes) expect(n).toBeGreaterThan(0);
     expect(r.clean, r.attempts.join("; ")).toBe(true);
   }, 60_000);
+
+  it("the remote capsules' update allocates nothing: 16 remotes, teams, crouches, leaves", () => {
+    const out = spawnSync(
+      process.execPath,
+      ["--import", "tsx", "test/perf/playersUpdateAllocation.ts"],
+      { cwd: clientDir, encoding: "utf8" },
+    );
+    expect(out.status, out.stderr).toBe(0);
+    const r = JSON.parse(out.stdout) as { clean: boolean; attempts: string[]; outcomes: number[] };
+    // Capsules drawn, teleport marks, crouched draws, colour uploads.
+    for (const n of r.outcomes) expect(n).toBeGreaterThan(0);
+    expect(r.clean, r.attempts.join("; ")).toBe(true);
+  }, 60_000);
 });

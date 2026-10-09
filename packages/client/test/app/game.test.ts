@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { Match } from "@game/server";
 import { DEFAULT_PORT } from "@game/server/node";
 import {
+  BitWriter,
   buildCollisionWorld,
   type CloseHandler,
   CvarRegistry,
@@ -10,16 +11,22 @@ import {
   decodeCmap,
   degreesToU16,
   ENTITY_NONE,
+  encodeHello,
+  encodeReady,
+  HelloMsg,
   HULL_MINS,
+  MAX_RELIABLE_BYTES,
   type MessageHandler,
   MOVE_AXIS_MAX,
   PlayerState,
   registerPmoveCvars,
+  TEAM_2,
   TRACE_EPSILON,
   type Transport,
   type TransportStats,
   type UserCmd,
   VIEW_HEIGHT_STANDING,
+  vec3,
 } from "@game/shared";
 import { describe, expect, it } from "vitest";
 import {
@@ -40,11 +47,13 @@ import {
   ClientSim,
   type CmdSampler,
   NeutralInput,
+  type RemoteView,
   STAT_HARD_RESYNCS,
   STAT_SNAPSHOTS_LOST,
   STAT_STARVED,
   StrafeCircuit,
 } from "../../src/net";
+import type { GameRenderer } from "../../src/render/renderer";
 
 const mapUrl = new URL("../../../../content/maps/movement_lab.cmap", import.meta.url);
 const cmap = decodeCmap(new Uint8Array(readFileSync(fileURLToPath(mapUrl))));
@@ -126,7 +135,7 @@ class StallableLink implements Transport {
 function session(
   input: CmdSampler,
   camera: CameraOverride | null = null,
-  extra: Pick<GameOptions, "look" | "hud"> = {},
+  extra: Pick<GameOptions, "look" | "hud"> & { renderer?: GameRenderer } = {},
 ) {
   const now = { t: 0 };
   const [clientEnd, serverEnd] = createLoopbackPair();
@@ -147,7 +156,7 @@ function session(
     input,
   });
   const status: StatusSink = {};
-  const game = new Game({ client, renderer: null, status, camera, ...extra });
+  const game = new Game({ client, status, camera, ...extra, renderer: extra.renderer ?? null });
   client.connect();
   let serverTicks = 0;
   let frames = 0;
@@ -349,7 +358,7 @@ describe("game frame loop (M2 design §2)", () => {
     const { game, client, match, run } = session(new NeutralInput());
     run(1000);
     expect(client.active).toBe(true);
-    const o = match.spawnOrigin;
+    const o = match.spawns.origin(0, vec3());
     expect(Array.from(game.pose)).toEqual([
       o[0],
       o[1],
@@ -528,6 +537,63 @@ describe("game frame loop (M2 design §2)", () => {
     expect(maxPitch).toBeLessThan(0.75 * perTickPitch);
     expect(Math.min(...pitches)).toBeLessThan(-5);
     expect(Math.max(...pitches)).toBeGreaterThan(5);
+  });
+});
+
+describe("other players in the frame (M3 increment 5, D-034)", () => {
+  /** A second player on `match` that only joins (HELLO, READY) and then stands still. */
+  function joinBystander(match: Match): void {
+    const [end, serverEnd] = createLoopbackPair();
+    match.connect(serverEnd);
+    end.onMessage(() => {});
+    const w = new BitWriter(MAX_RELIABLE_BYTES);
+    const hello = new HelloMsg();
+    hello.buildHash = BUILD;
+    encodeHello(w, hello);
+    end.sendReliable(w.bytes, w.byteLength);
+    w.reset();
+    encodeReady(w);
+    end.sendReliable(w.bytes, w.byteLength);
+  }
+
+  it("draws every other player of the newest snapshot, never its own, and clears them on close", () => {
+    // A renderer stand-in that records what Game hands the capsules each frame.
+    const drawn: number[] = [];
+    const renderer = {
+      view: { pose: new Float64Array(5) },
+      players: { update: (v: RemoteView) => drawn.push(v.count) },
+      debug: { update: () => {} },
+      render: () => {},
+      drawCalls: 0,
+      triangles: 0,
+    } as unknown as GameRenderer;
+    const { game, client, match, status, run } = session(new StrafeCircuit(), null, { renderer });
+    run(1000);
+    expect(client.connection.clientId).toBe(0);
+    expect(game.remotes.count).toBe(0);
+    expect(status.remotes).toBe("0");
+    expect(drawn.length).toBeGreaterThan(100);
+    joinBystander(match);
+    run(1000);
+    const other = match.session(1)?.player;
+    if (other === undefined) throw new Error("the bystander did not join");
+    const v = game.remotes;
+    expect(v.count).toBe(1);
+    expect([v.visible[0], v.visible[1]]).toEqual([0, 1]);
+    // The second joiner is on team 2; it stands where the server has it.
+    expect(v.team[1]).toBe(TEAM_2);
+    expect([v.x[1], v.y[1], v.z[1]]).toEqual(Array.from(other.origin));
+    expect(status.remotes).toBe("1");
+    expect(drawn.at(-1)).toBe(1);
+    // The session ends: nobody is drawn any more.
+    const frames = drawn.length;
+    match.kick(match.session(0) as NonNullable<ReturnType<typeof match.session>>, "test over");
+    run(500);
+    expect(status.state).not.toBe("running");
+    expect(game.remotes.count).toBe(0);
+    expect([v.visible[0], v.visible[1]]).toEqual([0, 0]);
+    expect(status.remotes).toBe("0");
+    expect(drawn.length).toBe(frames);
   });
 });
 

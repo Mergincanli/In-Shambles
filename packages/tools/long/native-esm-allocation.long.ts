@@ -20,7 +20,7 @@ interface ChildResult {
   clean: boolean;
   attempts: string[];
   outcomes: number[];
-  /** wsTransport only: the client end's outcomes. */
+  /** wsTransport: the client end's outcomes; predict: [0] teleports. */
   extra: number[];
   /** codec only: hostile packets the decoders refused. */
   rejected: number;
@@ -154,13 +154,15 @@ describe.concurrent("per-tick paths under native ES modules", () => {
     expect(r.clean, r.attempts.join("; ")).toBe(true);
   }, 30_000);
 
-  it("client prediction allocates nothing: frames, predict, reconcile with re-simulation, clock steps (adaptive buffer included), hard resyncs, render offset (D-027, D-028)", async ({
+  it("client prediction allocates nothing: frames, predict, reconcile with re-simulation, clock steps (adaptive buffer included), hard resyncs, render offset, respawn teleports (D-027, D-028, D-035)", async ({
     expect,
   }) => {
     const r = await runChild("predict");
     // Corrections (dropped inputs), clock steps (the delay steps run every phase; this counts the
-    // ones in the slow-host phase, the low edge's), hard resyncs (frame hitches).
+    // ones in the slow-host phase, the low edge's), hard resyncs (frame hitches); teleports
+    // (respawns, D-035).
     for (const n of r.outcomes) expect(n).toBeGreaterThan(0);
+    expect(r.extra[0]).toBeGreaterThan(0);
     expect(r.clean, r.attempts.join("; ")).toBe(true);
   }, 30_000);
 

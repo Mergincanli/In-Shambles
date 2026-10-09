@@ -32,7 +32,12 @@ export const STAT_STRIKES = 12;
  * cmd of ours that came late, so the prediction could not match (timing, not a misprediction).
  */
 export const STAT_STARVED_CORRECTIONS = 13;
-export const STAT_COUNT = 14;
+/**
+ * Snapshots whose teleport counter changed (a spawn or respawn, D-035): the state was adopted and
+ * the render offset dropped, not counted as corrections.
+ */
+export const STAT_TELEPORTS = 14;
+export const STAT_COUNT = 15;
 
 const BUCKETS = 10;
 const BUCKET_MS = 100;

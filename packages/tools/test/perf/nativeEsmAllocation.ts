@@ -7,10 +7,11 @@ import {
   STAT_CLOCK_ADJUSTMENTS,
   STAT_CORRECTIONS,
   STAT_HARD_RESYNCS,
+  STAT_TELEPORTS,
   StrafeCircuit,
   WebSocketTransport,
 } from "@game/client/net";
-import { LoopStats, Match, TickHistogram } from "@game/server";
+import { LoopStats, Match, type Session, TickHistogram } from "@game/server";
 import {
   type PassClock,
   type ServerMatch,
@@ -881,7 +882,10 @@ function runMatch(n: number): void {
 //   backlog of snapshots overtakes the prediction and it hard-resyncs and re-anchors;
 // - every 4096 ticks, for 1024 ticks, the client runs a frame only every 5th server tick (83 ms,
 //   a slow host), so the buffer health saw-tooths: the low edge's window, its dip count and the
-//   adaptive lead run, and the clock fast-forwards on the dips (and holds after the phase).
+//   adaptive lead run, and the clock fast-forwards on the dips (and holds after the phase);
+// - every 4096 ticks the server respawns the client's player (Match.respawn, since M3 increment
+//   5), so a snapshot with a new teleport counter takes the predictor's SNAPSHOT_TELEPORT path and
+//   the client drops its render offset (D-035).
 // A run is n / 10 server ticks (and 2.4 frames per tick), after a warm-up 12 times as long: V8
 // keeps optimizing this path for some 250000 ticks before its heap use settles to 0.
 
@@ -955,6 +959,8 @@ class PredictRig {
   readonly match: Match;
   readonly client: ClientSim;
   readonly transport: ImpairedTransport;
+  /** The client's session, respawned every 4096 ticks. */
+  readonly session: Session;
   /** A second player that only joined, so the client's snapshots carry an entity record. */
   readonly bystander: LoopbackEndpoint;
   /** [0] fake now (ms), [1] server tick accumulator (ms). */
@@ -973,7 +979,9 @@ class PredictRig {
     const course = loadCourse("movement_lab");
     this.match = new Match({ cmap: course.cmap, world: course.world, buildHash: "alloc" });
     const [clientEnd, serverEnd] = createLoopbackPair();
-    this.match.connect(serverEnd, true);
+    const session = this.match.connect(serverEnd, true);
+    if (session === null) throw new Error("predict: the match refused the client");
+    this.session = session;
     this.transport = new ImpairedTransport(clientEnd);
     const [bystander, bystanderServer] = createLoopbackPair();
     this.bystander = bystander;
@@ -1028,6 +1036,7 @@ function runPredict(n: number): void {
       if (t % 1200 === 0) link.delay = link.delay === 0 ? 10 : 0;
       if ((t & 2047) === 1024) rig.pausedUntil = t + 8;
       if ((t & 4095) === 2048) rig.slowUntil = t + 1024;
+      if ((t & 4095) === 512) match.respawn(rig.session);
     }
     if (match.serverTick < rig.pausedUntil) continue;
     const slow = match.serverTick < rig.slowUntil;
@@ -1041,6 +1050,7 @@ function runPredict(n: number): void {
   outcomes[0] = totals[STAT_CORRECTIONS] as number;
   outcomes[1] = Math.min(totals[STAT_CLOCK_ADJUSTMENTS] as number, rig.slowSteps);
   outcomes[2] = totals[STAT_HARD_RESYNCS] as number;
+  extra[0] = totals[STAT_TELEPORTS] as number;
 }
 
 // The Node server's per-tick wrapper (D-029): TimedPass over two matches, both histograms and the

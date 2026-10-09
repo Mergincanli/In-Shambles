@@ -21,6 +21,7 @@ import type { GameHud } from "../hud/overlay";
 import type { MouseLook } from "../input/mouse";
 import {
   type ClientSim,
+  RemoteView,
   STAT_CORRECTIONS,
   STAT_HARD_RESYNCS,
   STAT_SNAPSHOTS,
@@ -124,6 +125,11 @@ export class Game {
   underwater = false;
   /** The view this frame: [0..2] eye position (sim u), [3] yaw, [4] pitch (degrees). */
   readonly pose = new Float64Array(5);
+  /**
+   * The other players this frame, as the renderer draws them: the newest stored snapshot as it
+   * stands until remote interpolation (increment 7).
+   */
+  readonly remotes = new RemoteView();
   frames = 0;
   /**
    * Frames that came longer after the previous one than the input buffer (`cl_inputBuffer` ticks,
@@ -264,11 +270,17 @@ export class Game {
       cam[1] = this.pose[1] as number;
       cam[2] = this.pose[2] as number;
       this.underwater = (pointContents(c.world, cam) & CONTENTS_WATER) !== 0;
+      const newest = c.store.newest;
+      if (newest !== null) this.remotes.fillFromFrame(newest, c.connection.clientId);
+      else this.remotes.clear();
+    } else if (this.wasActive) {
+      this.remotes.clear();
     }
     this.wasActive = active;
     const r = this.renderer;
     if (r !== null && active) {
       r.view.pose.set(this.pose);
+      r.players.update(this.remotes);
       r.debug.update(this.debugLines, cs.debugTraces);
       r.render(this.settings.fov);
     }
@@ -502,5 +514,7 @@ export class Game {
       tr[2] = o[2] as number;
     }
     s.distance = String(Math.round(tr[3] as number));
+    // Other players drawn this frame (two tabs on one server see 1 each).
+    s.remotes = String(this.remotes.count);
   }
 }

@@ -5,7 +5,11 @@ import {
   MAX_TICKS_PER_FRAME,
   MixedInput,
   NeutralInput,
+  SNAPSHOT_STALE,
+  SNAPSHOT_TELEPORT,
+  StrafeCircuit,
 } from "@game/client/net";
+import { SESSION_ACTIVE, type Session } from "@game/server";
 import {
   BitReader,
   BitWriter,
@@ -19,6 +23,7 @@ import {
   type MessageHandler,
   MSG_CMD,
   MSG_CVARS,
+  MSG_INPUT,
   MSG_SNAPSHOT,
   type NetProfile,
   type NetSimTransport,
@@ -40,16 +45,18 @@ class TapTransport implements Transport {
   /** Returns the bytes to deliver (the same or rewritten), or null to drop the message. */
   receive: (d: Uint8Array, len: number, reliable: boolean) => Uint8Array | null = (d) => d;
   send: (d: Uint8Array, len: number, reliable: boolean) => void = () => {};
+  /** False drops what the client sends (after `send` saw it). */
+  uplink: (d: Uint8Array, len: number, reliable: boolean) => boolean = () => true;
   /** Hands an unreliable message to the client now, as if it had just arrived (a reorder). */
   inject: (d: Uint8Array) => void = () => {};
   constructor(private readonly inner: Transport) {}
   sendUnreliable(d: Uint8Array, len: number): void {
     this.send(d, len, false);
-    this.inner.sendUnreliable(d, len);
+    if (this.uplink(d, len, false)) this.inner.sendUnreliable(d, len);
   }
   sendReliable(d: Uint8Array, len: number): void {
     this.send(d, len, true);
-    this.inner.sendReliable(d, len);
+    if (this.uplink(d, len, true)) this.inner.sendReliable(d, len);
   }
   onMessage(cb: MessageHandler): void {
     this.inject = (d) => cb(d, d.length, false);
@@ -75,10 +82,11 @@ class TapTransport implements Transport {
   }
 }
 
-function tapped(input: CmdSampler): { h: NetHarness; tap: TapTransport } {
+function tapped(input: CmdSampler, map?: string): { h: NetHarness; tap: TapTransport } {
   let tap: TapTransport | null = null;
   const h = new NetHarness({
     input,
+    map,
     wrap: (t) => {
       tap = new TapTransport(t);
       return tap;
@@ -106,6 +114,33 @@ function bump(h: NetHarness, dz: number): number {
   return tick;
 }
 
+/** Records every (tick, SNAPSHOT_* result) the client's predictor returns from now on. */
+function watchResults(h: NetHarness): [number, number][] {
+  const seen: [number, number][] = [];
+  const p = h.client.predictor;
+  const inner = p.onSnapshot.bind(p);
+  p.onSnapshot = (tick, s, hash16, teleportSeq) => {
+    const result = inner(tick, s, hash16, teleportSeq);
+    seen.push([tick, result]);
+    return result;
+  };
+  return seen;
+}
+
+/** The ticks whose snapshot the predictor took as a teleport (SNAPSHOT_TELEPORT). */
+function teleportTicks(seen: readonly [number, number][]): number[] {
+  return seen.filter(([, r]) => r === SNAPSHOT_TELEPORT).map(([t]) => t);
+}
+
+/** From frame `from` on, no render offset was left and the drawn position jumped over `min` u. */
+function expectSnappedFrom(h: NetHarness, from: number, min: number): void {
+  const f = h.frames;
+  expect(Math.max(...f.offset.slice(from))).toBe(0);
+  let jump = 0;
+  for (let j = from + 1; j < f.time.length; j++) jump = Math.max(jump, step(f, j));
+  expect(jump).toBeGreaterThan(min);
+}
+
 /** The first frame after `from` with a render offset, or −1. */
 function firstOffsetFrame(h: NetHarness, from: number): number {
   for (let i = from; i < h.frames.offset.length; i++)
@@ -122,7 +157,7 @@ describe("render offset", () => {
     h.run(600);
     expect(h.totals().corrections).toBe(1);
     // The spawn snapshot seeded the teleport counter, and nothing changed it since (D-035).
-    expect(h.client.teleports).toBe(0);
+    expect(h.totals().teleports).toBe(0);
     const i = firstOffsetFrame(h, from);
     expect(i).toBeGreaterThan(from);
     const f = h.frames;
@@ -166,6 +201,7 @@ describe("render offset", () => {
     const { h, tap } = tapped(new NeutralInput());
     h.runTicks(120);
     const from = h.frames.offset.length;
+    const results = watchResults(h);
     const tick = bump(h, 20);
     const r = new BitReader();
     const w = new BitWriter(MAX_UNRELIABLE_BYTES);
@@ -180,30 +216,32 @@ describe("render offset", () => {
       m.encode(w);
       return edit(t, tick, w.bytes.slice(0, w.byteLength));
     };
-    return { h, tap, from };
+    return { h, tap, from, tick, results };
   }
 
   function expectSnapped(h: NetHarness, from: number): void {
-    const f = h.frames;
-    expect(Math.max(...f.offset.slice(from))).toBe(0);
-    let jump = 0;
-    for (let j = from + 1; j < f.time.length; j++) jump = Math.max(jump, step(f, j));
-    expect(jump).toBeGreaterThan(15);
+    expectSnappedFrom(h, from, 15);
   }
 
   it("snaps on a change of the snapshot's teleport counter, however short the move", () => {
-    // The bump's own snapshot snaps; the later ones carry the same counter and don't.
-    const { h, from } = counterStep();
+    // The bump's own snapshot snaps, as a teleport and not a correction; the later ones carry the
+    // same counter and don't.
+    const { h, from, tick, results } = counterStep();
     h.run(600);
-    expect(h.totals().corrections).toBe(1);
-    expect(h.client.teleports).toBe(1);
+    expect(teleportTicks(results)).toEqual([tick]);
+    expect(h.totals().corrections).toBe(0);
+    expect(h.totals().teleports).toBe(1);
     expectSnapped(h, from);
   });
 
   it("still snaps when the snapshot of the jump is lost (D-035)", () => {
-    const { h, from } = counterStep((t, tick, d) => (t === tick ? null : d));
+    // The next snapshot carries the new counter: the predictor takes it as the teleport.
+    const { h, from, tick, results } = counterStep((t, tick, d) => (t === tick ? null : d));
     h.run(600);
-    expect(h.client.teleports).toBe(1);
+    expect(results.some(([t]) => t === tick)).toBe(false);
+    expect(teleportTicks(results)).toEqual([tick + 1]);
+    expect(h.totals().corrections).toBe(0);
+    expect(h.totals().teleports).toBe(1);
     expectSnapped(h, from);
   });
 
@@ -212,7 +250,7 @@ describe("render offset", () => {
     // stale to prediction, so the watched counter must not step back (and snap twice).
     let held: Uint8Array | null = null;
     let heldStored = false;
-    const { h, tap, from } = counterStep((t, tick, d) => {
+    const { h, tap, from, tick, results } = counterStep((t, tick, d) => {
       if (t === tick - 1) {
         held = d;
         return null;
@@ -228,14 +266,139 @@ describe("render offset", () => {
     });
     h.run(600);
     expect(heldStored).toBe(true);
-    expect(h.client.teleports).toBe(1);
+    // The jump's snapshot is the teleport; the older one, right after it, is stale to prediction.
+    expect(teleportTicks(results)).toEqual([tick]);
+    const at = results.findIndex(([t]) => t === tick);
+    expect(results[at + 1]).toEqual([tick - 1, SNAPSHOT_STALE]);
+    expect(h.totals().teleports).toBe(1);
     expectSnapped(h, from);
     // A later small correction eases as usual: the counter in hand is still the new one.
     const later = h.frames.offset.length;
     bump(h, 20);
     h.run(600);
-    expect(h.client.teleports).toBe(1);
+    expect(h.totals().teleports).toBe(1);
+    expect(h.totals().corrections).toBe(1);
+    expect(teleportTicks(results)).toEqual([tick]);
     expect(firstOffsetFrame(h, later)).toBeGreaterThan(later);
+  });
+});
+
+describe("respawns (D-035)", () => {
+  /** Respawns the client's player before the next server tick; returns that tick. */
+  function respawnNext(h: NetHarness, then?: () => void): number {
+    const tick = h.match.serverTick + 1;
+    h.beforeServerTick = () => {
+      expect(h.match.respawn(h.match.session(0) as Session)).toBe(true);
+      h.beforeServerTick = null;
+      then?.();
+    };
+    return tick;
+  }
+
+  it("a Match.respawn is a teleport, not a correction, even when the spawn's snapshot is lost", () => {
+    // arena_greybox: the player spawned at the first info_player_start; the respawn takes the
+    // second, far away.
+    const { h, tap } = tapped(new StrafeCircuit(), "arena_greybox");
+    h.runTicks(240);
+    const from = h.frames.offset.length;
+    const before = h.totals();
+    const results = watchResults(h);
+    const tick = respawnNext(h);
+    const r = new BitReader();
+    const m = new HandSnapshot(0);
+    tap.receive = (d, len, reliable) => {
+      if (reliable || d[0] !== MSG_SNAPSHOT) return d;
+      r.reset(d, len);
+      return m.decode(r) && m.header.serverTick === tick ? null : d;
+    };
+    h.run(600);
+    expect(results.some(([t]) => t === tick)).toBe(false);
+    expect(teleportTicks(results)).toEqual([tick + 1]);
+    const after = h.totals();
+    expect(after.teleports).toBe(1);
+    expect(after.corrections).toBe(before.corrections);
+    expect(after.starved).toBe(before.starved);
+    expect(after.hardResyncs).toBe(before.hardResyncs);
+    expectSnappedFrom(h, from, 64);
+  });
+
+  it("keeps the cmds queued before a respawn, so INPUTs lost right after it starve nothing", () => {
+    // With cl_inputBuffer 6 the server holds the cmds of the next 6 ticks or so when the respawn
+    // comes. The two INPUTs sent after it are lost; the third re-sends their cmds (4 per INPUT)
+    // in time. The cmds held were sent earlier and nothing re-sends them all: a respawn that
+    // cleared the queue would starve them (D-035).
+    const { h, tap } = tapped(new StrafeCircuit(), "arena_greybox");
+    expect(h.client.cvars.set("cl_inputBuffer", 6).ok).toBe(true);
+    h.runTicks(240);
+    const before = h.totals();
+    const results = watchResults(h);
+    let drop = 0;
+    tap.uplink = (d, _len, reliable) => {
+      if (reliable || d[0] !== MSG_INPUT || drop === 0) return true;
+      drop--;
+      return false;
+    };
+    const tick = respawnNext(h, () => {
+      drop = 2;
+    });
+    h.run(600);
+    expect(drop).toBe(0);
+    expect(teleportTicks(results)).toEqual([tick]);
+    const after = h.totals();
+    expect(after.starved).toBe(before.starved);
+    expect(after.corrections).toBe(before.corrections);
+    expect(after.hardResyncs).toBe(before.hardResyncs);
+  });
+
+  it("takes a respawn on the first snapshot after the spawn as a teleport (the counter seeded)", () => {
+    // The spawn snapshot seeds the predictor's counter; the next one already carries the
+    // respawn's, so it must show as a teleport, not as a correction.
+    const { h } = tapped(new StrafeCircuit(), "arena_greybox");
+    const results = watchResults(h);
+    let tick = -1;
+    h.beforeServerTick = () => {
+      const s = h.match.session(0);
+      if (s?.state !== SESSION_ACTIVE || h.match.serverTick !== s.spawnTick) return;
+      tick = h.match.serverTick + 1;
+      expect(h.match.respawn(s)).toBe(true);
+      h.beforeServerTick = null;
+    };
+    h.run(1000);
+    expect(tick).toBeGreaterThan(0);
+    expect(results[0]?.[0]).toBe(tick);
+    expect(teleportTicks(results)).toEqual([tick]);
+    expect(h.totals().teleports).toBe(1);
+    expect(h.totals().corrections).toBe(0);
+  });
+
+  it("a teleport drops a render offset that is still easing", () => {
+    // A 20 u correction leaves an offset to ease over cl_correctionSmoothMs (100 ms); a respawn
+    // three ticks later must drop what is left on the frame that sees it.
+    const { h } = tapped(new NeutralInput());
+    h.runTicks(120);
+    const p = h.client.predictor;
+    const inner = p.onSnapshot.bind(p);
+    let frame = -1;
+    p.onSnapshot = (tick, s, hash16, teleportSeq) => {
+      const result = inner(tick, s, hash16, teleportSeq);
+      if (result === SNAPSHOT_TELEPORT && frame < 0) frame = h.frames.offset.length;
+      return result;
+    };
+    const tick = h.match.serverTick + 1;
+    h.beforeServerTick = () => {
+      const t = h.match.serverTick + 1;
+      const s = h.match.session(0) as Session;
+      if (t === tick) s.player.origin[2] = (s.player.origin[2] as number) + 20;
+      if (t === tick + 3) {
+        expect(h.match.respawn(s)).toBe(true);
+        h.beforeServerTick = null;
+      }
+    };
+    h.run(600);
+    expect([h.totals().corrections, h.totals().teleports]).toEqual([1, 1]);
+    expect(frame).toBeGreaterThan(0);
+    expect(h.frames.offset[frame - 1]).toBeGreaterThan(5);
+    expect(h.frames.offset[frame]).toBe(0);
   });
 });
 

@@ -52,6 +52,7 @@ import {
   STAT_SNAPSHOTS_LOST,
   STAT_STARVED,
   STAT_STARVED_CORRECTIONS,
+  STAT_TELEPORTS,
 } from "./stats";
 
 /**
@@ -229,11 +230,6 @@ export class ClientSim {
   /** The last tick of the startup fill: snapshots up to it may be starved without harm. */
   startTick = -1;
   frames = 0;
-  /**
-   * Teleport-counter changes seen on snapshots newer than the last (D-035): one per counter step,
-   * none for the spawn snapshot that seeds it. Increment 5 moves this into the predictor.
-   */
-  teleports = 0;
   /** Messages from PRINT, oldest first; the caller drains it (the console, a test). */
   readonly prints: string[] = [];
   /** Movement events of this frame's first predictions (cleared at the start of each frame). */
@@ -271,8 +267,6 @@ export class ClientSim {
   private changed = false;
   /** A snapshot of this poll changed the local player's teleport counter (D-035). */
   private teleport = false;
-  /** The teleport counter of the newest snapshot, seeded by the first (D-035). */
-  private teleportSeq = 0;
   /** The local player's state from the snapshot in hand (its frame's own slot). */
   private readonly snapState = new PlayerState();
   /** Clock step asked for by this poll's snapshots (ticks; negative = hold). */
@@ -655,24 +649,25 @@ export class ClientSim {
     if (this.connection.state === CONN_SPAWNING) {
       // The first snapshot is the spawn: adopted whole, and its counter is the one to watch.
       p.reset(tick, state);
-      this.teleportSeq = h.teleportSeq;
+      p.teleportSeq = h.teleportSeq;
       this.anchor(tick, true);
       this.connection.markActive();
       return;
     }
     const prevTick = p.snapshotTick;
-    const result = p.onSnapshot(tick, state, h.cvarHash);
+    const teleports = p.teleports;
+    const result = p.onSnapshot(tick, state, h.cvarHash, h.teleportSeq);
     if (result === SNAPSHOT_STALE) return;
     if (tick > prevTick + 1) stats.add(STAT_SNAPSHOTS_LOST, tick - prevTick - 1);
     if ((h.flags & SNAP_FLAG_STARVED) !== 0 && tick > this.startTick) {
       stats.add(STAT_STARVED, 1);
     }
-    // A changed counter is a teleport even when the snapshot of the jump itself was lost (D-035);
-    // only snapshots newer than the last one move it.
-    if (h.teleportSeq !== this.teleportSeq) {
-      this.teleportSeq = h.teleportSeq;
+    // A changed counter is a teleport even when the snapshot of the jump itself was lost; only
+    // snapshots newer than the last one move it (D-035). It drops the render offset.
+    if (p.teleports !== teleports) {
       this.teleport = true;
-      this.teleports++;
+      this.changed = true;
+      stats.add(STAT_TELEPORTS, 1);
     }
     const t = this.t;
     if (result === SNAPSHOT_PARAMS_RESYNC) {

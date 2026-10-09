@@ -30,6 +30,7 @@ import {
   SNAPSHOT_MATCHED,
   SNAPSHOT_PARAMS_RESYNC,
   SNAPSHOT_STALE,
+  SNAPSHOT_TELEPORT,
 } from "../../src/net/predictor";
 
 const floor = buildBrush(boxPlanes([-4096, -4096, -64], [4096, 4096, 0]));
@@ -98,12 +99,12 @@ describe("Predictor (docs/05 §5)", () => {
     const pp = params(reg);
     const server = simulate(spawnState(), 100, 110, () => pp);
     expect(p.latestTick).toBe(130);
-    expect(p.onSnapshot(110, server, registryCvarHash(reg) & 0xffff)).toBe(SNAPSHOT_MATCHED);
+    expect(p.onSnapshot(110, server, registryCvarHash(reg) & 0xffff, 0)).toBe(SNAPSHOT_MATCHED);
     expect(p.snapshotTick).toBe(110);
     expect(p.corrections.total).toBe(0);
     // Older or repeated snapshots are stale.
-    expect(p.onSnapshot(110, server, registryCvarHash(reg) & 0xffff)).toBe(SNAPSHOT_STALE);
-    expect(p.onSnapshot(105, server, registryCvarHash(reg) & 0xffff)).toBe(SNAPSHOT_STALE);
+    expect(p.onSnapshot(110, server, registryCvarHash(reg) & 0xffff, 0)).toBe(SNAPSHOT_STALE);
+    expect(p.onSnapshot(105, server, registryCvarHash(reg) & 0xffff, 0)).toBe(SNAPSHOT_STALE);
   });
 
   it("records movement events and debug traces on first predictions only, not on re-simulation", () => {
@@ -120,7 +121,7 @@ describe("Predictor (docs/05 §5)", () => {
     expect(traces).toBeGreaterThan(0);
     const server = simulate(spawnState(), 100, 110, () => params(reg));
     server.origin[0] = (server.origin[0] as number) + 1;
-    expect(p.onSnapshot(110, server, registryCvarHash(reg) & 0xffff)).toBe(SNAPSHOT_CORRECTED);
+    expect(p.onSnapshot(110, server, registryCvarHash(reg) & 0xffff, 0)).toBe(SNAPSHOT_CORRECTED);
     expect(p.events.count).toBe(0);
     expect(p.traceLog.total).toBe(traces);
   });
@@ -133,7 +134,7 @@ describe("Predictor (docs/05 §5)", () => {
     server.origin[0] = (server.origin[0] as number) + 4;
     const predictedBefore = new PlayerState();
     p.stateAt(110, predictedBefore);
-    expect(p.onSnapshot(110, server, registryCvarHash(reg) & 0xffff)).toBe(SNAPSHOT_CORRECTED);
+    expect(p.onSnapshot(110, server, registryCvarHash(reg) & 0xffff, 0)).toBe(SNAPSHOT_CORRECTED);
     // The newest state is what the server will reach from its state with the same cmds.
     expect(
       playerStateEquals(
@@ -159,7 +160,7 @@ describe("Predictor (docs/05 §5)", () => {
     const server = simulate(spawnState(), 100, 110, () => pp);
     server.origin[1] = (server.origin[1] as number) + 2;
     const other = (registryCvarHash(reg) + 1) & 0xffff;
-    expect(p.onSnapshot(110, server, other)).toBe(SNAPSHOT_PARAMS_RESYNC);
+    expect(p.onSnapshot(110, server, other, 0)).toBe(SNAPSHOT_PARAMS_RESYNC);
     expect(p.corrections.total).toBe(0);
     expect(
       playerStateEquals(
@@ -174,7 +175,7 @@ describe("Predictor (docs/05 §5)", () => {
     const p = predictor(old, spawnState(true), 100, 130);
     const p800 = params(old);
     const s105 = simulate(spawnState(true), 100, 105, () => p800);
-    expect(p.onSnapshot(105, s105, registryCvarHash(old) & 0xffff)).toBe(SNAPSHOT_MATCHED);
+    expect(p.onSnapshot(105, s105, registryCvarHash(old) & 0xffff, 0)).toBe(SNAPSHOT_MATCHED);
     // The mirror takes the new block; ticks from 112 on fall at 400.
     const mirror = registry(400);
     const p400 = params(mirror);
@@ -184,10 +185,10 @@ describe("Predictor (docs/05 §5)", () => {
     expect(playerStateEquals(p.state, simulate(spawnState(true), 100, 130, byTick))).toBe(true);
     // Snapshots before the effective tick carry the old hash, after it the new one: no correction.
     const s110 = simulate(spawnState(true), 100, 110, byTick);
-    expect(p.onSnapshot(110, s110, registryCvarHash(old) & 0xffff)).toBe(SNAPSHOT_MATCHED);
+    expect(p.onSnapshot(110, s110, registryCvarHash(old) & 0xffff, 0)).toBe(SNAPSHOT_MATCHED);
     expect(p.pendingParams).toBe(true);
     const s115 = simulate(spawnState(true), 100, 115, byTick);
-    expect(p.onSnapshot(115, s115, registryCvarHash(mirror) & 0xffff)).toBe(SNAPSHOT_MATCHED);
+    expect(p.onSnapshot(115, s115, registryCvarHash(mirror) & 0xffff, 0)).toBe(SNAPSHOT_MATCHED);
     expect(p.pendingParams).toBe(false);
     expect(p.paramsFor(101).gravity).toBe(400);
     expect(p.corrections.total).toBe(0);
@@ -198,7 +199,7 @@ describe("Predictor (docs/05 §5)", () => {
     const p = predictor(old, spawnState(true), 100, 130);
     const p800 = params(old);
     const s110 = simulate(spawnState(true), 100, 110, () => p800);
-    p.onSnapshot(110, s110, registryCvarHash(old) & 0xffff);
+    p.onSnapshot(110, s110, registryCvarHash(old) & 0xffff, 0);
     const mirror = registry(400);
     expect(p.setPendingParams(mirror, registryCvarHash(mirror), 108)).toBe(true);
     expect(p.pendingParams).toBe(false);
@@ -218,11 +219,11 @@ describe("Predictor (docs/05 §5)", () => {
     const p = predictor(reg);
     const s = spawnState();
     s.origin[0] = 512;
-    expect(p.onSnapshot(140, s, hash)).toBe(SNAPSHOT_HARD_RESYNC);
+    expect(p.onSnapshot(140, s, hash, 0)).toBe(SNAPSHOT_HARD_RESYNC);
     expect([p.latestTick, p.snapshotTick]).toEqual([140, 140]);
     expect(playerStateEquals(p.state, s)).toBe(true);
     for (let t = 141; t <= 141 + CMD_RING_CAPACITY + 10; t++) p.predict(cmdFor(t));
-    expect(p.onSnapshot(150, s, hash)).toBe(SNAPSHOT_HARD_RESYNC);
+    expect(p.onSnapshot(150, s, hash, 0)).toBe(SNAPSHOT_HARD_RESYNC);
     expect(p.latestTick).toBe(150);
     expect(p.corrections.total).toBe(0);
   });
@@ -234,11 +235,116 @@ describe("Predictor (docs/05 §5)", () => {
     const hash = registryCvarHash(reg) & 0xffff;
     const p = predictor(reg);
     const s = spawnState();
-    expect(p.onSnapshot(140, s, hash)).toBe(SNAPSHOT_HARD_RESYNC);
+    expect(p.onSnapshot(140, s, hash, 0)).toBe(SNAPSHOT_HARD_RESYNC);
     for (let t = 141; t <= 141 + CMD_RING_CAPACITY + 10; t++) p.predict(cmdFor(t));
     s.origin[0] = 256;
-    expect(p.onSnapshot(150, s, hash ^ 1)).toBe(SNAPSHOT_HARD_RESYNC);
+    expect(p.onSnapshot(150, s, hash ^ 1, 0)).toBe(SNAPSHOT_HARD_RESYNC);
     expect([p.latestTick, p.snapshotTick]).toEqual([150, 150]);
+    expect(playerStateEquals(p.state, s)).toBe(true);
+  });
+});
+
+describe("Predictor teleport counter (D-035)", () => {
+  /** The server's state at `tick` after a respawn at (x, 0) on the spawn tick `spawnTick`. */
+  function respawned(x: number, spawnTick: number, tick: number, pp: PmoveParams): PlayerState {
+    const s = spawnState();
+    s.origin[0] = x;
+    return simulate(s, spawnTick, tick, () => pp);
+  }
+
+  it("adopts a changed counter's state as a teleport, not a correction, and re-simulates", () => {
+    const reg = registry();
+    const pp = params(reg);
+    const hash = registryCvarHash(reg) & 0xffff;
+    const p = predictor(reg);
+    // The first snapshot seeds the counter: nothing to count.
+    expect(
+      p.onSnapshot(
+        105,
+        simulate(spawnState(), 100, 105, () => pp),
+        hash,
+        7,
+      ),
+    ).toBe(SNAPSHOT_MATCHED);
+    expect([p.teleportSeq, p.teleports]).toEqual([7, 0]);
+    // A respawn 300 u away on tick 108, seen on 110 with the next counter.
+    const server = respawned(300, 108, 110, pp);
+    expect(p.onSnapshot(110, server, hash, 8)).toBe(SNAPSHOT_TELEPORT);
+    expect([p.teleportSeq, p.teleports, p.corrections.total]).toEqual([8, 1, 0]);
+    expect(
+      playerStateEquals(
+        p.state,
+        simulate(server, 110, 130, () => pp),
+      ),
+    ).toBe(true);
+    // Later snapshots with the same counter reconcile as usual.
+    expect(
+      p.onSnapshot(
+        115,
+        simulate(server, 110, 115, () => pp),
+        hash,
+        8,
+      ),
+    ).toBe(SNAPSHOT_MATCHED);
+    expect(p.teleports).toBe(1);
+  });
+
+  it("counts a wrapped counter and takes it even when the state happens to match", () => {
+    const reg = registry();
+    const pp = params(reg);
+    const hash = registryCvarHash(reg) & 0xffff;
+    const p = predictor(reg);
+    p.teleportSeq = 255;
+    expect(
+      p.onSnapshot(
+        110,
+        simulate(spawnState(), 100, 110, () => pp),
+        hash,
+        0,
+      ),
+    ).toBe(SNAPSHOT_TELEPORT);
+    expect([p.teleportSeq, p.teleports, p.corrections.total]).toEqual([0, 1, 0]);
+  });
+
+  it("never steps the counter on a stale snapshot, so a reordered old one doesn't snap twice", () => {
+    const reg = registry();
+    const pp = params(reg);
+    const hash = registryCvarHash(reg) & 0xffff;
+    const p = predictor(reg);
+    p.teleportSeq = 1;
+    const server = respawned(-200, 109, 112, pp);
+    // The spawn's own snapshot (110) was lost: 112 carries the new counter.
+    expect(p.onSnapshot(112, server, hash, 2)).toBe(SNAPSHOT_TELEPORT);
+    // 108 and 111, with the old and the new counter, arrive late: stale, the counter stays.
+    expect(
+      p.onSnapshot(
+        108,
+        simulate(spawnState(), 100, 108, () => pp),
+        hash,
+        1,
+      ),
+    ).toBe(SNAPSHOT_STALE);
+    expect(p.onSnapshot(111, respawned(-200, 109, 111, pp), hash, 2)).toBe(SNAPSHOT_STALE);
+    expect([p.teleportSeq, p.teleports]).toEqual([2, 1]);
+    expect(
+      p.onSnapshot(
+        114,
+        simulate(server, 112, 114, () => pp),
+        hash,
+        2,
+      ),
+    ).toBe(SNAPSHOT_MATCHED);
+  });
+
+  it("counts a teleport that comes with a hard resync, which adopts the state itself", () => {
+    const reg = registry();
+    const hash = registryCvarHash(reg) & 0xffff;
+    const p = predictor(reg);
+    p.teleportSeq = 4;
+    const s = spawnState();
+    s.origin[1] = 640;
+    expect(p.onSnapshot(140, s, hash, 5)).toBe(SNAPSHOT_HARD_RESYNC);
+    expect([p.teleportSeq, p.teleports, p.corrections.total]).toEqual([5, 1, 0]);
     expect(playerStateEquals(p.state, s)).toBe(true);
   });
 });

@@ -85,6 +85,18 @@ export class InputQueue {
   }
 
   /**
+   * Closes `tick` without taking its cmd: a respawn's spawn tick, which is not simulated (M3
+   * design §2.4). Its slot is marked held, so a cmd for it arriving later counts as a duplicate,
+   * not late: `late` stays the count of ticks simulated without their cmd.
+   */
+  skip(tick: number): void {
+    if (tick + 1 > this.nextTick) this.nextTick = tick + 1;
+    const i = tick & SLOT_MASK;
+    this.slotTick[i] = tick;
+    this.slotTaken[i] = 1;
+  }
+
+  /**
    * Copies the cmd for `tick` into `out` and returns true, or returns false (out untouched) when
    * none arrived. Either way ticks up to `tick` are closed: later cmds for them are dropped.
    */

@@ -377,7 +377,7 @@ describe("MultiHarness: clients", () => {
 });
 
 // The M3 starting point (M3 design §6 increment 3, "v1 16-client baseline"): 16 clients on
-// arena_greybox, all spawning at its first info_player_start (spawn rotation is increment 5), on
+// arena_greybox, client i spawning at its i-th info_player_start (the spawn rotation, increment 5), on
 // wan-150-loss2 with their own NetSim seeds, joining 100 ms apart; client 0 is observed (every tick
 // recorded) at 144 Hz, the others alternate 144 Hz and browser hitches. Prediction must hold as
 // NET-04 asks of its 16-client leg (< 1 correction/s, mean < 2 u, the observed client's render
@@ -394,6 +394,11 @@ const BASELINE_SECONDS = 30;
  * the bots overshoot its corners and range across the whole arena, which loads the match more.
  */
 const SW_SQUARE = { centerX: -720, centerY: -560, halfSide: 260, maxSpeed: 450 } as const;
+/**
+ * The clients that run the circuit: those whose spawn point (the rotation gives client i the
+ * i-th) lies in or near the south-west yard, so the way to the square is open floor.
+ */
+const ROUTE_CLIENTS: ReadonlySet<number> = new Set([4, 8, 10, 15]);
 
 describe("16 clients on arena_greybox over full v2 snapshots (the M3 baseline)", () => {
   it("predict without rubber-banding at wan-150-loss2, 436 B full snapshots, no strikes", () => {
@@ -401,10 +406,9 @@ describe("16 clients on arena_greybox over full v2 snapshots (the M3 baseline)",
     const link = profile("wan-150-loss2");
     for (let i = 0; i < BASELINE_CLIENTS; i++) {
       h.addClient({
-        input:
-          i % 4 === 1
-            ? new StrafeCircuit({ idleTicks: 90 + 7 * i, ...SW_SQUARE })
-            : new MixedInput(),
+        input: ROUTE_CLIENTS.has(i)
+          ? new StrafeCircuit({ idleTicks: 90 + 7 * i, ...SW_SQUARE })
+          : new MixedInput(),
         profile: link,
         frameIntervalMs: i % 2 === 0 ? FRAMES_144HZ : FRAMES_BROWSER_HITCHES,
         record: i === 0,
@@ -465,7 +469,7 @@ describe("16 clients on arena_greybox over full v2 snapshots (the M3 baseline)",
       expect(c.client.clock.rttMs, `client ${i}`).toBeLessThan(2 * link.delayMs + 120);
       // And the player moved: at running speed or faster, over hundreds of units.
       const b = box[i] as number[];
-      expect(top[i], `client ${i}`).toBeGreaterThan(i % 4 === 1 ? 400 : 300);
+      expect(top[i], `client ${i}`).toBeGreaterThan(ROUTE_CLIENTS.has(i) ? 400 : 300);
       expect(
         Math.max((b[1] as number) - (b[0] as number), (b[3] as number) - (b[2] as number)),
       ).toBeGreaterThan(500);

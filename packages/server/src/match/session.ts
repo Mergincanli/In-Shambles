@@ -1,4 +1,4 @@
-import { PlayerState, type Transport, UserCmd } from "@game/shared";
+import { PlayerState, TEAM_NONE, type Transport, UserCmd } from "@game/shared";
 import { InputQueue } from "./inputQueue";
 
 /** Waiting for HELLO. */
@@ -38,6 +38,8 @@ export class Session {
   snapFlags = 0;
   /** The slot's connect counter when this client took it (u16, wrapping): the entity's serial. */
   serial = 0;
+  /** TEAM_*: TEAM_NONE until READY assigns one (D-034; cosmetic until M7). */
+  team = TEAM_NONE;
   /** The client's nonce from HELLO. */
   nonce = 0;
   buildHash = "";

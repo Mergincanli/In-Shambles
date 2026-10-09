@@ -97,9 +97,12 @@ packages/server/src/
     host.ts            LoopHost: now, schedule, log (the Worker or Node adapter)
     loop.ts            accumulator loop: ticks due since start, catch-up cap 5; a late wake
                        yields to the host's I/O before catching up
-    match.ts           Match: handshake, sv_maxClients, spawn, per-tick order (docs/05 §8.1), the
-                       world frame and the v2 snapshots built from it, CVARS
-    session.ts         per-client state, player, input queue, counters, admin flag
+    match.ts           Match: handshake, sv_maxClients, teams, spawns and respawns, per-tick order
+                       (docs/05 §8.1), movement-event history, the world frame and the v2
+                       snapshots built from it, CVARS
+    session.ts         per-client state, player, team, input queue, counters, admin flag
+    spawns.ts          SpawnRotation (info_player_start round-robin in cmap order, origins raised
+                       ε) and assignTeam (the team with fewer active players; D-034)
     inputQueue.ts      cmds by tick (64 slots), duplicate/late/early counters
     commands.ts        CMD: set/reset/toggle on replicated cvars, cvars resend
     tickStats.ts       TickHistogram: 2048 × 10 µs buckets + overflow + exact max; 1 s and run
@@ -156,7 +159,8 @@ packages/client/src/
     webSocketTransport.ts  WebSocketTransport over a structural SocketLike (the browser's or Node's
                        WebSocket): channel from the type byte, pooled inbox, close reasons (D-030)
     scriptedInput.ts   StrafeCircuit, MixedInput (?bot= input, NET tests, M3 bots)
-                       (later: remote interpolation)
+    remotes.ts         RemoteView: the other players as the renderer draws them (M3: the newest
+                       stored snapshot; remote interpolation joins in M3 increment 7, D-037)
   input/               keyboard.ts (keys → binds, KeyboardEvent.code), mouse.ts (raw counts → view
                        angles), pointerLock.ts (unadjustedMovement where offered), sampler.ts
                        (+action states → UserCmd sampling)
@@ -168,7 +172,10 @@ packages/client/src/
     camera.ts          first-person camera: Hor+ field of view from cl_fov, pose from the sim
     renderer.ts        WebGLRenderer, scene, hemisphere + directional light, map load/unload
     viewCvars.ts       cl_fov, cl_stepSmoothMs, cl_viewHeightSmoothMs
-    players.ts         character models, animation from interpolated state
+    players.ts         M3: the other players as capsules in team colours (one InstancedMesh + a
+                       facing nub, 2 draw calls); later character models, animation from
+                       interpolated state
+    teamColors.ts      placeholder team hues (ESTIMATE until docs/08 §5 picks them, M8)
     viewmodel.ts       first-person weapon (separate scene/camera, own FOV)
     fx/                tracers, muzzle, impacts, blood, speed trail, smoke (pooled)
     debug/             debugDraw.ts (r_debugHull, r_debugTraces, r_debugGround); later hitboxes (current +
@@ -334,6 +341,7 @@ DEV / OFFLINE                                  ONLINE
 - **World (M2):** one mesh per cmap render surface (one per material), `MeshLambertMaterial` with a procedural 256² grid `CanvasTexture` per material (16 u minor and 64 u major lines, repeat-wrapped; uv0 is 1 per 64 u, `docs/07` §3): floor light grey, wall mid grey, `grey/ladder` with rungs, water blue at 0.5 opacity, double-sided, no depth write, anything else magenta. Hemisphere plus directional light, no shadows; geometry, materials and textures are disposed on unload.
 - **HUD:** DOM overlay updated imperatively (refs). Crosshair and ammo update immediately; scoreboard and minimap at ≤ 15 Hz. No framework re-render per frame. Menus may use a UI framework later.
   - M2 (`client/src/hud`): a crosshair; a click-to-play prompt while the pointer is free; a blue tint while the camera is inside water (`pointContents` at the camera); the speedometer (`cl_speedometer`: horizontal speed, vertical velocity and ground/air/water/ladder, the mode pmove dispatches on); the netgraph (`cl_netgraph`, bottom right: RTT, jitter, snapshot loss % and snapshots/s; corrections/s with mean and largest size and the render offset left; input-buffer health, its mean and its low edge (the lowest over 1.5 s, which the clock keeps at `cl_inputBuffer` − 1 or more, lifting it to `cl_inputBuffer`, so a mean grown above it shows the spread of bursty frames or jitter; after a re-anchor the last low edge until the window refills), starved cmds/s and clock adjustments; bytes in and out per second; hard and pending-parameter resyncs; the simulated profile); the renderer panel (`r_stats`). Rates are over the last second; the panels' text refreshes at ≤ 15 Hz. When the session closes (a kick, a refused WELCOME, a version or tick-rate mismatch, refused server cvars) the page's error box shows `disconnected: <reason>`, and the prompt and crosshair stay hidden.
+- **Players (M3, `client/src/render/players.ts`, D-034):** every other player is a capsule of the hull's radius (15 u) and height (56 u standing; squashed along the up axis to 40 u crouched), standing on the hull's feet and turned to its view yaw, with a small dark nub at eye height in front showing where it faces; colour by team (placeholders, ESTIMATE: team 1 orange `#d9652b`, team 2 blue `#2b8fd9`, no team grey `#9a9a9a`; `render/teamColors.ts`). One `InstancedMesh` of 64 capsules with a colour per instance and one of nubs sharing its matrix buffer: 2 draw calls whatever the player count, none with nobody visible. The game fills a `RemoteView` (`client/src/net/remotes.ts`) each frame and the renderer reads only that; until remote interpolation (D-037) it is the newest stored snapshot as it stands, so remotes move in tick steps. Instance matrices are written by `space.ts`'s `uprightToThree` (`space.ts` stays the only module that turns sim angles into scene rotations).
 - **Debug draw** (M2, `client/src/render/debug/debugDraw.ts`): one `LineSegments` with buffers sized once. `r_debugHull` draws the hull box at the drawn origin; `r_debugTraces` the traces of the frame's first predictions from pmove's `PmoveTraceLog` (green when clear, red when they hit, with an 8 u tick along the hit normal; kept while frames predict no tick); `r_debugGround` the ground normal from a short sweep under the predicted state, drawn under the hull's interpolated origin (yellow when walkable, magenta when steep). The segments are built in sim space and converted through `space.ts`.
 - **Audio:**
   - Footsteps and gunshots are positional (HRTF) with priority and voice limits. Footsteps are the gameplay-critical sound.

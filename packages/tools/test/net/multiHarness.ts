@@ -9,6 +9,7 @@ import {
   STAT_PARAM_RESYNCS,
   STAT_SNAPSHOTS,
   STAT_STARVED,
+  STAT_TELEPORTS,
 } from "@game/client/net";
 import {
   type LoopHost,
@@ -390,6 +391,7 @@ export class HarnessClient {
     clockAdjustments: number;
     paramResyncs: number;
     hardResyncs: number;
+    teleports: number;
   } {
     const t = this.client.stats.totals;
     const corrections = t[STAT_CORRECTIONS] as number;
@@ -402,6 +404,7 @@ export class HarnessClient {
       clockAdjustments: t[STAT_CLOCK_ADJUSTMENTS] as number,
       paramResyncs: t[STAT_PARAM_RESYNCS] as number,
       hardResyncs: t[STAT_HARD_RESYNCS] as number,
+      teleports: t[STAT_TELEPORTS] as number,
     };
   }
 

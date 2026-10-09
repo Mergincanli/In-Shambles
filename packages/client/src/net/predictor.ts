@@ -43,6 +43,12 @@ export const SNAPSHOT_PARAMS_RESYNC = 3;
  * adopted as the newest tick, and the caller re-anchors its clock.
  */
 export const SNAPSHOT_HARD_RESYNC = 4;
+/**
+ * The snapshot's teleport counter changed (a spawn or respawn, D-035): the state was adopted and
+ * the ticks after it re-simulated, and the caller drops its render offset. Not a correction: the
+ * server moved the player on purpose, so the prediction could not have known.
+ */
+export const SNAPSHOT_TELEPORT = 5;
 
 /** The last CMD_RING_CAPACITY cmds by tick; slots remember their tick, like PlayerStateRing. */
 export class CmdRing {
@@ -140,7 +146,10 @@ export class CorrectionLog {
  *   Movement events and the trace log are recorded here only, on a tick's first prediction.
  * - `onSnapshot` compares the server's state for tick A with the prediction for A using exact
  *   equality. On a mismatch it adopts the server's state and re-simulates A+1 … latest from the
- *   stored cmds, each tick with the parameters in force at that tick.
+ *   stored cmds, each tick with the parameters in force at that tick. A changed teleport counter
+ *   (D-035) adopts and re-simulates the same way, as a teleport rather than a correction; only
+ *   snapshots past the newest one move the counter, so a lost spawn snapshot still shows as a
+ *   teleport on the next one and a reordered older one never steps it back.
  * - Parameters switch by tick (D-027): `setPendingParams` loads a CVARS block for ticks from its
  *   effective tick on and re-simulates at once from the newest snapshot, so a live cvar change
  *   costs no correction on a lossless link. The pending set is promoted once a snapshot reaches
@@ -165,6 +174,13 @@ export class Predictor {
   readonly corrections = new CorrectionLog();
   /** [0] distance of the last correction, u. */
   readonly lastCorrection = new Float64Array(1);
+  /**
+   * The newest snapshot's teleport counter (D-035); −1 until a snapshot seeds it (the caller sets
+   * it from the spawn snapshot, or the first `onSnapshot` does).
+   */
+  teleportSeq = -1;
+  /** Teleport-counter changes seen (none for the snapshot that seeds it). */
+  teleports = 0;
 
   /** Parameters in force, their block's low 16 hash bits. */
   private params = new PmoveParams();
@@ -275,11 +291,19 @@ export class Predictor {
   }
 
   /**
-   * Reconciles with the server's state `s` for `tick`, simulated with cvar hash `hash16`. Returns
-   * a SNAPSHOT_* code; a correction is logged and its distance left in `lastCorrection[0]`.
+   * Reconciles with the server's state `s` for `tick`, simulated with cvar hash `hash16`, whose
+   * teleport counter is `teleportSeq`. Returns a SNAPSHOT_* code; a correction is logged and its
+   * distance left in `lastCorrection[0]`. A changed counter counts in `teleports` whatever the
+   * code (a hard or parameter resync adopts the state too).
    */
-  onSnapshot(tick: number, s: PlayerState, hash16: number): number {
+  onSnapshot(tick: number, s: PlayerState, hash16: number, teleportSeq: number): number {
     if (tick <= this.snapshotTick) return SNAPSHOT_STALE;
+    let teleported = false;
+    if (teleportSeq !== this.teleportSeq) {
+      teleported = this.teleportSeq >= 0;
+      if (teleported) this.teleports++;
+      this.teleportSeq = teleportSeq;
+    }
     const expectedHash = this.hashFor(tick);
     copyPlayerState(this.snapshot, s);
     this.snapshotTick = tick;
@@ -294,6 +318,8 @@ export class Predictor {
     } else if (!held) {
       this.reset(tick, s);
       return SNAPSHOT_HARD_RESYNC;
+    } else if (teleported) {
+      result = SNAPSHOT_TELEPORT;
     } else if (!playerStateEquals(this.scratch, s)) {
       result = SNAPSHOT_CORRECTED;
     }

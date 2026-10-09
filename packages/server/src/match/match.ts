@@ -18,7 +18,7 @@ import {
   decodeInput,
   decodePing,
   decodeReady,
-  degreesToU16,
+  ENTITY_EVENT_SLOTS,
   ENTITY_NONE,
   encodeCvars,
   encodeKick,
@@ -26,13 +26,13 @@ import {
   encodePrint,
   encodeSnapshot,
   encodeWelcome,
+  entityEventValue,
   groundTrace,
   HelloMsg,
   HULL_MINS,
   HULL_STANDING_MAXS,
   InputMsg,
   KickMsg,
-  MASK_PLAYERSOLID,
   MATCH_MAX_CLIENTS,
   MAX_RELIABLE_BYTES,
   MSG_CMD,
@@ -42,6 +42,8 @@ import {
   MSG_READY,
   PingMsg,
   type PlayerState,
+  PmoveEvent,
+  PmoveEvents,
   PmoveParams,
   PongMsg,
   PRINT_WARN,
@@ -51,7 +53,7 @@ import {
   peekMessageType,
   playerStateToSlot,
   pmove,
-  positionTest,
+  pushEntityEvent,
   quantizePlayerState,
   refreshPmoveParams,
   registerPmoveCvars,
@@ -60,15 +62,13 @@ import {
   SNAP_FLAG_STARVED,
   SnapshotHeader,
   sanitizeUserCmd,
-  TEAM_NONE,
+  TEAM_1,
+  TEAM_2,
   TICK_DT,
   TICK_MAX,
   TICK_RATE,
-  TRACE_EPSILON,
   type Transport,
   UserCmd,
-  type Vec3,
-  vec3,
   WelcomeMsg,
   WorldFrame,
 } from "@game/shared";
@@ -81,6 +81,7 @@ import {
   SESSION_WELCOMED,
   Session,
 } from "./session";
+import { assignTeam, SpawnRotation } from "./spawns";
 
 /** Player slots (D-034), from @game/shared since protocol v2 put them on the wire. */
 export { MATCH_MAX_CLIENTS };
@@ -100,9 +101,6 @@ export function effectiveMaxClients(requested: number): number {
 
 /** Stamina at spawn, in hundredths: staminaMax = health 100 with no vest (docs/03 §5.2, FACT). */
 export const SPAWN_STAMINA = 100 * 100;
-
-/** Classname of the M2 spawn point (docs/07 §3). */
-export const SPAWN_CLASSNAME = "info_player_start";
 
 export interface MatchOptions {
   readonly cmap: Cmap;
@@ -159,14 +157,17 @@ function freeClientId(sessions: readonly Session[], cap: number): number {
  *
  * `tick()` simulates T = serverTick + 1, in this order:
  * 1. Poll every session's transport in client-id order and handle what arrived: HELLO (version
- *    and build checked, else KICK; then WELCOME), READY (spawn), INPUT (into the input queue),
- *    PING (PONG), CMD (console commands; changing cvars needs the admin flag).
+ *    and build checked, else KICK; then WELCOME), READY (a team, then a spawn at the next point
+ *    of the rotation), INPUT (into the input queue), PING (PONG), CMD (console commands; changing
+ *    cvars needs the admin flag).
  * 2. If the cvars changed: refresh the pmove params and, when the replicated block changed,
  *    broadcast CVARS with effectiveTick = T, the first tick simulated with the new values.
  * 3. Per active client in id order: take its cmd for T, or repeat its last cmd with ATTACK cleared
- *    and tick = T (starved); sanitize; pmove. A player spawned this tick is not simulated: its
- *    spawn state is its state at T.
- * 4. Capture the world frame of T: every active player's state, serial and teleport counter.
+ *    and tick = T (starved); sanitize; pmove, whose movement events join the slot's event history
+ *    (the count and the two newest, as entities carry them). A player spawned this tick is not
+ *    simulated: its spawn state is its state at T.
+ * 4. Capture the world frame of T: every active player's state, serial, team, teleport counter
+ *    and event history.
  * 5. Per active client: a full SNAPSHOT of T (protocol v2, D-033): its own state as the local block,
  *    every other active player as an entity record, inputBufferHealth = newest cmd tick received −
  *    T (clamped to i8), flagged STARVED.
@@ -186,9 +187,8 @@ export class Match {
   readonly mapHashHi: number;
   readonly buildHash: string;
   readonly strictBuild: boolean;
-  /** Spawn origin, raised to the D-017 rest height, and yaw (u16). */
-  readonly spawnOrigin: Vec3 = vec3();
-  readonly spawnYaw: number;
+  /** The map's `info_player_start` points, taken round-robin by every spawn (D-034). */
+  readonly spawns: SpawnRotation;
   /** Players admitted: `sv_maxClients` after `effectiveMaxClients`. */
   readonly maxClients: number;
   /** Every active player at the last tick simulated, as snapshots are encoded from it (D-034). */
@@ -218,6 +218,17 @@ export class Match {
    */
   private readonly teleportSeqs = new Uint8Array(MATCH_MAX_CLIENTS);
   private readonly serials = new Uint16Array(MATCH_MAX_CLIENTS);
+  /**
+   * Per slot: the movement-event history entities carry (M3 design §2.4): a wrapping 8-bit count
+   * and the two newest (kind, value), newest first at `slot * 2`. Kept across the slot's players
+   * like the teleport counter, so a slot's count never steps back on a client.
+   */
+  private readonly eventSeqs = new Uint8Array(MATCH_MAX_CLIENTS);
+  private readonly evKinds = new Uint8Array(MATCH_MAX_CLIENTS * ENTITY_EVENT_SLOTS);
+  private readonly evValues = new Uint8Array(MATCH_MAX_CLIENTS * ENTITY_EVENT_SLOTS);
+  /** pmove's events of the client in hand. */
+  private readonly events = new PmoveEvents();
+  private readonly event = new PmoveEvent();
   private readonly ping = new PingMsg();
   private readonly pong = new PongMsg();
   private readonly cvarsMsg = new CvarsMsg();
@@ -244,21 +255,7 @@ export class Match {
     this.mapHashHi = Number.parseInt(cmap.contentHash.slice(0, 8), 16);
     this.mapHashLo = Number.parseInt(cmap.contentHash.slice(8, 16), 16);
 
-    const spawn = cmap.entities.find((e) => e.classname === SPAWN_CLASSNAME);
-    if (spawn?.origin === undefined) {
-      throw new Error(`map ${cmap.name} has no ${SPAWN_CLASSNAME} with an origin`);
-    }
-    // A fresh spawn rests one ε above the floor, as a landed player does (D-017, D-027): with its
-    // feet exactly on the floor it would meet a steep wedge's toe as a wall (D-023 "Steep toes").
-    this.spawnOrigin[0] = spawn.origin[0];
-    this.spawnOrigin[1] = spawn.origin[1];
-    this.spawnOrigin[2] = spawn.origin[2] + TRACE_EPSILON;
-    this.spawnYaw = degreesToU16(spawn.angles?.[1] ?? 0);
-    if (
-      !positionTest(this.world, this.spawnOrigin, HULL_MINS, HULL_STANDING_MAXS, MASK_PLAYERSOLID)
-    ) {
-      this.log("warn", `map ${cmap.name}: ${SPAWN_CLASSNAME} is inside solid`);
-    }
+    this.spawns = new SpawnRotation(cmap, this.world, this.log);
 
     this.refreshCvars();
     this.blockEffectiveTick = 0;
@@ -349,7 +346,9 @@ export class Match {
     }
     for (let i = 0; i < sessions.length; i++) {
       const s = sessions[i] as Session;
-      if (s.state === SESSION_ACTIVE && s.spawnTick !== t) this.simulate(s, t);
+      if (s.state !== SESSION_ACTIVE) continue;
+      if (s.spawnTick !== t) this.simulate(s, t);
+      else s.queue.skip(t);
     }
     this.capture(t);
     for (let i = 0; i < sessions.length; i++) {
@@ -386,7 +385,7 @@ export class Match {
       this.onHello(s, d, len);
     } else if (type === MSG_READY) {
       if (s.state !== SESSION_WELCOMED || !decodeReady(r)) this.strike(s);
-      else this.spawn(s, this.currentTick + 1);
+      else this.join(s, this.currentTick + 1);
     } else if (type === MSG_CMD) {
       if (s.state === SESSION_CONNECTING || !decodeCmd(r, this.cmdMsg)) this.strike(s);
       else this.onCmd(s, this.cmdMsg.text);
@@ -454,17 +453,60 @@ export class Match {
   // Simulation
 
   /**
-   * READY: the player appears at the spawn point at rest, facing its yaw, with full stamina,
-   * grounded if the ground trace finds walkable ground. Its state at tick `t` is this spawn
-   * state; simulation starts at t + 1, and the slot's teleport counter steps (D-035). The repeated cmd
-   * for a starved tick starts as a neutral one with the spawn yaw, which is what the client
-   * predicts with before its first real cmd (M2 design §2, "Client clock").
+   * Respawns an active player at the next spawn point on the next tick (M3 design §2.4; tests now,
+   * deaths and rounds in later milestones): its teleport counter steps, so every client snaps it,
+   * its own prediction included, even if the spawn tick's snapshot is lost (D-035). The cmds it
+   * has queued stay: they are what its client re-simulates the spawn state with once it sees the
+   * new counter, so a respawn costs no correction and no starved tick. The player faces the
+   * point's yaw on the spawn tick only: from the next tick its own cmds aim it, so it keeps the
+   * client's view direction (D-035; turning the client's view waits for deaths and rounds). False
+   * (nothing done) when the session is not active.
+   */
+  respawn(s: Session): boolean {
+    if (s.state !== SESSION_ACTIVE) return false;
+    this.spawn(s, this.currentTick + 1);
+    this.log("info", `client ${s.clientId} respawned at tick ${s.spawnTick}`);
+    return true;
+  }
+
+  /**
+   * READY: the player joins the team with fewer active players (team 1 on a tie; D-034) and
+   * spawns, with an empty input queue that takes cmds from the next tick on.
+   */
+  private join(s: Session, t: number): void {
+    let team1 = 0;
+    let team2 = 0;
+    const sessions = this.sessions;
+    for (let i = 0; i < sessions.length; i++) {
+      const o = sessions[i] as Session;
+      if (o.state !== SESSION_ACTIVE) continue;
+      if (o.team === TEAM_1) team1++;
+      else if (o.team === TEAM_2) team2++;
+    }
+    s.team = assignTeam(team1, team2);
+    s.queue.reset(t + 1);
+    this.spawn(s, t);
+    s.state = SESSION_ACTIVE;
+    this.log("info", `client ${s.clientId} spawned at tick ${t} on team ${s.team}`);
+  }
+
+  /**
+   * The player appears at the next spawn point of the rotation at rest, facing its yaw, with full
+   * stamina, grounded if the ground trace finds walkable ground. Its state at tick `t` is this
+   * spawn state; simulation starts at t + 1, and the slot's teleport counter steps (D-035). The
+   * repeated cmd for a starved tick starts as a neutral one with the spawn yaw, which is what the
+   * client predicts with before its first real cmd (M2 design §2, "Client clock"); a joining
+   * client takes its view from the spawn state, so it keeps facing the yaw, while a respawned
+   * one's cmds turn it back to its own view from t + 1.
    */
   private spawn(s: Session, t: number): void {
     const ps: PlayerState = s.player;
-    ps.origin.set(this.spawnOrigin);
+    const spawns = this.spawns;
+    const point = spawns.take();
+    const yaw = spawns.yaw(point);
+    spawns.origin(point, ps.origin);
     ps.velocity.fill(0);
-    ps.viewYaw = this.spawnYaw;
+    ps.viewYaw = yaw;
     ps.viewPitch = 0;
     ps.flags = 0;
     ps.groundEntity = ENTITY_NONE;
@@ -478,15 +520,12 @@ export class Match {
     c.forward = 0;
     c.right = 0;
     c.up = 0;
-    c.yaw = this.spawnYaw;
+    c.yaw = yaw;
     c.pitch = 0;
     c.weaponSlot = 0;
-    s.queue.reset(t + 1);
     s.spawnTick = t;
-    s.state = SESSION_ACTIVE;
     const id = s.clientId;
     this.teleportSeqs[id] = ((this.teleportSeqs[id] as number) + 1) & 0xff;
-    this.log("info", `client ${s.clientId} spawned at tick ${t}`);
   }
 
   private simulate(s: Session, t: number): void {
@@ -504,7 +543,23 @@ export class Match {
     }
     sanitizeUserCmd(cmd);
     copyUserCmd(s.lastCmd, cmd);
-    pmove(s.player, cmd, this.world, this.params, TICK_DT, null, null);
+    const events = this.events;
+    events.clear();
+    pmove(s.player, cmd, this.world, this.params, TICK_DT, events, null);
+    // Oldest first, so the newest ends first in the slot's history (docs/05 §10).
+    const ev = this.event;
+    const id = s.clientId;
+    for (let i = 0; i < events.count; i++) {
+      events.read(i, ev);
+      pushEntityEvent(
+        this.eventSeqs,
+        this.evKinds,
+        this.evValues,
+        id,
+        ev.type,
+        entityEventValue(ev),
+      );
+    }
   }
 
   /** Copies the registry into the params and the block; true when the replicated block changed. */
@@ -551,7 +606,10 @@ export class Match {
     return encodeWelcome(w, m);
   }
 
-  /** The world frame of tick `t`: every active player (stamp t), its serial and teleport counter. */
+  /**
+   * The world frame of tick `t`: every active player (stamp t), its serial, team, teleport counter
+   * and event history.
+   */
   private capture(t: number): void {
     const f = this.worldFrame;
     f.clear();
@@ -563,8 +621,14 @@ export class Match {
       f.setPresent(id, t);
       playerStateToSlot(f, id, s.player);
       f.serial[id] = s.serial;
-      f.team[id] = TEAM_NONE;
+      f.team[id] = s.team;
       f.teleportSeq[id] = this.teleportSeqs[id] as number;
+      f.eventSeq[id] = this.eventSeqs[id] as number;
+      const e = id * ENTITY_EVENT_SLOTS;
+      f.evKind[e] = this.evKinds[e] as number;
+      f.evValue[e] = this.evValues[e] as number;
+      f.evKind[e + 1] = this.evKinds[e + 1] as number;
+      f.evValue[e + 1] = this.evValues[e + 1] as number;
     }
   }
 

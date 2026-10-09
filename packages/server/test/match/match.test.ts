@@ -12,6 +12,7 @@ import {
   degreesToU16,
   ENTITY_FLAG_MASK,
   ENTITY_WORLD,
+  entityEventValue,
   entityVelocity,
   frameDigest,
   type MessageHandler,
@@ -23,7 +24,12 @@ import {
   MSG_SNAPSHOT,
   Mulberry32,
   PlayerState,
+  PMEV_JUMP,
+  PMEV_LAND,
+  PMEV_STEP,
   PMF_GROUNDED,
+  PmoveEvent,
+  PmoveEvents,
   PmoveParams,
   PRINT_ERROR,
   PRINT_INFO,
@@ -31,18 +37,23 @@ import {
   PROTOCOL_VERSION,
   playerStateEquals,
   pmove,
+  pushEntityEvent,
   refreshPmoveParams,
   registerPmoveCvars,
   registryCvarHash,
   SNAP_FIT_MAX_PLAYERS,
   SNAP_FLAG_STARVED,
   sanitizeUserCmd,
+  TEAM_1,
+  TEAM_2,
   TICK_DT,
   TICK_RATE,
   TRACE_EPSILON,
   type Transport,
   TransportStats,
   UserCmd,
+  vec3,
+  WorldFrame,
 } from "@game/shared";
 import { describe, expect, it } from "vitest";
 import {
@@ -216,10 +227,11 @@ describe("match handshake", () => {
     for (const c of [again, clients[2], clients[0]]) c?.ready();
     logs.length = 0;
     run(match, null, 1);
+    // Teams balance in id order too: 1, 2, then 1 on the tie (D-034).
     expect(logs).toEqual([
-      "client 0 spawned at tick 4",
-      "client 1 spawned at tick 4",
-      "client 2 spawned at tick 4",
+      "client 0 spawned at tick 4 on team 1",
+      "client 1 spawned at tick 4 on team 2",
+      "client 2 spawned at tick 4 on team 1",
     ]);
   });
 
@@ -620,7 +632,7 @@ describe("match snapshots (protocol v2, D-033–D-035)", () => {
       expect(sa.frame.originX[1]).toBe(p1.origin[0] * 32);
       expect(sa.frame.entVelY[1]).toBe(entityVelocity(p1.velocity[1] * 16));
       expect(sa.frame.flags[1]).toBe(p1.flags & ENTITY_FLAG_MASK);
-      expect([sa.frame.teleportSeq[1], sa.frame.team[1], sa.frame.stamp[1]]).toEqual([1, 0, t]);
+      expect([sa.frame.teleportSeq[1], sa.frame.team[1], sa.frame.stamp[1]]).toEqual([1, 2, t]);
     }
     expect(c.snapshots).toHaveLength(0);
     expect(match.worldFrame.presentCount).toBe(2);
@@ -669,6 +681,257 @@ describe("match snapshots (protocol v2, D-033–D-035)", () => {
     run(match, clients[0] as TestClient, 1);
     // 86 + 199 + 7 + 36 × 213 bits.
     expect([...sizes]).toEqual([995]);
+  });
+});
+
+describe("match spawns, teams, events and respawns (D-034, D-035)", () => {
+  const arena = loadMap("arena_greybox");
+  const arenaWorld = buildCollisionWorld(arena);
+
+  function arenaMatch(maxClients?: number): Match {
+    return new Match({
+      cmap: arena,
+      world: arenaWorld,
+      buildHash: TEST_BUILD,
+      ...(maxClients === undefined ? {} : { maxClients }),
+    });
+  }
+
+  it("spawns round-robin over the 16 info_player_start (the 17th wraps) and balances teams", () => {
+    const match = arenaMatch();
+    const clients: TestClient[] = [];
+    for (let i = 0; i < 17; i++) {
+      const cl = connect(match);
+      cl.hello();
+      clients.push(cl);
+    }
+    run(match, null, 1);
+    for (const cl of clients) cl.ready();
+    run(match, null, 1);
+    const o = vec3();
+    const f = match.worldFrame;
+    for (let id = 0; id < 17; id++) {
+      const point = id % 16;
+      const ps = match.session(id)?.player ?? new PlayerState();
+      expect(Array.from(ps.origin), `client ${id}`).toEqual(
+        Array.from(match.spawns.origin(point, o)),
+      );
+      expect(ps.viewYaw).toBe(match.spawns.yaw(point));
+      // Joined in id order: 1, 2, 1, 2 … (D-034).
+      const team = id % 2 === 0 ? TEAM_1 : TEAM_2;
+      expect(match.session(id)?.team).toBe(team);
+      expect(f.team[id]).toBe(team);
+    }
+    expect(match.spawns.next).toBe(1);
+    // Every receiver sees the others' teams in their entity records.
+    const c3 = clients[3] as TestClient;
+    c3.poll();
+    const frame = c3.lastSnapshot().frame;
+    expect([frame.team[0], frame.team[1], frame.team[16]]).toEqual([TEAM_1, TEAM_2, TEAM_1]);
+  });
+
+  it("gives a joiner the team with fewer active players, counting leavers out", () => {
+    const match = arenaMatch();
+    const a = joined(match);
+    const b = joined(match);
+    const c = joined(match);
+    expect([0, 1, 2].map((id) => match.session(id)?.team)).toEqual([TEAM_1, TEAM_2, TEAM_1]);
+    a.transport.close("bye");
+    c.transport.close("bye");
+    run(match, b, 1);
+    // Team 2 holds one player, team 1 none: the next joiner goes to team 1, the one after it too
+    // (the tie), and the third to team 2.
+    joined(match);
+    joined(match);
+    joined(match);
+    expect([0, 1, 2, 3].map((id) => match.session(id)?.team)).toEqual([
+      TEAM_1,
+      TEAM_2,
+      TEAM_1,
+      TEAM_2,
+    ]);
+  });
+
+  it("carries each player's movement events to the others: count and the two newest", () => {
+    const match = newMatch();
+    const mover = joined(match);
+    const observer = joined(match);
+    // Walk the mover up movement_lab's stairs, jumping now and then: STEP, JUMP and LAND events.
+    const stairs = cmap.entities.find((e) => e.props.targetname === "stairs_base")?.origin;
+    if (stairs === undefined) throw new Error("movement_lab has no stairs_base");
+    const player = match.session(0)?.player as PlayerState;
+    player.origin[0] = stairs[0];
+    player.origin[1] = stairs[1];
+    player.origin[2] = stairs[2] + TRACE_EPSILON;
+    const local = copyPlayerState(new PlayerState(), player);
+    const params = new PmoveParams();
+    const events = new PmoveEvents();
+    const ev = new PmoveEvent();
+    const ref = new WorldFrame();
+    const cmd = new UserCmd();
+    const kinds = new Set<number>();
+    for (let i = 1; i <= 150; i++) {
+      const t = match.serverTick + 1;
+      const c = cmdAt(t, 127, i % 45 === 0 ? BUTTON_JUMP : 0, 16384);
+      mover.input([c]);
+      run(match, null, 1);
+      observer.poll();
+      Object.assign(cmd, c);
+      sanitizeUserCmd(cmd);
+      events.clear();
+      pmove(local, cmd, world, params, TICK_DT, events, null);
+      for (let k = 0; k < events.count; k++) {
+        events.read(k, ev);
+        pushEntityEvent(ref.eventSeq, ref.evKind, ref.evValue, 0, ev.type, entityEventValue(ev));
+        kinds.add(ev.type);
+      }
+      const f = observer.lastSnapshot().frame;
+      expect(f.stamp[0]).toBe(t);
+      expect(
+        [f.eventSeq[0], f.evKind[0], f.evValue[0], f.evKind[1], f.evValue[1]],
+        `tick ${t}`,
+      ).toEqual([ref.eventSeq[0], ref.evKind[0], ref.evValue[0], ref.evKind[1], ref.evValue[1]]);
+    }
+    expect([...kinds].sort()).toEqual([PMEV_STEP, PMEV_JUMP, PMEV_LAND]);
+    expect(ref.eventSeq[0]).toBeGreaterThan(4);
+    expect(observer.bad).toBe(0);
+  });
+
+  it("keeps the two newest of a tick's several events, the newest first", () => {
+    // Routes found on arena_greybox from its third spawn point (forward, a jump every second):
+    // one tick lands on a lower floor with a step down (STEP then LAND), another jumps, steps and
+    // lands (three events, so the oldest falls out). Expected values are written out, not built
+    // with pushEntityEvent.
+    const routes = [
+      {
+        yaw: 15 * 2048,
+        ticks: 120,
+        kinds: [PMEV_STEP, PMEV_LAND],
+        record: [PMEV_LAND, 8, PMEV_STEP, 13],
+      },
+      {
+        yaw: 21 * 2048,
+        ticks: 240,
+        kinds: [PMEV_JUMP, PMEV_STEP, PMEV_LAND],
+        record: [PMEV_LAND, 0, PMEV_STEP, 16],
+      },
+    ];
+    for (const route of routes) {
+      const match = arenaMatch();
+      const observer = joined(match);
+      joined(match);
+      const mover = joined(match);
+      const player = match.session(2)?.player as PlayerState;
+      expect(Array.from(player.origin)).toEqual(Array.from(match.spawns.origin(2, vec3())));
+      const local = copyPlayerState(new PlayerState(), player);
+      const params = new PmoveParams();
+      const events = new PmoveEvents();
+      const ev = new PmoveEvent();
+      const cmd = new UserCmd();
+      let seq = 0;
+      const found: number[][] = [];
+      for (let i = 1; i <= route.ticks; i++) {
+        const t = match.serverTick + 1;
+        const c = cmdAt(t, 127, i % 60 === 0 ? BUTTON_JUMP : 0, route.yaw);
+        mover.input([c]);
+        run(match, null, 1);
+        observer.poll();
+        Object.assign(cmd, c);
+        sanitizeUserCmd(cmd);
+        events.clear();
+        pmove(local, cmd, arenaWorld, params, TICK_DT, events, null);
+        const f = observer.lastSnapshot().frame;
+        expect(f.stamp[2]).toBe(t);
+        const n = events.count;
+        expect(f.eventSeq[2], `tick ${t}`).toBe((seq + n) & 0xff);
+        seq = f.eventSeq[2] as number;
+        if (n < 2) continue;
+        const kinds: number[] = [];
+        for (let k = 0; k < n; k++) kinds.push(events.read(k, ev).type);
+        found.push(kinds);
+        expect(
+          [f.evKind[2 * 2], f.evValue[2 * 2], f.evKind[2 * 2 + 1], f.evValue[2 * 2 + 1]],
+          `tick ${t}`,
+        ).toEqual(route.record);
+      }
+      expect(found).toEqual([route.kinds]);
+    }
+  });
+
+  it("respawns an active player at the next point: the counter steps, its queued cmds stay", () => {
+    const match = arenaMatch();
+    const a = joined(match);
+    const b = joined(match);
+    const s = match.session(0);
+    if (s === undefined) throw new Error("no session");
+    // a starved while b joined; from here its cmds arrive three ticks ahead.
+    const starved = s.stats.starved;
+    for (let i = 0; i < 20; i++) {
+      const t = match.serverTick + 1;
+      a.input([cmdAt(t + 2, 127), cmdAt(t + 1, 127), cmdAt(t, 127)]);
+      run(match, a, 1);
+    }
+    expect(s.stats.starved).toBe(starved);
+    // The cmds for the next two ticks are queued when the respawn comes; none follow.
+    const t = match.serverTick + 1;
+    expect(match.respawn(s)).toBe(true);
+    run(match, a, 1);
+    b.poll();
+    const spawn = a.lastSnapshot();
+    const o = match.spawns.origin(2, vec3());
+    expect(spawn.serverTick).toBe(t);
+    expect(spawn.teleportSeq).toBe(2);
+    expect(Array.from(spawn.state.origin)).toEqual(Array.from(o));
+    expect(Array.from(spawn.state.velocity)).toEqual([0, 0, 0]);
+    // It faces the point's yaw on the spawn tick only (D-035).
+    expect(match.spawns.yaw(2)).not.toBe(0);
+    expect(spawn.state.viewYaw).toBe(match.spawns.yaw(2));
+    expect(s.spawnTick).toBe(t);
+    expect(b.lastSnapshot().frame.teleportSeq[0]).toBe(2);
+    // The same player: its team and serial stay.
+    expect([s.team, s.serial, match.worldFrame.serial[0]]).toEqual([TEAM_1, 1, 1]);
+    // The spawn tick isn't simulated; the next one is, with the cmd queued before the respawn.
+    const cmds = s.stats.cmds;
+    run(match, a, 1);
+    expect([s.stats.cmds, s.stats.starved]).toEqual([cmds + 1, starved]);
+    expect(a.lastSnapshot().state.origin[0]).not.toBe(o[0]);
+    expect(a.lastSnapshot().teleportSeq).toBe(2);
+    // From there its own cmds aim it: it keeps the client's view direction (yaw 0 here).
+    expect(a.lastSnapshot().state.viewYaw).toBe(0);
+    expect(s.player.viewYaw).toBe(0);
+  });
+
+  it("closes a respawn's spawn tick, so its cmd arriving afterwards is not counted late", () => {
+    // The spawn tick is never simulated, so it never starves: a cmd for it is a duplicate.
+    const match = arenaMatch();
+    const a = joined(match);
+    const s = match.session(0);
+    if (s === undefined) throw new Error("no session");
+    for (let i = 0; i < 10; i++) {
+      a.input([cmdAt(match.serverTick + 1, 127)]);
+      run(match, a, 1);
+    }
+    const late = s.queue.late;
+    const duplicates = s.queue.duplicates;
+    const t = match.serverTick + 1;
+    match.respawn(s);
+    run(match, a, 1);
+    a.input([cmdAt(t + 1, 127)]);
+    run(match, a, 1);
+    a.input([cmdAt(t, 127)]);
+    run(match, a, 1);
+    expect([s.queue.late, s.queue.duplicates]).toEqual([late, duplicates + 1]);
+  });
+
+  it("refuses to respawn a session that has not spawned", () => {
+    const match = arenaMatch();
+    const c = connect(match);
+    c.hello();
+    run(match, c, 1);
+    const s = match.session(0);
+    if (s === undefined) throw new Error("no session");
+    expect(match.respawn(s)).toBe(false);
+    expect([s.state, s.spawnTick, match.spawns.next]).toEqual([SESSION_WELCOMED, -1, 0]);
   });
 });
 

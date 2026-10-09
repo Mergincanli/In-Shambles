@@ -1,6 +1,7 @@
 import { ORIGIN_SCALE, toSigned16, VELOCITY_SCALE } from "../math/quant";
 import { hash32 } from "../rng/hash32";
 import { ENTITY_FLAG_MASK, MATCH_MAX_CLIENTS } from "../sim/entity";
+import { PMEV_LAND, PMEV_STEP, type PmoveEvent } from "../sim/events";
 import type { PlayerState } from "../sim/playerState";
 import { SNAPSHOT_HISTORY } from "./protocol";
 
@@ -121,6 +122,47 @@ export class WorldFrame {
 /** 1/16 u/s → the entity's 1 u/s, rounded half up and clamped to ±ENTITY_VELOCITY_MAX. */
 export function entityVelocity(vel16: number): number {
   return Math.max(-ENTITY_VELOCITY_MAX, Math.min(ENTITY_VELOCITY_MAX, (vel16 + 8) >> 4));
+}
+
+/** The largest LAND value (the 8-bit cap): an impact of 4072 u/s or more, rounded / 16. */
+export const ENTITY_LAND_VALUE_MAX = 255;
+
+/**
+ * A movement event's value as an entity record carries it (8 bits, M3 design §2.1): STEP the
+ * height change rounded to whole u as i8 (two's complement), JUMP 0, LAND the impact speed / 16
+ * rounded, at most 255; anything else 0. Takes the event, not its value, so no double crosses the
+ * call (`| 0` keeps −0 and every result a small integer).
+ */
+export function entityEventValue(ev: Readonly<PmoveEvent>): number {
+  const kind = ev.type;
+  if (kind === PMEV_STEP) {
+    return Math.max(-128, Math.min(127, Math.round(ev.value) | 0)) & 0xff;
+  }
+  if (kind === PMEV_LAND) {
+    return Math.max(0, Math.min(ENTITY_LAND_VALUE_MAX, Math.round(ev.value / 16) | 0));
+  }
+  return 0;
+}
+
+/**
+ * Appends an event (kind, 8-bit value) to `slot`'s history: the two newest, newest first at
+ * `slot * 2`, and a wrapping 8-bit count, as entities carry them (docs/05 §10). Works on a
+ * `WorldFrame`'s `eventSeq`/`evKind`/`evValue` and on any arrays of that shape.
+ */
+export function pushEntityEvent(
+  eventSeq: Uint8Array,
+  evKind: Uint8Array,
+  evValue: Uint8Array,
+  slot: number,
+  kind: number,
+  value: number,
+): void {
+  const e = slot * ENTITY_EVENT_SLOTS;
+  evKind[e + 1] = evKind[e] as number;
+  evValue[e + 1] = evValue[e] as number;
+  evKind[e] = kind;
+  evValue[e] = value;
+  eventSeq[slot] = ((eventSeq[slot] as number) + 1) & 0xff;
 }
 
 /**

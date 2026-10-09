@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   copySlot,
   ENTITY_EVENT_SLOTS,
+  ENTITY_LAND_VALUE_MAX,
   entityEquals,
+  entityEventValue,
   entityVelocity,
   FRAME_SLOTS,
   FrameRing,
@@ -12,11 +14,13 @@ import {
   MASK_PRESENT_HI,
   MASK_PRESENT_LO,
   playerStateToSlot,
+  pushEntityEvent,
   slotToPlayerState,
   WorldFrame,
 } from "../../src/net/worldFrame";
 import { Mulberry32 } from "../../src/rng/mulberry32";
 import { ENTITY_FLAG_MASK, MATCH_MAX_CLIENTS } from "../../src/sim/entity";
+import { PMEV_JUMP, PMEV_LAND, PMEV_NONE, PMEV_STEP, PmoveEvent } from "../../src/sim/events";
 import {
   PlayerState,
   PMF_CROUCH_PRESSED_IN_AIR,
@@ -268,6 +272,60 @@ describe("WorldFrame (M3 design §2.2)", () => {
     expect(frameDigest(f, 5)).not.toBe(base);
     f.setAbsent(remote);
     expect(frameDigest(f, 5)).not.toBe(base);
+  });
+});
+
+describe("entity events (M3 design §2.1, §2.4)", () => {
+  function value(type: number, v: number): number {
+    const ev = new PmoveEvent();
+    ev.type = type;
+    ev.value = v;
+    return entityEventValue(ev);
+  }
+
+  it("quantizes STEP to whole u as i8, LAND to impact / 16 up to 255, JUMP and none to 0", () => {
+    expect(value(PMEV_STEP, 16)).toBe(16);
+    expect(value(PMEV_STEP, 15.5)).toBe(16);
+    expect(value(PMEV_STEP, 0.25)).toBe(0);
+    // Down steps are two's complement; −0 never leaks.
+    expect(value(PMEV_STEP, -16.03125)).toBe(256 - 16);
+    expect(value(PMEV_STEP, -0.4)).toBe(0);
+    expect(Object.is(value(PMEV_STEP, -0.4), 0)).toBe(true);
+    expect(value(PMEV_STEP, 400)).toBe(127);
+    expect(value(PMEV_STEP, -400)).toBe(128);
+    expect(value(PMEV_LAND, 600)).toBe(38);
+    expect(value(PMEV_LAND, 7)).toBe(0);
+    expect(value(PMEV_LAND, 4080)).toBe(ENTITY_LAND_VALUE_MAX);
+    expect(value(PMEV_LAND, 1e6)).toBe(ENTITY_LAND_VALUE_MAX);
+    expect(value(PMEV_LAND, Number.NaN)).toBe(0);
+    expect(value(PMEV_JUMP, 123)).toBe(0);
+    expect(value(PMEV_NONE, 5)).toBe(0);
+  });
+
+  it("keeps the two newest, newest first, and a wrapping count", () => {
+    const f = new WorldFrame();
+    const s = 9;
+    const e = s * ENTITY_EVENT_SLOTS;
+    const slots = () => [
+      f.eventSeq[s],
+      f.evKind[e],
+      f.evValue[e],
+      f.evKind[e + 1],
+      f.evValue[e + 1],
+    ];
+    pushEntityEvent(f.eventSeq, f.evKind, f.evValue, s, PMEV_JUMP, 0);
+    expect(slots()).toEqual([1, PMEV_JUMP, 0, PMEV_NONE, 0]);
+    pushEntityEvent(f.eventSeq, f.evKind, f.evValue, s, PMEV_LAND, 38);
+    expect(slots()).toEqual([2, PMEV_LAND, 38, PMEV_JUMP, 0]);
+    pushEntityEvent(f.eventSeq, f.evKind, f.evValue, s, PMEV_STEP, 240);
+    expect(slots()).toEqual([3, PMEV_STEP, 240, PMEV_LAND, 38]);
+    // The neighbours are untouched; the count wraps at 8 bits.
+    expect([f.eventSeq[s - 1], f.eventSeq[s + 1], f.evKind[e - 1], f.evKind[e + 2]]).toEqual([
+      0, 0, 0, 0,
+    ]);
+    f.eventSeq[s] = 255;
+    pushEntityEvent(f.eventSeq, f.evKind, f.evValue, s, PMEV_JUMP, 0);
+    expect(slots()).toEqual([0, PMEV_JUMP, 0, PMEV_STEP, 240]);
   });
 });
 

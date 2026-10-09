@@ -9,6 +9,7 @@ export * from "./connection";
 export * from "./cvars";
 export * from "./portTransport";
 export * from "./predictor";
+export * from "./remotes";
 export * from "./scriptedInput";
 export * from "./smoothing";
 export * from "./snapshotStore";
