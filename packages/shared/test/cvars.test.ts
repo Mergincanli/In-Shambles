@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { CvarFlag, CvarRegistry } from "../src/cvars";
+import { CvarFlag, CvarRegistry, registerServerReplicatedCvars } from "../src/cvars";
 
 let cvars: CvarRegistry;
 
@@ -283,6 +283,16 @@ describe("cheats", () => {
     expect(cvars.get("sv_fps")).toBe(60);
   });
 
+  it("refuses a cvar that is both REPLICATED and CHEAT (D-042)", () => {
+    const def = { name: "pm_cheaty", type: "int" as const, default: 0, description: "x" };
+    expect(() => cvars.register({ ...def, flags: CvarFlag.REPLICATED | CvarFlag.CHEAT })).toThrow(
+      /both REPLICATED and CHEAT/,
+    );
+    expect(cvars.has("pm_cheaty")).toBe(false);
+    cvars.register({ ...def, flags: CvarFlag.CHEAT });
+    expect(cvars.has("pm_cheaty")).toBe(true);
+  });
+
   it("lets CHEAT cvars reset to the default whether or not cheats are on", () => {
     cvars.setAllowCheats(true);
     cvars.set("cg_thirdperson", true);
@@ -498,7 +508,7 @@ describe("replicated cvars fit the cvar block (D-027)", () => {
     expect(reg.set("cl_name", "Grüße").ok).toBe(true);
   });
 
-  it("setReplicated stores a server value as sent, past CHEAT and LATCH, but never clamps", () => {
+  it("setReplicated stores a server value as sent, past LATCH, but never clamps", () => {
     const reg = new CvarRegistry();
     reg.register({
       name: "pm_gravity",
@@ -507,10 +517,10 @@ describe("replicated cvars fit the cvar block (D-027)", () => {
       min: 0,
       max: 4000,
       description: "",
-      flags: R | CvarFlag.CHEAT | CvarFlag.LATCH,
+      flags: R | CvarFlag.LATCH,
     });
     reg.register({ name: "cl_fov", type: "float", default: 90, description: "" });
-    expect(reg.set("pm_gravity", 100)).toEqual({ ok: false, error: "cheat" });
+    expect(reg.set("pm_gravity", 100)).toMatchObject({ ok: true, latched: true });
     const v = reg.version;
     expect(reg.setReplicated("pm_gravity", 400.5)).toBe(true);
     expect([reg.get("pm_gravity"), reg.version]).toEqual([400.5, v + 1]);
@@ -522,5 +532,22 @@ describe("replicated cvars fit the cvar block (D-027)", () => {
     expect(reg.setReplicated("cl_fov", 100)).toBe(false);
     expect(reg.setReplicated("nope", 1)).toBe(false);
     expect([reg.get("pm_gravity"), reg.get("cl_fov"), reg.version]).toEqual([400.5, 90, v + 1]);
+  });
+});
+
+describe("registerServerReplicatedCvars (D-042)", () => {
+  it("registers sv_cheats: replicated, 0 or 1, default 0", () => {
+    const reg = new CvarRegistry();
+    registerServerReplicatedCvars(reg);
+    expect(reg.replicated().map((i) => i.def.name)).toEqual(["sv_cheats"]);
+    const def = reg.info("sv_cheats")?.def;
+    expect(def).toMatchObject({
+      type: "int",
+      default: 0,
+      min: 0,
+      max: 1,
+      flags: CvarFlag.REPLICATED,
+    });
+    expect(reg.set("sv_cheats", 5)).toMatchObject({ ok: true, value: 1, clamped: true });
   });
 });

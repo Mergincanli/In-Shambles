@@ -41,6 +41,7 @@ import {
   pushEntityEvent,
   refreshPmoveParams,
   registerPmoveCvars,
+  registerServerReplicatedCvars,
   registryCvarHash,
   SNAP_FIT_MAX_PLAYERS,
   SNAP_FLAG_STARVED,
@@ -202,6 +203,7 @@ describe("match handshake", () => {
     // The block is exactly the server's replicated cvars: a mirror takes it and hashes the same.
     const mirror = new CvarRegistry();
     registerPmoveCvars(mirror);
+    registerServerReplicatedCvars(mirror);
     mirror.set("pm_gravity", 123);
     expect(applyCvarBlock(mirror, w?.cvars ?? new CvarBlock())).toMatchObject({ ok: true });
     expect(registryCvarHash(mirror)).toBe(match.cvarHash);
@@ -1128,6 +1130,7 @@ describe("match console commands and replicated cvars", () => {
     // A mirror that applies the block simulates with the same parameters.
     const mirror = new CvarRegistry();
     registerPmoveCvars(mirror);
+    registerServerReplicatedCvars(mirror);
     expect(applyCvarBlock(mirror, admin.cvars[0]?.block ?? new CvarBlock())).toMatchObject({
       ok: true,
     });
@@ -1144,6 +1147,7 @@ describe("match console commands and replicated cvars", () => {
     const oldParams = new PmoveParams();
     const mirror = new CvarRegistry();
     registerPmoveCvars(mirror);
+    registerServerReplicatedCvars(mirror);
     mirror.set("pm_gravity", 400);
     const newParams = new PmoveParams();
     refreshPmoveParams(mirror, newParams);
@@ -1205,6 +1209,7 @@ describe("match console commands and replicated cvars", () => {
   it("does not broadcast when only a non-replicated cvar or an equal value changed", () => {
     const reg = new CvarRegistry();
     registerPmoveCvars(reg);
+    registerServerReplicatedCvars(reg);
     reg.register({ name: "sv_local", type: "int", default: 1, description: "test" });
     const match = newMatch(reg);
     const client = joined(match, true);

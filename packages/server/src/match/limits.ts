@@ -19,6 +19,8 @@ export const STRIKE_MALFORMED = 5;
 export const STRIKE_UNEXPECTED = 2;
 /** A tick in which a bucket ran dry and packets were dropped (once per tick). */
 export const STRIKE_RATE_LIMITED = 1;
+/** A wrong rcon password (D-042): three in a row reach the kick level. */
+export const STRIKE_RCON = 10;
 /** Ticks per point of decay: 1 point per second (design). */
 export const STRIKE_DECAY_TICKS = 60;
 

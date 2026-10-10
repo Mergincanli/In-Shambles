@@ -15,6 +15,7 @@ import {
   primePmoveOnce,
   refreshPmoveParams,
   registerPmoveCvars,
+  registerServerReplicatedCvars,
   SNAP_FLAG_STARVED,
   type SnapshotHeader,
   slotToPlayerState,
@@ -189,9 +190,16 @@ export interface ClientSimOptions {
   readonly clock: () => number;
   /**
    * The client's registry: the mirror of the server's replicated cvars plus the client's own.
-   * A new one with the pmove and client net cvars when absent.
+   * A new one with the replicated set (`registerPmoveCvars`, `registerServerReplicatedCvars`) and
+   * the client net cvars when absent. Every server block sets its cheats-allowed state from the
+   * mirror's `sv_cheats` (D-042).
    */
   readonly cvars?: CvarRegistry;
+  /**
+   * The server's `sv_cheats` turned the client's CHEAT cvars on or off (D-042); off has already
+   * reset them to their defaults. Rare: called from a block apply.
+   */
+  readonly onCheatsChanged?: (allowed: boolean) => void;
   /** Neutral input when absent. */
   readonly input?: CmdSampler;
   readonly nonce?: number;
@@ -282,6 +290,7 @@ export class ClientSim {
   /** The map WELCOME named (name and contentHash), once it arrived. */
   private requested: { readonly name: string; readonly contentHash: string } | null = null;
   private readonly onMapRequest: ((name: string, contentHash: string) => void) | null;
+  private readonly onCheatsChanged: ((allowed: boolean) => void) | null;
   private readonly clockFn: () => number;
   private readonly log: ClientLog;
   /**
@@ -321,10 +330,12 @@ export class ClientSim {
     this.currentWorld =
       options.world ?? (cmap === undefined ? NO_WORLD : buildCollisionWorld(cmap));
     this.onMapRequest = options.onMapRequest ?? null;
+    this.onCheatsChanged = options.onCheatsChanged ?? null;
     let cvars = options.cvars;
     if (cvars === undefined) {
       cvars = new CvarRegistry();
       registerPmoveCvars(cvars);
+      registerServerReplicatedCvars(cvars);
       registerClientNetCvars(cvars);
     }
     this.cvars = cvars;
@@ -714,6 +725,7 @@ export class ClientSim {
     }
     const applied = applyCvarBlock(this.cvars, m.cvars);
     if (!applied.ok) return `server cvars refused (${applied.error} ${applied.name})`;
+    this.applyCheats();
     this.predictor.setParams(this.cvars, cvarBlockHash(m.cvars));
     this.requested = { name: m.mapName, contentHash: hash };
     if (cmap !== null || this.onMapRequest === null) return null;
@@ -732,8 +744,21 @@ export class ClientSim {
       this.connection.disconnect(`server cvars refused (${applied.error} ${applied.name})`);
       return;
     }
+    this.applyCheats();
     this.predictor.setPendingParams(this.cvars, m.blockHash, m.effectiveTick);
     this.changed = true;
+  }
+
+  /**
+   * The mirror's `sv_cheats` decides whether the client's CHEAT cvars (third person, the debug
+   * views) may be on (D-042): set on every block apply; turning them off resets them.
+   */
+  private applyCheats(): void {
+    const reg = this.cvars;
+    const allowed = reg.getNumber("sv_cheats", 0) === 1;
+    const was = reg.cheatsAllowed();
+    reg.setAllowCheats(allowed);
+    if (allowed !== was && this.onCheatsChanged !== null) this.onCheatsChanged(allowed);
   }
 
   private onSnapshot(h: SnapshotHeader, frame: WorldFrame): void {

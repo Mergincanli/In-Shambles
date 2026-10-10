@@ -46,6 +46,7 @@ import {
   PmoveEvents,
   PmoveParams,
   PongMsg,
+  PRINT_ERROR,
   PRINT_WARN,
   PROTOCOL_VERSION,
   PrintMsg,
@@ -58,6 +59,7 @@ import {
   quantizePlayerState,
   refreshPmoveParams,
   registerPmoveCvars,
+  registerServerReplicatedCvars,
   registryCvarHash,
   SNAP_FIT_MAX_PLAYERS,
   SNAP_FLAG_STARVED,
@@ -65,6 +67,7 @@ import {
   sanitizeUserCmd,
   TEAM_1,
   TEAM_2,
+  TEXT_MAX,
   TICK_DT,
   TICK_MAX,
   TICK_RATE,
@@ -73,15 +76,16 @@ import {
   WelcomeMsg,
   type WorldFrame,
 } from "@game/shared";
-import { runServerCommand } from "./commands";
+import { type CommandResult, type MatchAdmin, parseRcon, runServerCommand } from "./commands";
 import { ACK_AHEAD, ACK_AHEAD_STRIKES, acceptAck, WorldHistory } from "./history";
-import type { MatchEventLog, MatchLog } from "./host";
+import type { MatchEventLog, MatchLog, RconGate } from "./host";
 import {
   RELIABLE_REFILL_UNITS,
   SessionLimits,
   STRIKE_KICK,
   STRIKE_MALFORMED,
   STRIKE_RATE_LIMITED,
+  STRIKE_RCON,
   STRIKE_UNEXPECTED,
   STRIKE_WARN,
   UNRELIABLE_REFILL_UNITS,
@@ -121,7 +125,10 @@ export interface MatchOptions {
   readonly cmap: Cmap;
   /** Built from `cmap` when absent. */
   readonly world?: CollisionWorld;
-  /** The server's registry; a new one with the pmove cvars when absent. */
+  /**
+   * The server's registry; when absent a new one with the replicated set (`registerPmoveCvars`,
+   * `registerServerReplicatedCvars`) at its defaults.
+   */
   readonly cvars?: CvarRegistry;
   /** HELLO's buildHash must equal it (short ASCII), unless `strictBuild` is false. */
   readonly buildHash: string;
@@ -161,6 +168,20 @@ export interface MatchOptions {
    * false to save its cost; it never changes a result.
    */
   readonly primer?: boolean;
+  /**
+   * Checks an rcon password (D-042, M3 design §2.10): the Node server compares it with
+   * `SV_RCON_PASSWORD` in constant time. Absent: rcon is disabled (the Worker's client is admin
+   * anyway). The match never logs or echoes the password, nor the rcon line it came in (a kick's
+   * reason is logged as any kick's is).
+   */
+  readonly rcon?: (password: string) => boolean;
+  /** Per-address lockout after failed rcon passwords (the Node server's `RconGuard`). */
+  readonly rconGate?: RconGate;
+  /**
+   * `metrics reset` from rcon or this match's console: restarts this match's metrics run window
+   * only (M3 design §2.14) and returns the reply. Absent: the match has no metrics to reset.
+   */
+  readonly metricsReset?: () => string;
 }
 
 /** Match-wide counters (live). */
@@ -197,6 +218,10 @@ export class MatchMetrics {
   neutralTicks = 0;
   /** CVARS messages sent (broadcasts and resends). */
   cvarsSent = 0;
+  /** rcon commands run, and refused for a wrong password or a locked address (D-042). */
+  rconOk = 0;
+  rconFailed = 0;
+  rconLocked = 0;
 }
 
 function ignoreLog(): void {}
@@ -205,6 +230,8 @@ function ignoreLog(): void {}
 function strikeWarning(score: number, kick: number): string {
   return `too many bad packets (${score} strike points); the server disconnects at ${kick}`;
 }
+
+const STATE_NAMES = ["connecting", "welcomed", "active", "closed"];
 
 /** Lowest free client id below `cap`, or −1 when every one is taken. `sessions` is sorted by id. */
 function freeClientId(sessions: readonly Session[], cap: number): number {
@@ -227,8 +254,9 @@ function freeClientId(sessions: readonly Session[], cap: number): number {
  *    is empty is dropped (the tick is rate-limited). Then HELLO (version and build checked, else
  *    KICK; then WELCOME), READY (a team, then a spawn at the next point of the rotation), INPUT
  *    (into the input queue; its ack and packet sequence read), PING (PONG), CMD (console commands;
- *    changing cvars needs the admin flag). What doesn't decode, fit the channel or fit the state is
- *    struck by weight (D-041); a session whose score reaches `sv_strikeKick` is KICKed at once.
+ *    changing cvars needs the admin flag, which `rcon` grants for one command, D-042). What doesn't
+ *    decode, fit the channel or fit the state is struck by weight (D-041); a session whose score
+ *    reaches `sv_strikeKick` is KICKed at once.
  * 2. With `timeouts`: KICK a session without HELLO after `sv_helloTimeout` ticks, one not READY
  *    after `sv_handshakeTimeout`, and a welcomed or active one silent for `sv_timeout`.
  * 3. Strikes: a rate-limited tick adds a point; scores decay 1 a second.
@@ -253,7 +281,7 @@ function freeClientId(sessions: readonly Session[], cap: number): number {
  * structs, and the transports pool their packets. HELLO, CMD, kicks and cvar changes allocate
  * (rare reliable traffic).
  */
-export class Match {
+export class Match implements MatchAdmin {
   readonly world: CollisionWorld;
   readonly cvars: CvarRegistry;
   readonly params = new PmoveParams();
@@ -284,6 +312,9 @@ export class Match {
 
   private readonly log: MatchLog;
   private readonly sessionEvents: MatchEventLog | null;
+  private readonly rconCheck: ((password: string) => boolean) | null;
+  private readonly rconGate: RconGate | null;
+  private readonly onMetricsReset: (() => string) | null;
   /** Rate limits, strike levels and timeouts (D-041). */
   readonly limits: SessionLimits;
   private readonly timeouts: boolean;
@@ -335,12 +366,16 @@ export class Match {
     this.world = options.world ?? buildCollisionWorld(cmap);
     this.log = options.log ?? ignoreLog;
     this.sessionEvents = options.events ?? null;
+    this.rconCheck = options.rcon ?? null;
+    this.rconGate = options.rconGate ?? null;
+    this.onMetricsReset = options.metricsReset ?? null;
     this.limits = options.limits ?? new SessionLimits();
     this.timeouts = options.timeouts ?? false;
     let cvars = options.cvars;
     if (cvars === undefined) {
       cvars = new CvarRegistry();
       registerPmoveCvars(cvars);
+      registerServerReplicatedCvars(cvars);
     }
     this.cvars = cvars;
     this.buildHash = options.buildHash;
@@ -684,9 +719,99 @@ export class Match {
   }
 
   private onCmd(s: Session, text: string): void {
-    const result = runServerCommand(text, this.cvars, s.admin);
-    if (result.text !== "") this.sendPrint(s, result.level, result.text);
+    const rcon = parseRcon(text);
+    if (rcon !== null) {
+      this.onRcon(s, rcon.password, rcon.command);
+      return;
+    }
+    this.reply(s, runServerCommand(text, this.cvars, s.admin, this));
+  }
+
+  /**
+   * `rcon <password> <command…>` (D-042, M3 design §2.10): with rcon enabled and the sender's
+   * address not locked out, a correct password runs the command as an admin of this match; a
+   * wrong one costs STRIKE_RCON points and a PRINT. The password and the raw line are never
+   * logged or echoed; the command's own reply and log lines (a kick's reason) are as without rcon.
+   */
+  private onRcon(s: Session, password: string, command: string): void {
+    const check = this.rconCheck;
+    if (check === null) {
+      this.sendPrint(s, PRINT_ERROR, "rcon is disabled on this server");
+      return;
+    }
+    if (password === "" || command === "") {
+      this.sendPrint(s, PRINT_ERROR, "usage: rcon <command> (with rcon_password set)");
+      return;
+    }
+    const gate = this.rconGate;
+    if (gate !== null && !gate.allow(s.clientId)) {
+      this.metrics.rconLocked++;
+      this.sendPrint(s, PRINT_ERROR, "rcon: too many wrong passwords from your address; wait");
+      return;
+    }
+    const ok = check(password);
+    gate?.result(s.clientId, ok);
+    if (!ok) {
+      this.metrics.rconFailed++;
+      this.sendPrint(s, PRINT_ERROR, "rcon: wrong password");
+      this.strike(s, STRIKE_RCON);
+      return;
+    }
+    this.metrics.rconOk++;
+    this.reply(s, runServerCommand(command, this.cvars, true, this));
+  }
+
+  /** A command's reply: PRINTs of at most TEXT_MAX chars, split at line ends, then any resend. */
+  private reply(s: Session, result: CommandResult): void {
+    if (s.state === SESSION_CLOSED) return;
+    const text = result.text;
+    let from = 0;
+    while (from < text.length) {
+      let end = Math.min(text.length, from + TEXT_MAX);
+      if (end < text.length) {
+        const nl = text.lastIndexOf("\n", end);
+        if (nl > from) end = nl;
+      }
+      this.sendPrint(s, result.level, text.slice(from, end));
+      from = end < text.length && text.charCodeAt(end) === 0x0a ? end + 1 : end;
+    }
     if (result.resendCvars) this.sendCvars(s);
+  }
+
+  /**
+   * Runs one admin command on this match (the stdin console, and `@<match>` lines later): what a
+   * client runs through rcon, the reply returned instead of sent.
+   */
+  runAdminCommand(text: string): CommandResult {
+    return runServerCommand(text, this.cvars, true, this);
+  }
+
+  /** `status` (MatchAdmin): the map, tick and player count, then a line per session by id. */
+  status(): string {
+    const lines = [
+      `${this.mapName}, tick ${this.currentTick}, ${this.sessions.length} of ${this.cap} players`,
+    ];
+    for (const s of this.sessions) {
+      const team = s.state === SESSION_ACTIVE ? ` team ${s.team}` : "";
+      lines.push(
+        `#${s.clientId} ${STATE_NAMES[s.state] ?? "?"}${team} strikes ${s.strikeScore.score}` +
+          `${s.admin ? " admin" : ""} build ${s.buildHash === "" ? "-" : s.buildHash}`,
+      );
+    }
+    return lines.join("\n");
+  }
+
+  /** `kick <id> [reason]` (MatchAdmin). */
+  kickClient(id: number, reason: string): boolean {
+    const s = this.session(id);
+    if (s === undefined || s.state === SESSION_CLOSED) return false;
+    this.kick(s, reason);
+    return true;
+  }
+
+  /** `metrics reset` (MatchAdmin): this match's run window, through its host. */
+  metricsReset(): string | null {
+    return this.onMetricsReset === null ? null : this.onMetricsReset();
   }
 
   // -------------------------------------------------------------------------------------------

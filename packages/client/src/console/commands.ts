@@ -7,9 +7,11 @@ import {
   NET_PROFILES,
   type NetProfile,
   type SetResult,
+  TEXT_MAX,
 } from "@game/shared";
 import type { CorrectionLog } from "../net/predictor";
 import { actionOf, type Binds, isKeyCode } from "./binds";
+import { RCON_PASSWORD_CVAR } from "./clientCvars";
 
 /**
  * The client console's commands (docs/06 §6, M2 design §2 "Console"). DOM-free: console.ts feeds
@@ -18,7 +20,9 @@ import { actionOf, type Binds, isKeyCode } from "./binds";
  * A `set`, `reset` or `toggle` on a REPLICATED cvar is never applied here (D-027): the client's
  * copy mirrors the server, so the line goes to the server as CMD, and the server's CVARS
  * broadcast changes the mirror at an effective tick. The server's PRINT reply shows up in the
- * console. Any other cvar is the client's own and changes at once.
+ * console. Any other cvar is the client's own and changes at once, unless it is CHEAT and the
+ * server's `sv_cheats` is 0 (D-042). `rcon <command…>` sends the command with `rcon_password` for
+ * the server to run as admin of this match; the password is never printed.
  */
 
 /** The simulated link on the client's end of the connection (NetSimTransport). */
@@ -65,6 +69,7 @@ export const CONSOLE_COMMANDS: readonly (readonly [string, string])[] = Object.f
   ["net_corrections", "net_corrections: the newest prediction corrections and what differed"],
   ["connect", "connect [ws://host[:port]]: show the server, or play on another (the page reloads)"],
   ["disconnect", "disconnect: leave the server"],
+  ["rcon", "rcon <command…>: run a server command as admin, with rcon_password (set it first)"],
   ["clear", "clear: empty the console"],
   ["toggleconsole", "toggleconsole: open or close the console"],
   ["help", "help: this list; a cvar's name alone shows its value"],
@@ -89,7 +94,42 @@ function quoteToken(text: string): string {
   return text === "" || /\s/.test(text) ? `"${text}"` : text;
 }
 
+/** Shown instead of the rcon password's value. */
+const HIDDEN = "(hidden)";
+
+function isSecret(name: string): boolean {
+  return name.toLowerCase() === RCON_PASSWORD_CVAR.toLowerCase();
+}
+
+/** The rcon password's name anywhere in a text, any case. */
+const SECRET_NAME = /rcon_password/i;
+
+/**
+ * What the console echoes and keeps in its history for an entered line (D-042). The decision
+ * follows the tokens `runConsoleCommand` reads (`set "rcon_password"x` sets it too): a line with
+ * anything after the token that names `rcon_password` is echoed with the rest hidden and kept out
+ * of the history (`history` null), and so is one that holds the name inside a longer token (a
+ * bind's command) or that does not parse; the bare name, `reset rcon_password` and any other line
+ * as they are.
+ */
+export function consoleEcho(line: string): { echo: string; history: string | null } {
+  const m = SECRET_NAME.exec(line);
+  if (m === null) return { echo: line, history: line };
+  const tokens = tokenizeCommand(line);
+  if (tokens === null) {
+    return { echo: `${line.slice(0, m.index + m[0].length).trim()} ${HIDDEN}`, history: null };
+  }
+  let i = 0;
+  while (i < tokens.length && !SECRET_NAME.test(tokens[i] as string)) i++;
+  const named = isSecret(tokens[i] as string);
+  if (named && i === tokens.length - 1) return { echo: line, history: line };
+  const shown = tokens.slice(0, named ? i + 1 : i).map(quoteToken);
+  shown.push(HIDDEN);
+  return { echo: shown.join(" "), history: null };
+}
+
 function describeSet(name: string, r: SetResult, input: string): string {
+  if (r.ok && isSecret(name)) return `${name} set`;
   if (r.ok) {
     let text = `${name} = ${String(r.value)}`;
     if (r.clamped) text += " (clamped)";
@@ -97,8 +137,44 @@ function describeSet(name: string, r: SetResult, input: string): string {
     return text;
   }
   if (r.error === "type") return `${name}: "${input}" is not a valid value`;
-  if (r.error === "cheat") return `${name} is cheat protected`;
+  if (r.error === "cheat") return `${name} is cheat protected: the server's sv_cheats is 0`;
   return `unknown cvar ${name}`;
+}
+
+/**
+ * `rcon <command…>` (D-042, M3 design §2.10): CMD `rcon "<rcon_password>" <command…>`, the command
+ * as typed (its own quoting kept). The server runs it as admin of this match when the password is
+ * right; a wrong one costs strike points, so an unset password is refused here.
+ */
+function rcon(text: string, first: string, args: readonly string[], host: ConsoleHost): void {
+  if (args.length === 0) {
+    host.print("usage: rcon <command…>");
+    return;
+  }
+  if (!host.connected()) {
+    host.print("rcon: not connected");
+    return;
+  }
+  const password = host.cvars.get(RCON_PASSWORD_CVAR);
+  if (typeof password !== "string" || password === "") {
+    host.print("rcon: set rcon_password first");
+    return;
+  }
+  // The server's own rule for its password (node/rconGuard.ts validRconPassword): no other could
+  // be right, and a double quote would end the token.
+  if (!/^[\x20\x21\x23-\x7e]+$/.test(password)) {
+    host.print("rcon: rcon_password must be printable ASCII without double quotes");
+    return;
+  }
+  const raw = text.trimStart();
+  const command = raw.startsWith(first)
+    ? raw.slice(first.length).trim()
+    : args.map(quoteToken).join(" ");
+  if (!host.sendServer(`rcon "${password}" ${command}`)) {
+    host.print(
+      `rcon: the command does not fit one message (${TEXT_MAX} Latin-1 chars with the password)`,
+    );
+  }
 }
 
 /** The correction log, oldest first: each snapshot tick, the distance and the fields that differed. */
@@ -174,6 +250,9 @@ export function runConsoleCommand(text: string, host: ConsoleHost): void {
     case "disconnect":
       if (!host.disconnect()) host.print("disconnect: not connected");
       return;
+    case "rcon":
+      rcon(text, first, args, host);
+      return;
     case "clear":
       host.clear();
       return;
@@ -188,9 +267,8 @@ export function runConsoleCommand(text: string, host: ConsoleHost): void {
   if (info !== undefined && args.length === 0) {
     const d = info.def;
     const kind = isReplicated(info) ? ", replicated: set on the server" : "";
-    host.print(
-      `${d.name} = ${String(info.value)} (default ${String(d.default)}${kind}): ${d.description}`,
-    );
+    const value = isSecret(d.name) ? HIDDEN : String(info.value);
+    host.print(`${d.name} = ${value} (default ${String(d.default)}${kind}): ${d.description}`);
     return;
   }
   host.print(`unknown command ${first} (try help)`);
@@ -237,7 +315,8 @@ function cvarList(prefix: string, host: ConsoleHost): void {
   const list = host.cvars.list(prefix);
   for (const info of list) {
     const d = info.def;
-    host.print(`${flagLetters(d.flags ?? 0)} ${d.name} ${String(info.value)}`);
+    const value = isSecret(d.name) ? HIDDEN : String(info.value);
+    host.print(`${flagLetters(d.flags ?? 0)} ${d.name} ${value}`);
   }
   host.print(`${list.length} cvars${prefix === "" ? "" : ` starting with ${prefix}`}`);
 }
@@ -258,6 +337,11 @@ function bind(args: string[], host: ConsoleHost): void {
     return;
   }
   const command = args.slice(1).join(" ");
+  if (SECRET_NAME.test(command)) {
+    // Binds are saved (app/settings.ts); the password never is (D-042).
+    host.print("bind: a bind cannot hold rcon_password: binds are saved, the password never is");
+    return;
+  }
   if (command.startsWith("+") && actionOf(command) < 0) {
     host.print(`unknown action ${command}`);
     return;

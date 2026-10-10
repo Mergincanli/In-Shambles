@@ -6,6 +6,7 @@ import {
   NET_PROFILE_LAN,
   NetSimTransport,
   registerPmoveCvars,
+  registerServerReplicatedCvars,
   type Transport,
 } from "@game/shared";
 import { Binds } from "../console/binds";
@@ -31,7 +32,7 @@ import type { WorkerOutMsg, WorkerStartMsg } from "../worker/messages";
 import { Game, type StatusSink } from "./game";
 import { fetchMap, loadServerMap } from "./maps";
 import { type BootParams, connectSearch, parseServerUrl } from "./params";
-import { browserStorage, loadSettings, SettingsSaver } from "./settings";
+import { browserStorage, type HeldCheats, loadSettings, SettingsSaver } from "./settings";
 
 /** The net simulator's seed on the page: one fixed schedule per profile (D-028). */
 const NETSIM_SEED = 0x5eed;
@@ -92,11 +93,14 @@ export async function boot(
 
   const cvars = new CvarRegistry();
   registerPmoveCvars(cvars);
+  registerServerReplicatedCvars(cvars);
   registerClientCvars(cvars);
   const binds = new Binds();
   const storage = params.autotest ? null : browserStorage();
-  const settingWarnings = loadSettings(storage, cvars, binds);
-  const saver = new SettingsSaver(storage, cvars, binds);
+  // Cheats are off until the server's block says otherwise (D-042): saved CHEAT values wait.
+  const held: HeldCheats = {};
+  const settingWarnings = loadSettings(storage, cvars, binds, held);
+  const saver = new SettingsSaver(storage, cvars, binds, held);
 
   const actions = new ActionState();
   const look = new MouseLook();
@@ -137,6 +141,9 @@ export async function boot(
     clock: () => performance.now(),
     cvars,
     input,
+    onCheatsChanged: (allowed) => {
+      if (allowed) saver.restoreCheats();
+    },
     log: (level, msg) => {
       if (level === "error") console.error(msg);
       else if (level === "warn") console.warn(msg);

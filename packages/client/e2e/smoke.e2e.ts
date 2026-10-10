@@ -232,6 +232,22 @@ describe("client e2e smoke (M2 design §5)", () => {
         { timeout: 5000 },
       )
       .toMatch(/^pm_gravity = 400 \(default 800, replicated/);
+    // The Worker's sv_cheats is 1 (D-042): the CHEAT views work offline.
+    const last = () => output.locator("div").last().textContent();
+    for (const v of ["1", "0"]) {
+      await input.fill(`set cl_thirdPerson ${v}`);
+      await input.press("Enter");
+      await expect.poll(last).toBe(`cl_thirdPerson = ${v === "1"}`);
+    }
+    // The rcon password is echoed hidden and never kept in the input history.
+    await input.fill("set rcon_password e2e-secret");
+    await input.press("Enter");
+    await expect.poll(last).toBe("rcon_password set");
+    expect(await output.textContent()).toContain("] set rcon_password (hidden)");
+    expect(await output.textContent()).not.toContain("e2e-secret");
+    await input.press("ArrowUp");
+    expect(await input.inputValue()).toBe("set cl_thirdPerson 0");
+    await input.fill("");
     const net = page.locator("#hud-net");
     const speed = page.locator("#hud-speed");
     await expect.poll(() => net.isVisible()).toBe(true);

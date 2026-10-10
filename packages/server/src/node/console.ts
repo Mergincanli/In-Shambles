@@ -1,6 +1,6 @@
 import { createInterface } from "node:readline";
 import { PRINT_ERROR } from "@game/shared";
-import { runServerCommand, tokenizeCommand } from "../match/commands";
+import { tokenizeCommand } from "../match/commands";
 import type { Match } from "../match/match";
 import type { JsonLog } from "./log";
 
@@ -21,16 +21,17 @@ export function startConsole(
 export interface ConsoleProcess {
   /**
    * `metrics reset`: starts the metrics run window again for the process and every match
-   * (M3 design §2.14). The process-wide reset is stdin's alone; rcon's match-scoped one arrives
-   * with D-042. Returns the reply.
+   * (M3 design §2.14). The process-wide reset is stdin's alone: rcon's resets only the sender's
+   * match (D-042). Returns the reply.
    */
   metricsReset(): string;
 }
 
 /**
  * Runs one console line as an admin: `metrics reset` on the process (`proc`), else on `match` the
- * server commands a client may send (`set`, `reset`, `toggle` on replicated cvars; the CVARS
- * broadcast follows on the next tick). The reply is logged as `{"ev":"console"}`.
+ * commands an admin client may send (`set`, `reset`, `toggle` on replicated cvars, the CVARS
+ * broadcast following on the next tick; `status`; `kick <id> [reason]`; D-042). The reply is
+ * logged as `{"ev":"console"}`.
  */
 export function runConsoleLine(
   line: string,
@@ -52,7 +53,7 @@ export function runConsoleLine(
     log("info", "console", { text: proc.metricsReset() });
     return;
   }
-  const result = runServerCommand(text, match.cvars, true);
+  const result = match.runAdminCommand(text);
   if (result.text === "") return;
   log(result.level === PRINT_ERROR ? "error" : "info", "console", {
     match: name,

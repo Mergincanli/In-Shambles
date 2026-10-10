@@ -1,4 +1,4 @@
-import { CvarRegistry, registerPmoveCvars } from "@game/shared";
+import { CvarRegistry, registerPmoveCvars, registerServerReplicatedCvars } from "@game/shared";
 import { describe, expect, it } from "vitest";
 import { SessionLimits } from "../../src/match/limits";
 import {
@@ -18,6 +18,7 @@ function registries() {
   registerServerCvars(server);
   const match = new CvarRegistry();
   registerPmoveCvars(match);
+  registerServerReplicatedCvars(match);
   return { server, match, both: [server, match] };
 }
 
@@ -51,10 +52,13 @@ describe("parseServerCfg", () => {
   it("parses the shipped server.cfg into the documented defaults", async () => {
     const { readFileSync } = await import("node:fs");
     const text = readFileSync(new URL("../../server.cfg", import.meta.url), "utf8");
-    const { server, both } = registries();
+    const { server, match, both } = registries();
     const defaults = server.list().map((i) => [i.def.name, i.value]);
+    const matchDefaults = match.list().map((i) => [i.def.name, i.value]);
     applyAssignments(parseServerCfg(text, "server.cfg"), both);
     expect(server.list().map((i) => [i.def.name, i.value])).toEqual(defaults);
+    expect(match.list().map((i) => [i.def.name, i.value])).toEqual(matchDefaults);
+    expect(text).toMatch(/^set sv_cheats 0$/m);
   });
 });
 

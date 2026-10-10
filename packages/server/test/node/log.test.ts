@@ -1,4 +1,9 @@
-import { CvarRegistry, registerPmoveCvars } from "@game/shared";
+import {
+  CvarRegistry,
+  createLoopbackPair,
+  registerPmoveCvars,
+  registerServerReplicatedCvars,
+} from "@game/shared";
 import { describe, expect, it } from "vitest";
 import { Match } from "../../src/match/match";
 import { runConsoleLine } from "../../src/node/console";
@@ -36,24 +41,31 @@ describe("JSON-lines log", () => {
 });
 
 describe("admin console line", () => {
-  it("runs server commands on the match as an admin and logs the reply", () => {
+  it("runs server commands on the match as an admin and logs the reply (D-042: status, kick)", () => {
     const lines: { lvl: string; ev: string; text?: string }[] = [];
     const log = createJsonLog((l) => lines.push(JSON.parse(l)), clock);
     const cvars = new CvarRegistry();
     registerPmoveCvars(cvars);
+    registerServerReplicatedCvars(cvars);
     const match = new Match({
       cmap: loadMap("movement_lab"),
       cvars,
       buildHash: TEST_BUILD,
       primer: false,
     });
+    match.connect(createLoopbackPair()[1]);
     runConsoleLine("set pm_gravity 400", "main", match, log);
     runConsoleLine("   ", "main", match, log);
     runConsoleLine("bogus", "main", match, log);
+    // The console is admin of the match itself too (D-042): status and kick.
+    runConsoleLine("status", "main", match, log);
+    runConsoleLine("kick 0", "main", match, log);
     expect(cvars.get("pm_gravity")).toBe(400);
     expect(lines.map((l) => [l.lvl, l.ev, l.text])).toEqual([
       ["info", "console", "pm_gravity = 400"],
       ["error", "console", "unknown server command bogus"],
+      ["info", "console", "movement_lab, tick 0, 1 of 32 players\n#0 connecting strikes 0 build -"],
+      ["info", "console", "client 0 kicked: kicked by an admin"],
     ]);
   });
 });

@@ -28,7 +28,12 @@ afterEach(async () => {
 });
 
 /** An in-process server on a free port; its JSON log lines are parsed into `lines`. */
-async function start(args: string[] = [], console?: NodeJS.ReadableStream) {
+/** `rconPassword` null: none given, so the server reads SV_RCON_PASSWORD from the environment. */
+async function start(
+  args: string[] = [],
+  console?: NodeJS.ReadableStream,
+  rconPassword: string | null = "",
+) {
   const lines: Line[] = [];
   running = await startServer({
     args: ["--port", "0", ...args],
@@ -36,6 +41,7 @@ async function start(args: string[] = [], console?: NodeJS.ReadableStream) {
     write: (line) => lines.push(JSON.parse(line) as Line),
     ...(console === undefined ? {} : { console }),
     primer: false,
+    ...(rconPassword === null ? {} : { rconPassword }),
   });
   return { server: running, lines, port: running.listener.port };
 }
@@ -232,6 +238,90 @@ describe("Node server (in process, real WebSocket)", () => {
       match: "main",
       text: "pm_gravity = 400",
     });
+  });
+
+  it("runs rcon as admin of the sender's match; a wrong password logs rcon_fail with the ip only (D-042)", async () => {
+    const input = new PassThrough();
+    const { server, lines, port } = await start([], input, "open sesame");
+    const c = await client(port);
+    c.hello(server.buildHash);
+    await poll(c, () => c.welcomes.length === 1, "WELCOME");
+    c.ready();
+    await poll(c, () => c.snapshots.length >= 5, "snapshots");
+    c.cmd("set pm_gravity 400");
+    c.cmd('rcon "open sesame" set pm_gravity 400');
+    await poll(c, () => c.prints.length === 2, "the replies");
+    expect(c.prints.map((p) => p.text)).toEqual([
+      "set: only an admin may change server cvars (use rcon set ...)",
+      "pm_gravity = 400",
+    ]);
+    expect(server.matches.main?.match.cvars.get("pm_gravity")).toBe(400);
+    // rcon's metrics reset is the match's alone; the process window keeps running.
+    await new Promise((r) => setTimeout(r, 60));
+    c.cmd('rcon "open sesame" metrics reset');
+    await poll(c, () => c.prints.length === 3, "the reset's reply");
+    expect(c.prints[2]?.text).toBe("metrics reset: match main");
+    expect(lines.find((l) => l.ev === "metrics_reset")).toMatchObject({
+      reason: "rcon",
+      match: "main",
+    });
+    type Run = { process: { runS: number }; matches: { main: { runS: number } } };
+    const m = (await httpJson(port, "/metrics")).body as Run;
+    expect(m.process.runS - m.matches.main.runS).toBeGreaterThan(0.04);
+    c.cmd("rcon hunter2 status");
+    await poll(c, () => c.prints.length === 4, "the refusal");
+    expect(c.prints[3]?.text).toBe("rcon: wrong password");
+    expect(lines.find((l) => l.ev === "rcon_fail")).toMatchObject({
+      lvl: "warn",
+      match: "main",
+      client: 0,
+      ip: "127.0.0.1",
+      failures: 1,
+    });
+    // stdin's bare metrics reset is the process's and every match's.
+    input.write("metrics reset\n");
+    await until(() => lines.some((l) => l.ev === "console"), "the console reply");
+    expect(lines.find((l) => l.ev === "console")?.text).toBe(
+      "metrics reset: the process and 1 match",
+    );
+    const after = (await httpJson(port, "/metrics")).body as Run;
+    expect(Math.abs(after.process.runS - after.matches.main.runS)).toBeLessThan(0.001);
+    const text = JSON.stringify(lines);
+    expect(text).not.toContain("open sesame");
+    expect(text).not.toContain("hunter2");
+  });
+
+  it("takes the rcon password from SV_RCON_PASSWORD when no option gives one", async () => {
+    const before = process.env.SV_RCON_PASSWORD;
+    process.env.SV_RCON_PASSWORD = "from env";
+    onTestFinished(() => {
+      if (before === undefined) delete process.env.SV_RCON_PASSWORD;
+      else process.env.SV_RCON_PASSWORD = before;
+    });
+    const { server, port } = await start([], undefined, null);
+    const c = await client(port);
+    c.hello(server.buildHash);
+    await poll(c, () => c.welcomes.length === 1, "WELCOME");
+    c.cmd('rcon "from env" set pm_gravity 410');
+    await poll(c, () => c.prints.length === 1, "the reply");
+    expect(c.prints[0]?.text).toBe("pm_gravity = 410");
+  });
+
+  it("refuses rcon when no password is set, and a password the client could not send", async () => {
+    const { server, port } = await start();
+    const c = await client(port);
+    c.hello(server.buildHash);
+    await poll(c, () => c.welcomes.length === 1, "WELCOME");
+    c.cmd('rcon "" status');
+    c.cmd("rcon x status");
+    await poll(c, () => c.prints.length === 2, "the replies");
+    expect(c.prints.map((p) => p.text)).toEqual([
+      "rcon is disabled on this server",
+      "rcon is disabled on this server",
+    ]);
+    await server.stop();
+    running = null;
+    await expect(start([], undefined, 'quo"te')).rejects.toThrow(/double quotes/);
   });
 
   it("keeps metrics: wire traffic, metrics lines, a discarded start, metrics reset and --metrics-out (D-029, D-036)", async () => {

@@ -2,12 +2,15 @@ import { Match, startMatchLoop } from "@game/server";
 import { decodeCmap, setDevAsserts } from "@game/shared";
 import { PortTransport } from "../net/portTransport";
 import type { WorkerOutMsg, WorkerStartMsg } from "./messages";
+import { workerCvars } from "./workerCvars";
 import { createWorkerHost } from "./workerHost";
 
 /**
  * The offline server (docs/06 §4, M2 design §1): the environment-agnostic `Match` from
  * @game/server, running in a dedicated Worker so the page's frame loop never waits on it. The
  * page's client is its only session, and an admin (D-027), so console cvar changes reach it.
+ * Offline play is a sandbox: `sv_cheats` starts at 1, so third person and the debug views work
+ * (D-042); there is no rcon (the client is admin already).
  */
 
 function post(m: WorkerOutMsg): void {
@@ -30,7 +33,13 @@ addEventListener("message", (event: MessageEvent<WorkerStartMsg>) => {
     const log = (level: "info" | "warn" | "error", msg: string) =>
       post({ type: "log", level, msg });
     // No timeouts (D-041): the page's one client may sit in a hidden tab for as long as it likes.
-    const match = new Match({ cmap, buildHash: m.buildHash, log, timeouts: false });
+    const match = new Match({
+      cmap,
+      cvars: workerCvars(),
+      buildHash: m.buildHash,
+      log,
+      timeouts: false,
+    });
     match.connect(new PortTransport(m.unreliable, m.reliable), true);
     const loop = startMatchLoop(
       {

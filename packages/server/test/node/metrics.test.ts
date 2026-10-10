@@ -237,6 +237,68 @@ describe("ServerMetrics", () => {
     expect(m.ticks.run.count).toBe(1);
   });
 
+  it("resets one match's run window on rcon's metrics reset, leaving the process and the others (D-042)", () => {
+    const clock = { ms: 0 };
+    const passClock: PassClock = { now: () => clock.ms, cpuMicros: () => 0 };
+    const fakes = ["a", "b"].map((name) => {
+      const fake: FakeMatch = {
+        metrics: new MatchMetrics(),
+        mapName: "arena_greybox",
+        sessionCount: 1,
+        serverTick: 0,
+        tick() {
+          this.serverTick++;
+        },
+      };
+      const m: ServerMatch = {
+        name,
+        match: fake as unknown as Match,
+        ticks: new TickHistogram(),
+        traffic: new WireTraffic(),
+      };
+      return { fake, m };
+    });
+    const list = fakes.map((f) => f.m);
+    const pass = new TimedPass(list, () => {}, passClock);
+    const loop = new LoopStats();
+    const metrics = new ServerMetrics(
+      {
+        matches: list,
+        pass,
+        loop: () => loop,
+        connections: () => 2,
+        now: () => clock.ms,
+        memory: () => ({ heapUsed: MB, external: 0, rss: MB }),
+        cpuMicros: () => 0,
+      },
+      () => {},
+    );
+    for (let i = 0; i < 60; i++) pass.tick();
+    for (const { fake, m } of fakes) {
+      fake.metrics.strikes = 4;
+      m.traffic.bytesOut = 10_000;
+    }
+    clock.ms = 10_000;
+    expect(metrics.resetMatchRun("a")).toBe(true);
+    expect(metrics.resetMatchRun("nope")).toBe(false);
+    clock.ms = 12_000;
+    pass.tick();
+    for (const { m } of fakes) m.traffic.bytesOut += 4000;
+    const j = metrics.json();
+    expect(j.matches.a).toMatchObject({ runS: 2, strikes: 0, tickUs: { count: 1 } });
+    expect(j.matches.a).toMatchObject({ traffic: { bytesOut: 4000, kbOutPerS: 2 } });
+    expect(j.matches.b).toMatchObject({ runS: 12, strikes: 4, tickUs: { count: 61 } });
+    expect(j.matches.b).toMatchObject({ traffic: { bytesOut: 14_000 } });
+    // The process window and its traffic still cover both matches from the start.
+    expect(j.process).toMatchObject({ runS: 12, passes: 61, tickUs: { count: 61 } });
+    expect(j.process.traffic.bytesOut).toBe(28_000);
+    // The process reset (stdin's bare `metrics reset`) restarts every window.
+    metrics.resetRun();
+    const k = metrics.json();
+    expect(k.matches).toMatchObject({ a: { runS: 0 }, b: { runS: 0 } });
+    expect(k.process.runS).toBe(0);
+  });
+
   it("logs one metrics line per match and one for the process per interval, then starts the next", () => {
     const { clock, fake, m, pass, lines, metrics } = setup();
     for (let i = 0; i < 600; i++) pass.tick();

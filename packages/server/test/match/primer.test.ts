@@ -9,6 +9,7 @@ import {
   pmovePrimed,
   primePmoveOnce,
   registerPmoveCvars,
+  registerServerReplicatedCvars,
   UserCmd,
 } from "@game/shared";
 import { describe, expect, it } from "vitest";
@@ -58,6 +59,7 @@ function cmdFor(id: number, tick: number): UserCmd {
 function play(primer: boolean): Run {
   const cvars = new CvarRegistry();
   registerPmoveCvars(cvars);
+  registerServerReplicatedCvars(cvars);
   const version = cvars.version;
   const match = new Match({ cmap, world, cvars, buildHash: TEST_BUILD, primer });
   // Construction left the registry as it was, primer or not; the parameters the primer read

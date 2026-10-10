@@ -1,6 +1,16 @@
 import type { IncomingMessage } from "node:http";
 import { type RunningServer, startServer } from "@game/server/node";
-import { BitWriter, CmdMsg, encodeCmd, encodeHello, HelloMsg } from "@game/shared";
+import {
+  BitReader,
+  BitWriter,
+  CmdMsg,
+  decodePrint,
+  encodeCmd,
+  encodeHello,
+  HelloMsg,
+  MSG_PRINT,
+  PrintMsg,
+} from "@game/shared";
 import { afterEach, describe, expect, it } from "vitest";
 import { fromRoot } from "../src/paths";
 import { closeAll, TEST_PEER_HEADER, upgrade, upgradeAtOnce } from "../test/net/wsProbe";
@@ -13,7 +23,8 @@ import { closeAll, TEST_PEER_HEADER, upgrade, upgradeAtOnce } from "../test/net/
 // after another and with 20 upgrades in flight at once (loopback exempt), and sv_allowedOrigins
 // refuses other browser origins. Unknown paths and query strings (404), sv_maxTotalClients (503)
 // and an upgrade to a match removed mid-handshake (1001) come with several matches (increment
-// 17); rcon lockout across reconnects with rcon (increment 14).
+// 17). rcon's lockout (D-042) holds per address across reconnects: a fresh session does not
+// reset it, and a locked address is refused even with the right password.
 
 const TIMEOUT_MS = 20_000;
 const PEER = "203.0.113.7";
@@ -28,11 +39,17 @@ afterEach(async () => {
 });
 
 /** The server with `sets` (`--set name=value`), counting each upgrade under TEST_PEER_HEADER. */
-async function start(sets: readonly string[] = []): Promise<RunningServer> {
+async function start(
+  sets: readonly string[] = [],
+  rconPassword = "",
+  write?: (line: string) => void,
+): Promise<RunningServer> {
   server = await startServer({
     args: ["--port", "0", ...sets.flatMap((s) => ["--set", s])],
     cwd: fromRoot("packages", "server"),
     primer: false,
+    rconPassword,
+    ...(write === undefined ? {} : { write }),
     peerAddress: (req: IncomingMessage) =>
       (req.headers[TEST_PEER_HEADER] as string | undefined) ?? req.socket.remoteAddress ?? "",
   });
@@ -76,6 +93,29 @@ function cmdBytes(text: string): Uint8Array {
   m.text = text;
   encodeCmd(w, m);
   return w.bytes.slice(0, w.byteLength);
+}
+
+/** The rcon replies among the PRINTs `ws` receives (not the strike warning), as they arrive. */
+function printsOf(ws: WebSocket): string[] {
+  const out: string[] = [];
+  const r = new BitReader();
+  const m = new PrintMsg();
+  ws.addEventListener("message", (e) => {
+    const bytes = new Uint8Array(e.data as ArrayBuffer);
+    if (bytes[0] !== MSG_PRINT) return;
+    r.reset(bytes, bytes.length);
+    // The strike warning (two wrong passwords are 20 points, past sv_strikeWarn) is left out.
+    if (decodePrint(r, m) && !m.text.startsWith("too many bad packets")) out.push(m.text);
+  });
+  return out;
+}
+
+async function until(cond: () => boolean, what: string, ms = 5000): Promise<void> {
+  const end = performance.now() + ms;
+  while (!cond()) {
+    if (performance.now() > end) throw new Error(`timed out waiting for ${what}`);
+    await new Promise((r) => setTimeout(r, 5));
+  }
 }
 
 describe("NET-10 (b): abuse on real sockets (D-030, D-041)", () => {
@@ -198,6 +238,56 @@ describe("NET-10 (b): abuse on real sockets (D-030, D-041)", () => {
       ];
       expect(ups.map((u) => u.status)).toEqual([101, 101, 403, 101]);
       closeAll(ups);
+    },
+    TIMEOUT_MS,
+  );
+  it(
+    "keeps the rcon lockout across reconnects from one address (D-042)",
+    async () => {
+      const lines: string[] = [];
+      const s = await start([], "right one", (line) => lines.push(line));
+      const LOCKED = "rcon: too many wrong passwords from your address; wait";
+      /** A fresh session past HELLO, and the PRINTs it gets. */
+      const session = async () => {
+        const ws = await open(s);
+        const prints = printsOf(ws);
+        ws.send(helloBytes(s.buildHash));
+        return { ws, prints };
+      };
+      const a = await session();
+      a.ws.send(cmdBytes("rcon guess-1 status"));
+      a.ws.send(cmdBytes("rcon guess-2 status"));
+      await until(() => a.prints.length === 2, "two refusals");
+      expect(a.prints).toEqual(["rcon: wrong password", "rcon: wrong password"]);
+      // A second session from the same address while the first is still there (another client
+      // id, so a guard keyed by id would pass it): its strikes start at 0, its rcon failures don't.
+      const b = await session();
+      b.ws.send(cmdBytes("rcon guess-3 status"));
+      b.ws.send(cmdBytes('rcon "right one" status'));
+      await until(() => b.prints.length === 2, "the third failure and the lockout");
+      const thirdAt = performance.now();
+      expect(b.prints).toEqual(["rcon: wrong password", LOCKED]);
+      a.ws.close();
+      b.ws.close();
+      const c = await session();
+      c.ws.send(cmdBytes('rcon "right one" status'));
+      await until(() => c.prints.length === 1, "the lockout again");
+      expect(c.prints).toEqual([LOCKED]);
+      // 2^(3 − 3) s after the third failure the right password works again.
+      await new Promise((r) => setTimeout(r, Math.max(0, 1050 - (performance.now() - thirdAt))));
+      c.ws.send(cmdBytes('rcon "right one" set pm_gravity 400'));
+      await until(() => c.prints.length === 2, "the command's reply");
+      expect(c.prints[1]).toBe("pm_gravity = 400");
+      expect(s.matches.main?.match.cvars.get("pm_gravity")).toBe(400);
+      const fails = lines.map((l) => JSON.parse(l)).filter((l) => l.ev === "rcon_fail");
+      expect(fails.map((l) => [l.client, l.ip, l.failures, l.lockoutS])).toEqual([
+        [0, "127.0.0.1", 1, 0],
+        [0, "127.0.0.1", 2, 0],
+        [1, "127.0.0.1", 3, 1],
+      ]);
+      const all = lines.join("\n");
+      expect(all).not.toContain("right one");
+      expect(all).not.toContain("guess-");
     },
     TIMEOUT_MS,
   );

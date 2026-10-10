@@ -9,6 +9,7 @@ import {
   primePmoveOnce,
   refreshPmoveParams,
   registerPmoveCvars,
+  registerServerReplicatedCvars,
 } from "@game/shared";
 import { MatchLoop } from "../match/loop";
 import { MATCH_DEFAULT_MAX_CLIENTS, MATCH_MAX_CLIENTS, Match } from "../match/match";
@@ -30,6 +31,7 @@ import { createNodeHost, type ServerMatch, TimedPass } from "./host";
 import { createJsonLog, type JsonLog, matchLog } from "./log";
 import { defaultMapsDir, loadMap } from "./maps";
 import { ServerMetrics } from "./metrics";
+import { MatchRconGate, RconGuard, rconChecker, validRconPassword } from "./rconGuard";
 import { registerServerCvars } from "./serverCvars";
 
 /** The one match's name until a process runs several (D-047). */
@@ -57,6 +59,11 @@ export interface StartOptions {
    * the TCP peer's, so one test can stand for many clients on one non-loopback address.
    */
   readonly peerAddress?: (req: IncomingMessage) => string;
+  /**
+   * The rcon password (D-042); the `SV_RCON_PASSWORD` environment variable when absent. Unset or
+   * empty disables rcon.
+   */
+  readonly rconPassword?: string;
 }
 
 export interface RunningServer {
@@ -71,6 +78,8 @@ export interface RunningServer {
   readonly log: JsonLog;
   /** GC, memory, traffic and the run and interval windows (D-029, D-036). */
   readonly metrics: ServerMetrics;
+  /** Wrong rcon passwords per remote address, across every match (D-042). */
+  readonly rconGuard: RconGuard;
   /**
    * Graceful shutdown (D-029): stop accepting, KICK every client "server shutting down" and close
    * its socket 1001, stop the loop, write `--metrics-out`, and wait (bounded) for the sockets to
@@ -103,6 +112,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   if (!isBundledServer()) cvars.set("sv_strictBuild", 0);
   const template = new CvarRegistry();
   registerPmoveCvars(template);
+  registerServerReplicatedCvars(template);
   const cfgPath = cli.cfg === null ? resolve(cwd, "server.cfg") : resolve(cwd, cli.cfg);
   if (existsSync(cfgPath)) {
     applyAssignments(parseServerCfg(readFileSync(cfgPath, "utf8"), cfgPath), [cvars, template]);
@@ -120,6 +130,11 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   const limits = sendLimits(cvars);
   const security = sessionLimits(cvars);
   const admission = admissionLimits(cvars);
+  const rconPassword = validRconPassword(options.rconPassword ?? process.env.SV_RCON_PASSWORD);
+  if (!rconPassword.ok) throw new ConfigError(rconPassword.error);
+  const rcon = rconChecker(rconPassword.password);
+  const rconGuard = new RconGuard(() => performance.now());
+  const mainGate = new MatchRconGate(rconGuard, DEFAULT_MATCH, log);
 
   // The pmove primer (D-040) runs once per process, timed here for `server_ok`: the match's own
   // call at construction then finds it done. Parameters from the template, as the match's are.
@@ -144,6 +159,13 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
       timeouts: true,
       limits: security,
       primer,
+      // D-042: rcon runs as an admin of this match only, and resets this match's metrics only.
+      ...(rcon === null ? {} : { rcon, rconGate: mainGate }),
+      metricsReset: () => {
+        metrics.resetMatchRun(DEFAULT_MATCH);
+        log("info", "metrics_reset", { reason: "rcon", match: DEFAULT_MATCH });
+        return `metrics reset: match ${DEFAULT_MATCH}`;
+      },
     }),
     ticks: new TickHistogram(),
     traffic: new WireTraffic(),
@@ -165,6 +187,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
         const m = matches[name === "" ? DEFAULT_MATCH : name] as ServerMatch;
         transport.traffic = m.traffic;
         const s = m.match.connect(transport);
+        if (s !== null) mainGate.addresses[s.clientId] = ip;
         log("info", "connect", { match: m.name, client: s === null ? null : s.clientId, ip });
       },
       status: () => ({
@@ -226,7 +249,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     return stopping;
   };
 
-  return { matches, listener, loop, pass, cvars, buildHash, log, metrics, stop };
+  return { matches, listener, loop, pass, cvars, buildHash, log, metrics, rconGuard, stop };
 }
 
 /** Seconds between the memory samples that give the metrics windows their peaks. */

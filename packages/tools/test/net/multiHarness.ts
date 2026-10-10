@@ -300,6 +300,8 @@ export interface MultiHarnessOptions {
    * called `setHarnessPrimerDefault(false)`; unit tests that build many harnesses pass false.
    */
   readonly primer?: boolean;
+  /** The match's rcon password check (D-042); rcon is disabled when absent. */
+  readonly rcon?: (password: string) => boolean;
 }
 
 let primerDefault = true;
@@ -751,6 +753,7 @@ export class MultiHarness {
       timeouts: options.timeouts ?? false,
       ...(options.limits === undefined ? {} : { limits: options.limits }),
       ...(options.maxClients === undefined ? {} : { maxClients: options.maxClients }),
+      ...(options.rcon === undefined ? {} : { rcon: options.rcon }),
     });
     const host: LoopHost = {
       now: () => this.now,

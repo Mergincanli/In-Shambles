@@ -35,3 +35,13 @@ export type MatchEventLog = (
   ev: string,
   fields: Readonly<Record<string, MatchEventValue>>,
 ) => void;
+
+/**
+ * The rcon brute-force gate (D-042, M3 design §2.10): the Node server keys it by each client's
+ * remote address across all its matches (node/rconGuard.ts); the Worker has none. `allow` is asked
+ * before a password is checked (false: refused without checking); `result` hears every check.
+ */
+export interface RconGate {
+  allow(clientId: number): boolean;
+  result(clientId: number, ok: boolean): void;
+}

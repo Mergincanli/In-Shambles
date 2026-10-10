@@ -39,6 +39,7 @@ import {
   PMF_GROUNDED,
   pushEntityEvent,
   registerPmoveCvars,
+  registerServerReplicatedCvars,
   TRACE_EPSILON,
   UserCmd,
 } from "@game/shared";
@@ -56,6 +57,7 @@ import {
   STAT_REMOTE_FRAMES,
 } from "../../src/net";
 import { DebugDraw } from "../../src/render/debug/debugDraw";
+import { workerCvars } from "../../src/worker/workerCvars";
 
 const FRAMES = 20_000;
 const FRAME_MS = 1000 / 144;
@@ -90,7 +92,8 @@ class Cycle implements CmdSampler {
 const time = new Float64Array(2);
 const input = new Cycle();
 const [clientEnd, serverEnd] = createLoopbackPair();
-const match = new Match({ cmap, world, buildHash: "alloc" });
+// The Worker's cvars: sv_cheats 1, so third person and every debug view stay on (D-042).
+const match = new Match({ cmap, world, cvars: workerCvars(), buildHash: "alloc" });
 match.connect(serverEnd, true);
 /** The other players: slots 1–16 of every stored frame. */
 const REMOTES = 16;
@@ -100,7 +103,9 @@ if (spawn === undefined) throw new Error("movement_lab has no info_player_start"
 const centre = new Float64Array([spawn[0], spawn[1] + 400]);
 const cvars = new CvarRegistry();
 registerPmoveCvars(cvars);
+registerServerReplicatedCvars(cvars);
 registerClientCvars(cvars);
+cvars.setAllowCheats(true);
 for (const name of ["cl_thirdPerson", "r_debugHull", "r_debugTraces", "r_debugGround"]) {
   cvars.set(name, true);
 }

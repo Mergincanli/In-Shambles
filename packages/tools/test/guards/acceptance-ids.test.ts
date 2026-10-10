@@ -82,8 +82,8 @@ const MILESTONES: Readonly<Record<string, Milestone>> = {
     // increment 11: seed 1 at 144 Hz and the control fast, the other seeds, the hitch frames and
     // the rest of the control long (D-032's placement rule). NET-10 landed in increment 13: the
     // fake-clock attackers (a), the hidden-tab cases and a real-socket smoke fast, the real-socket
-    // legs (b) long; its rcon lockout leg comes with rcon (increment 14), its 404/503/1001 legs
-    // with several matches (increment 17).
+    // legs (b) long; its rcon lockout leg joined the long file with rcon in increment 14, and its
+    // 404/503/1001 legs come with several matches (increment 17).
     pending: {
       "NET-09 load": "increment 18",
     },

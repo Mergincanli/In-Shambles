@@ -7,8 +7,10 @@ import type { JsonLog } from "./log";
 /**
  * The server's metrics (D-029, D-036; M3 design §2.14): GC pauses, memory, CPU, wire traffic and
  * the match counters, over two windows besides the tick histograms' own. The **run window**
- * starts at listen, again after `--metrics-discard <s>`, and on the console's `metrics reset`; the
- * `/metrics` page and the `--metrics-out` file report it. The **interval window** is the time since
+ * starts at listen, again after `--metrics-discard <s>`, and on the console's `metrics reset`; a
+ * match's own run window also starts again on rcon's `metrics reset` from one of its clients
+ * (D-042), leaving the process's and the other matches'. The `/metrics` page and the
+ * `--metrics-out` file report it. The **interval window** is the time since
  * the last metrics line (`sv_metricsInterval`), which reports it and starts the next. Per match:
  * its tick times, counters and traffic; per process: the loop pass (the NET-09 judge), GC, memory,
  * CPU and the traffic of every match. Every number covers its window: counters and CPU as the
@@ -198,6 +200,10 @@ export class ServerMetrics {
   /** Peak heapUsed + external and peak RSS (bytes): [0..1] the run window, [2..3] the interval. */
   private readonly peaks = new Float64Array(4);
   private readonly runBase: MatchCounts[];
+  /** Each match's counters at the process run window's start: the process's traffic. */
+  private readonly processBase: MatchCounts[];
+  /** Each match's run window start (ms): the process's, or its own `metrics reset`'s. */
+  private readonly matchRunStart: Float64Array;
   private readonly intervalBase: MatchCounts[];
   private readonly current: MatchCounts[];
   /** Loop counters at the run window's and the interval's start: dropped, yields. */
@@ -212,6 +218,8 @@ export class ServerMetrics {
     this.cpuMicros = src.cpuMicros ?? processCpuMicros;
     const n = src.matches.length;
     this.runBase = Array.from({ length: n }, () => new MatchCounts());
+    this.processBase = Array.from({ length: n }, () => new MatchCounts());
+    this.matchRunStart = new Float64Array(n);
     this.intervalBase = Array.from({ length: n }, () => new MatchCounts());
     this.current = Array.from({ length: n }, () => new MatchCounts());
     this.t[0] = this.now();
@@ -236,10 +244,32 @@ export class ServerMetrics {
     this.loopBase[0] = loop.dropped;
     this.loopBase[1] = loop.yields;
     for (let i = 0; i < src.matches.length; i++) {
-      const m = src.matches[i] as ServerMatch;
-      m.ticks.resetRun();
-      (this.runBase[i] as MatchCounts).read(m);
+      (this.processBase[i] as MatchCounts).read(src.matches[i] as ServerMatch);
+      this.resetMatchAt(i, this.t[1] as number);
     }
+  }
+
+  /**
+   * Starts the run window again for the match named `name` only: its tick histogram, counters and
+   * traffic; the process's window and the other matches' stay (rcon's `metrics reset`, D-042, M3
+   * design §2.14). False when there is no such match.
+   */
+  resetMatchRun(name: string): boolean {
+    const matches = this.src.matches;
+    for (let i = 0; i < matches.length; i++) {
+      if ((matches[i] as ServerMatch).name !== name) continue;
+      this.resetMatchAt(i, this.now());
+      return true;
+    }
+    return false;
+  }
+
+  /** Match `i`'s run window from `at` (ms; the process's start when the whole run resets). */
+  private resetMatchAt(i: number, at: number): void {
+    const m = this.src.matches[i] as ServerMatch;
+    this.matchRunStart[i] = at;
+    m.ticks.resetRun();
+    (this.runBase[i] as MatchCounts).read(m);
   }
 
   /**
@@ -265,7 +295,10 @@ export class ServerMetrics {
   /** The `/metrics` page and the `--metrics-out` file: the run windows, process and per match. */
   json() {
     const src = this.src;
-    const runS = this.runSeconds;
+    // One clock reading for every window, so a match whose window is the process's reports the
+    // same seconds and rates.
+    const now = this.now();
+    const runS = (now - (this.t[1] as number)) / 1000;
     const loop = src.loop();
     const memory = this.sampleMemory();
     const cpu = this.cpuMicros() - (this.t[3] as number);
@@ -276,9 +309,12 @@ export class ServerMetrics {
       const m = src.matches[i] as ServerMatch;
       const c = (this.current[i] as MatchCounts).read(m);
       const b = this.runBase[i] as MatchCounts;
-      bytesIn += c.bytesIn - b.bytesIn;
-      bytesOut += c.bytesOut - b.bytesOut;
+      const p = this.processBase[i] as MatchCounts;
+      bytesIn += c.bytesIn - p.bytesIn;
+      bytesOut += c.bytesOut - p.bytesOut;
+      const matchS = (now - (this.matchRunStart[i] as number)) / 1000;
       matches[m.name] = {
+        runS: round3(matchS),
         map: m.match.mapName,
         players: m.match.sessionCount,
         serverTick: m.match.serverTick,
@@ -302,12 +338,12 @@ export class ServerMetrics {
         inputPackets: c.inputPackets - b.inputPackets,
         inputLost: c.inputLost - b.inputLost,
         inputLossPct: lossPct(c, b),
-        traffic: trafficJson(c.bytesIn - b.bytesIn, c.bytesOut - b.bytesOut, runS),
+        traffic: trafficJson(c.bytesIn - b.bytesIn, c.bytesOut - b.bytesOut, matchS),
       };
     }
     return {
       process: {
-        uptimeS: round3((this.now() - (this.t[0] as number)) / 1000),
+        uptimeS: round3((now - (this.t[0] as number)) / 1000),
         runS: round3(runS),
         passes: src.pass.passes - (this.t[5] as number),
         droppedTicks: loop.dropped - (this.loopBase[0] as number),

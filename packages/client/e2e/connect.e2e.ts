@@ -87,6 +87,12 @@ describe("client e2e: connect to a Node server (D-031)", () => {
 
     await page.keyboard.press("Backquote");
     const input = page.locator("#console-input");
+    // A dedicated server's sv_cheats is 0 (D-042): third person is refused.
+    await input.fill("set cl_thirdPerson 1");
+    await input.press("Enter");
+    await expect
+      .poll(() => page.locator("#console-output div").last().textContent())
+      .toBe("cl_thirdPerson is cheat protected: the server's sv_cheats is 0");
     await input.fill("disconnect");
     await input.press("Enter");
     await expect

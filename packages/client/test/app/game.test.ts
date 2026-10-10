@@ -20,6 +20,7 @@ import {
   MOVE_AXIS_MAX,
   PlayerState,
   registerPmoveCvars,
+  registerServerReplicatedCvars,
   TEAM_2,
   TRACE_EPSILON,
   type Transport,
@@ -54,6 +55,7 @@ import {
   StrafeCircuit,
 } from "../../src/net";
 import type { GameRenderer } from "../../src/render/renderer";
+import { workerCvars } from "../../src/worker/workerCvars";
 
 const mapUrl = new URL("../../../../content/maps/movement_lab.cmap", import.meta.url);
 const cmap = decodeCmap(new Uint8Array(readFileSync(fileURLToPath(mapUrl))));
@@ -139,12 +141,16 @@ function session(
 ) {
   const now = { t: 0 };
   const [clientEnd, serverEnd] = createLoopbackPair();
-  const match = new Match({ cmap, world, buildHash: BUILD, primer: false });
+  // The Worker's match (sv_cheats 1, D-042), so third person and the debug views can be set.
+  const match = new Match({ cmap, world, cvars: workerCvars(), buildHash: BUILD, primer: false });
   match.connect(serverEnd, true);
   // The page's registry (boot.ts), so the client cvars are the registered ones.
   const cvars = new CvarRegistry();
   registerPmoveCvars(cvars);
+  registerServerReplicatedCvars(cvars);
   registerClientCvars(cvars);
+  // As the Worker's WELCOME will (sv_cheats 1), so a test may set the CHEAT views before it.
+  cvars.setAllowCheats(true);
   const link = new StallableLink(clientEnd);
   const client = new ClientSim({
     primer: false,

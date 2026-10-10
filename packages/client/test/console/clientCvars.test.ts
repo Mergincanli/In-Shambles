@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   CLIENT_CVARS,
   ClientSettings,
+  RCON_PASSWORD_CVAR,
   refreshClientSettings,
   registerClientCvars,
 } from "../../src/console/clientCvars";
@@ -10,7 +11,7 @@ import { CLIENT_NET_CVARS } from "../../src/net";
 import { VIEW_CVARS } from "../../src/render/viewCvars";
 
 describe("client cvars (docs/06 §7)", () => {
-  it("register every client cvar as ARCHIVE, never REPLICATED", () => {
+  it("register every client cvar as ARCHIVE, never REPLICATED; the views CHEAT; rcon_password neither", () => {
     const reg = new CvarRegistry();
     registerClientCvars(reg);
     const names = [...CLIENT_NET_CVARS, ...VIEW_CVARS, ...CLIENT_CVARS].map((c) => c.name);
@@ -19,15 +20,23 @@ describe("client cvars (docs/06 §7)", () => {
         .list()
         .map((i) => i.def.name)
         .sort(),
-    ).toEqual([...names].sort());
+    ).toEqual([...names, RCON_PASSWORD_CVAR].sort());
+    const cheats = ["cl_thirdPerson", "r_debugHull", "r_debugTraces", "r_debugGround"];
     for (const info of reg.list()) {
-      expect(info.def.flags, info.def.name).toBe(CvarFlag.ARCHIVE);
+      const name = info.def.name;
+      const want =
+        name === RCON_PASSWORD_CVAR
+          ? CvarFlag.NONE
+          : CvarFlag.ARCHIVE | (cheats.includes(name) ? CvarFlag.CHEAT : 0);
+      expect(info.def.flags, name).toBe(want);
     }
+    expect(reg.get(RCON_PASSWORD_CVAR)).toBe("");
   });
 
   it("refresh the settings struct only when the registry moves", () => {
     const reg = new CvarRegistry();
     registerClientCvars(reg);
+    reg.setAllowCheats(true);
     const s = new ClientSettings();
     expect(refreshClientSettings(reg, s)).toBe(true);
     expect(refreshClientSettings(reg, s)).toBe(false);
@@ -48,6 +57,7 @@ describe("client cvars (docs/06 §7)", () => {
   it("copy every cvar into its own field", () => {
     const reg = new CvarRegistry();
     registerClientCvars(reg);
+    reg.setAllowCheats(true);
     const s = new ClientSettings();
     // Each field on its own: one value per number, one bool on at a time.
     reg.set("sensitivity", 3);

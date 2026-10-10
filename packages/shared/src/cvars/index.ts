@@ -7,3 +7,4 @@ export {
   type CvarValue,
   type SetResult,
 } from "./registry";
+export { registerServerReplicatedCvars } from "./serverReplicated";

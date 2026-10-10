@@ -1,4 +1,5 @@
 import { type Binds, isToggleConsole } from "./binds";
+import { consoleEcho } from "./commands";
 
 /** Lines the console keeps; older ones scroll away for good. */
 export const CONSOLE_MAX_LINES = 400;
@@ -107,8 +108,12 @@ export class GameConsole {
       const line = this.input.value.trim();
       this.input.value = "";
       if (line === "") return;
-      this.print(`] ${line}`);
-      if (this.history[this.history.length - 1] !== line) this.history.push(line);
+      // A line holding the rcon password is echoed hidden and never kept (D-042).
+      const { echo, history } = consoleEcho(line);
+      this.print(`] ${echo}`);
+      if (history !== null && this.history[this.history.length - 1] !== history) {
+        this.history.push(history);
+      }
       if (this.history.length > CONSOLE_HISTORY) this.history.shift();
       this.browse = this.history.length;
       this.options.run(line);

@@ -6,6 +6,7 @@ import {
   SESSION_CLOSED,
   SessionLimits,
   STRIKE_MALFORMED,
+  STRIKE_RCON,
   STRIKE_UNEXPECTED,
   TOKEN_UNIT,
 } from "@game/server";
@@ -53,10 +54,11 @@ type HandleUpgrade = (
 // attackers abuse the match, each on its own schedule: every attacker is KICKed with its reason
 // at the time the strike weights, the token buckets and the kick-time formula give, its slot is
 // freed, and the honest client sees nothing (no strike, no correction, the same starved ticks and
-// the same server state as a run without attackers). An honest client's 3 s stall, whose anchor
-// fill sends dozens of INPUTs within a few polls, is not struck. The real-socket legs (b) are in
-// `packages/tools/long/net-10-abuse.long.ts`, and a smoke of them is this file's
-// "NET-10 (b) smoke" block (rcon lockout across reconnects joins them with rcon, increment 14).
+// the same server state as a run without attackers); a wrong rcon password costs 10 points
+// (D-042), so three guesses kick. An honest client's 3 s stall, whose anchor fill sends dozens of
+// INPUTs within a few polls, is not struck. The real-socket legs (b), rcon lockout across
+// reconnects among them, are in `packages/tools/long/net-10-abuse.long.ts`, and a smoke of the
+// listener's limits is this file's "NET-10 (b) smoke" block.
 
 setHarnessPrimerDefault(false);
 
@@ -185,7 +187,7 @@ interface Run {
  * past the handshake timeout's 600 ticks.
  */
 function run(attack: boolean): Run {
-  const h = new MultiHarness({ timeouts: true });
+  const h = new MultiHarness({ timeouts: true, rcon: (p) => p === "the password" });
   const honest = h.addClient({ input: new MixedInput(), profile: WAN50 });
   const rng = new Mulberry32(0x10ab05e);
   const attackers: Attacker[] = [];
@@ -228,6 +230,8 @@ function run(attack: boolean): Run {
     add("reliable flood", true, (a) => send(a, 1, true, () => cmdBytes("help")));
     add("HELLO flood", true, (a) => send(a, 1, true, helloBytes));
     add("CMD spam", true, (a) => send(a, 5, true, () => cmdBytes("set pm_gravity 100")));
+    // Guessing the rcon password (D-042): each wrong one is worth STRIKE_RCON.
+    add("wrong rcon", true, (a) => send(a, 1, true, (i) => cmdBytes(`rcon guess${i} status`)));
     // Not kicked: in-range yaw spam is legal, and cmds past the queue's horizon are only dropped.
     add("yaw spam", true, (a, t) =>
       send(a, 1, false, () => validInput(a, t, { yaw: rng.nextU32() & 0xffff, forward: 127 })),
@@ -283,6 +287,9 @@ describe("NET-10: abuse (D-041): attackers kicked on schedule, honest clients un
       expect(kickReason(of(name)), name).toBe("too many bad packets");
       expect(of(name).sentAtKick, name).toBe(LIMITS.strikeKick / STRIKE_UNEXPECTED);
     }
+    expect(kickReason(of("wrong rcon"))).toBe("too many bad packets");
+    expect(of("wrong rcon").sentAtKick).toBe(LIMITS.strikeKick / STRIKE_RCON);
+    expect(h.match.metrics.rconFailed).toBe(LIMITS.strikeKick / STRIKE_RCON);
     expect(kickReason(of("random bytes"))).toMatch(/^(too many bad packets|malformed HELLO)$/);
     expect(of("random bytes").sentAtKick).toBeLessThanOrEqual(LIMITS.strikeKick / 2);
 
