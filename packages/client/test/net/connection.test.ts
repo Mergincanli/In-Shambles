@@ -93,7 +93,15 @@ function setup() {
     onPrint: () => {},
     onClosed: () => {},
   };
-  const conn = new Connection(transport, {} as ClientClock, stats, handler, "test", 1);
+  const conn = new Connection(
+    transport,
+    {} as ClientClock,
+    stats,
+    handler,
+    "test",
+    1,
+    new Float64Array(1),
+  );
   // Past the handshake (covered by the client session tests): a live session as SELF.
   conn.state = CONN_ACTIVE;
   conn.clientId = SELF;

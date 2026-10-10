@@ -290,7 +290,8 @@ describe("MultiHarness: clients", () => {
     expect(raw.received[0]?.reliable).toBe(true);
     expect(raw.tap.up.messages).toBe(1);
     expect(junk.received).toEqual([]);
-    expect(junk.session?.stats.strikes).toBe(2);
+    // Neither is a client message: 5 strike points each (D-041).
+    expect(junk.session?.stats.strikes).toBe(10);
     expect(honest.client.active).toBe(true);
     expect(honest.session?.stats.strikes).toBe(0);
   });

@@ -68,6 +68,13 @@ export class GcTracker {
   }
 }
 
+/** INPUT packets lost of those sent between `b` and `c`, in percent (3 decimals); 0 for none. */
+function lossPct(c: MatchCounts, b: MatchCounts): number {
+  const lost = c.inputLost - b.inputLost;
+  const sent = c.inputPackets - b.inputPackets + lost;
+  return sent > 0 ? round3((100 * lost) / sent) : 0;
+}
+
 /** A match's running counters at one moment, so a window reports what happened since. */
 class MatchCounts {
   starved = 0;
@@ -79,6 +86,9 @@ class MatchCounts {
   snapshotOverflow = 0;
   schedOverrun = 0;
   kicks = 0;
+  rateLimited = 0;
+  inputPackets = 0;
+  inputLost = 0;
   bytesIn = 0;
   bytesOut = 0;
 
@@ -93,6 +103,9 @@ class MatchCounts {
     this.snapshotOverflow = c.snapshotOverflow;
     this.schedOverrun = c.schedOverrun;
     this.kicks = c.kicks;
+    this.rateLimited = c.rateLimited;
+    this.inputPackets = c.inputPackets;
+    this.inputLost = c.inputLost;
     this.bytesIn = m.traffic.bytesIn;
     this.bytesOut = m.traffic.bytesOut;
     return this;
@@ -283,6 +296,12 @@ export class ServerMetrics {
         snapshotOverflow: c.snapshotOverflow - b.snapshotOverflow,
         schedOverrun: c.schedOverrun - b.schedOverrun,
         kicks: c.kicks - b.kicks,
+        // D-041: packets the rate limits dropped, and INPUT packets received and lost on the way
+        // in (of those sent: received + lost).
+        rateLimited: c.rateLimited - b.rateLimited,
+        inputPackets: c.inputPackets - b.inputPackets,
+        inputLost: c.inputLost - b.inputLost,
+        inputLossPct: lossPct(c, b),
         traffic: trafficJson(c.bytesIn - b.bytesIn, c.bytesOut - b.bytesOut, runS),
       };
     }
@@ -334,6 +353,8 @@ export class ServerMetrics {
         maxStaleness: m.match.metrics.maxStaleness,
         snapshotOverflow: c.snapshotOverflow - b.snapshotOverflow,
         kicks: c.kicks - b.kicks,
+        rateLimited: c.rateLimited - b.rateLimited,
+        inputLossPct: lossPct(c, b),
         kbInPerS: kbPerS(c.bytesIn - b.bytesIn, s),
         kbOutPerS: kbPerS(c.bytesOut - b.bytesOut, s),
       });

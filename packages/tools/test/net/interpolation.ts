@@ -23,6 +23,7 @@ import {
   STAT_CLOCK_ADJUSTMENTS,
   STAT_RENDER_SNAPS,
 } from "@game/client/net";
+import type { Match } from "@game/server";
 import {
   type CloseHandler,
   CONTENTS_SOLID,
@@ -38,6 +39,7 @@ import {
   vec3,
 } from "@game/shared";
 import { expect } from "vitest";
+import { expectNoStrikes } from "./honest";
 import { type FrameModel, type HarnessClient, MultiHarness } from "./multiHarness";
 
 // NET-05's runs and checks (docs/05 §14, M3 design §2.8 and §5, D-037), shared by its two tiers
@@ -83,6 +85,8 @@ export function moverInput(seed: number): CmdSampler {
  */
 export class RemoteWatch {
   readonly meter = new RemoteJumpMeter();
+  /** The match watched, when known: `expectSmooth` then also checks D-041's no-strike rule. */
+  match: Match | null = null;
   frames = 0;
   /** Remote-frames drawn, extrapolated and held. */
   remoteFrames = 0;
@@ -244,6 +248,7 @@ export class RemoteWatch {
 /** The checks every NET-05 run passes, whatever its profile. */
 export function expectSmooth(w: RemoteWatch): void {
   expect(w.frames).toBeGreaterThan(100);
+  if (w.match !== null) expectNoStrikes(w.match, [w.client]);
   expect(w.meter.t[JM_VIOLATIONS], w.summary("jumps")).toBe(0);
   expect(w.client.stats.totals[STAT_RENDER_SNAPS], w.summary("render snaps")).toBe(0);
   expect(w.rateOut, w.summary("render rate")).toBe(0);
@@ -300,6 +305,7 @@ export function pair(o: PairOptions): PairRun {
     (s) => (s === mover.session?.clientId ? mover.server : null),
     () => h.now,
   );
+  watch.match = h.match;
   return { h, mover, observer, watch };
 }
 

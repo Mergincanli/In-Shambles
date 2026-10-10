@@ -155,8 +155,16 @@ describe("Node server (in process, real WebSocket)", () => {
     expect(lines.filter((l) => l.ev === "shutdown")).toHaveLength(1);
     const at = lines.findIndex((l) => l.ev === "shutdown");
     expect(lines[at]).toMatchObject({ lvl: "info", signal: "SIGTERM" });
-    expect(lines.slice(at + 1).map((l) => l.msg)).toEqual([
-      "client 0 kicked: server shutting down",
+    // The kick is its own structured line (D-041), with the strike score it left with.
+    expect(lines.slice(at + 1).map(({ t: _t, ...rest }) => rest)).toEqual([
+      {
+        lvl: "info",
+        ev: "kick",
+        match: "main",
+        client: 0,
+        reason: "server shutting down",
+        strikes: 0,
+      },
     ]);
     // The loop stopped: the match ticks no more.
     expect(server.loop.isRunning).toBe(false);

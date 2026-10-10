@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import type { IncomingMessage } from "node:http";
 import { dirname, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import {
@@ -16,11 +17,13 @@ import { WsListener } from "../transport/wsListener";
 import { WireTraffic, type WsTransport } from "../transport/wsTransport";
 import { isBundledServer, serverBuildHash } from "./buildHash";
 import {
+  admissionLimits,
   applyAssignments,
   ConfigError,
   parseCommandLine,
   parseServerCfg,
   sendLimits,
+  sessionLimits,
 } from "./config";
 import { runConsoleLine, startConsole } from "./console";
 import { createNodeHost, type ServerMatch, TimedPass } from "./host";
@@ -49,6 +52,11 @@ export interface StartOptions {
    * start many servers pass false; `server_ok` then reports `primerMs` 0.
    */
   readonly primer?: boolean;
+  /**
+   * Tests only: the address each upgrade is counted under for `sv_maxPerIp` (D-041), in place of
+   * the TCP peer's, so one test can stand for many clients on one non-loopback address.
+   */
+  readonly peerAddress?: (req: IncomingMessage) => string;
 }
 
 export interface RunningServer {
@@ -110,6 +118,8 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   const buildHash = serverBuildHash();
   // Checked before the primer, so a bad setting stops the server without paying for it.
   const limits = sendLimits(cvars);
+  const security = sessionLimits(cvars);
+  const admission = admissionLimits(cvars);
 
   // The pmove primer (D-040) runs once per process, timed here for `server_ok`: the match's own
   // call at construction then finds it done. Parameters from the template, as the match's are.
@@ -129,6 +139,10 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
       strictBuild: cvars.getNumber("sv_strictBuild", 1) === 1,
       maxClients,
       log: matchLog(log, DEFAULT_MATCH),
+      events: (lvl, ev, fields) => log(lvl, ev, { match: DEFAULT_MATCH, ...fields }),
+      // D-041: unlike the Worker, a dedicated server times out silent and stuck sessions.
+      timeouts: true,
+      limits: security,
       primer,
     }),
     ticks: new TickHistogram(),
@@ -143,6 +157,8 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     host: String(cvars.get("sv_host")),
     port: cvars.getNumber("sv_port", 0),
     limits,
+    admission,
+    ...(options.peerAddress === undefined ? {} : { peerAddress: options.peerAddress }),
     target: {
       hasMatch: (name) => name === "" || Object.hasOwn(matches, name),
       accept: (name, transport: WsTransport, ip) => {

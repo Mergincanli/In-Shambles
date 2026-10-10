@@ -10,6 +10,7 @@ import {
 import { expect } from "vitest";
 import { createBotInput } from "../../src/bots/routes";
 import { DeltaWatch, ticksIn } from "./deltaWatch";
+import { expectNoStrikes } from "./honest";
 import { FRAMES_BOT_TIMER } from "./interpolation";
 import { FRAMES_BROWSER_HITCHES, type HarnessClient, MultiHarness } from "./multiHarness";
 
@@ -183,7 +184,7 @@ export function expectBandwidth(run: BandwidthRun): string {
   expect(human.digestsChecked).toBeGreaterThan(seconds * 60 * 0.7);
   // 86 + 199 + 7 + 16 × 213 bits: the human, last in, got every other player as a new body.
   expect(human.tap.maxFullSnapshot).toBe(463);
-  expect(h.match.metrics.strikes).toBe(0);
+  expectNoStrikes(h.match, []);
   return account;
 }
 

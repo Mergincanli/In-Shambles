@@ -34,6 +34,7 @@ import {
   KickMsg,
   MATCH_MAX_CLIENTS,
   MAX_RELIABLE_BYTES,
+  MAX_UNRELIABLE_BYTES,
   MSG_CMD,
   MSG_HELLO,
   MSG_INPUT,
@@ -74,7 +75,17 @@ import {
 } from "@game/shared";
 import { runServerCommand } from "./commands";
 import { ACK_AHEAD, ACK_AHEAD_STRIKES, acceptAck, WorldHistory } from "./history";
-import type { MatchLog } from "./host";
+import type { MatchEventLog, MatchLog } from "./host";
+import {
+  RELIABLE_REFILL_UNITS,
+  SessionLimits,
+  STRIKE_KICK,
+  STRIKE_MALFORMED,
+  STRIKE_RATE_LIMITED,
+  STRIKE_UNEXPECTED,
+  STRIKE_WARN,
+  UNRELIABLE_REFILL_UNITS,
+} from "./limits";
 import { MirrorPool } from "./mirror";
 import { buildSnapshot, SnapshotScheduler } from "./scheduler";
 import {
@@ -128,6 +139,23 @@ export interface MatchOptions {
   readonly maxClients?: number;
   readonly log?: MatchLog;
   /**
+   * Session events (`welcome`, `ready`, `leave`, `kick` with its reason and strike score) as
+   * structured fields: the Node server logs each as its own JSON line (docs/06 §8). When absent
+   * they are text lines of `log`.
+   */
+  readonly events?: MatchEventLog;
+  /**
+   * Kick sessions that stay silent or never finish the handshake (D-041: `sv_timeout`,
+   * `sv_helloTimeout`, `sv_handshakeTimeout`). Default false: the Worker's one client must survive
+   * a hidden tab for as long as it likes; the Node server turns them on.
+   */
+  readonly timeouts?: boolean;
+  /**
+   * Rate limits, strike levels, timeouts and the starved-cmd limit (D-041); the defaults when
+   * absent. Read when the match is built and whenever a session connects (the buckets' sizes).
+   */
+  readonly limits?: SessionLimits;
+  /**
    * Run the pmove primer (D-040) at construction, once per module instance (default true): it
    * warms pmove's late branches before the first tick. Unit helpers that build many matches pass
    * false to save its cost; it never changes a result.
@@ -159,11 +187,24 @@ export class MatchMetrics {
   /** Snapshots that had to leave out a player due this tick (impossible by the bound). */
   schedOverrun = 0;
   kicks = 0;
+  /** Packets dropped by the rate limits (D-041), and the player-ticks that dropped any. */
+  rateLimited = 0;
+  rateLimitedTicks = 0;
+  /** INPUT packets received, and those their `packetSeq` shows were lost on the way (D-041). */
+  inputPackets = 0;
+  inputLost = 0;
+  /** Starved player-ticks simulated with the neutral cmd (past `sv_starveNeutralTicks`). */
+  neutralTicks = 0;
   /** CVARS messages sent (broadcasts and resends). */
   cvarsSent = 0;
 }
 
 function ignoreLog(): void {}
+
+/** The PRINT a session gets when its strike score first reaches `sv_strikeWarn` (D-041). */
+function strikeWarning(score: number, kick: number): string {
+  return `too many bad packets (${score} strike points); the server disconnects at ${kick}`;
+}
 
 /** Lowest free client id below `cap`, or −1 when every one is taken. `sessions` is sorted by id. */
 function freeClientId(sessions: readonly Session[], cap: number): number {
@@ -180,26 +221,33 @@ function freeClientId(sessions: readonly Session[], cap: number): number {
  * session, advanced one tick per `tick()`. Environment-agnostic: no clock, timer or I/O of its
  * own (the loop and the transports bring them), so the same code runs in the Worker and in Node.
  *
- * `tick()` simulates T = serverTick + 1, in this order:
- * 1. Poll every session's transport in client-id order and handle what arrived: HELLO (version
- *    and build checked, else KICK; then WELCOME), READY (a team, then a spawn at the next point
- *    of the rotation), INPUT (into the input queue), PING (PONG), CMD (console commands; changing
- *    cvars needs the admin flag).
- * 2. If the cvars changed: refresh the pmove params and, when the replicated block changed,
+ * `tick()` simulates T = serverTick + 1, in this order (M3 design §2.5):
+ * 1. Per session in client-id order: refill its two token buckets, then poll its transport and
+ *    handle what arrived. An unreliable message over 1200 B is struck; one whose channel's bucket
+ *    is empty is dropped (the tick is rate-limited). Then HELLO (version and build checked, else
+ *    KICK; then WELCOME), READY (a team, then a spawn at the next point of the rotation), INPUT
+ *    (into the input queue; its ack and packet sequence read), PING (PONG), CMD (console commands;
+ *    changing cvars needs the admin flag). What doesn't decode, fit the channel or fit the state is
+ *    struck by weight (D-041); a session whose score reaches `sv_strikeKick` is KICKed at once.
+ * 2. With `timeouts`: KICK a session without HELLO after `sv_helloTimeout` ticks, one not READY
+ *    after `sv_handshakeTimeout`, and a welcomed or active one silent for `sv_timeout`.
+ * 3. Strikes: a rate-limited tick adds a point; scores decay 1 a second.
+ * 4. If the cvars changed: refresh the pmove params and, when the replicated block changed,
  *    broadcast CVARS with effectiveTick = T, the first tick simulated with the new values.
- * 3. Per active client in id order: take its cmd for T, or repeat its last cmd with ATTACK cleared
- *    and tick = T (starved); sanitize; pmove, whose movement events join the slot's event history
- *    (the count and the two newest, as entities carry them). A player spawned this tick is not
- *    simulated: its spawn state is its state at T.
- * 4. Capture the world frame of T into the 64-tick world history every client's baseline comes
+ * 5. Per active client in id order: take its cmd for T, or repeat its last cmd with ATTACK cleared
+ *    and tick = T (starved), a neutral one (no move, no buttons, same angles) once it has starved
+ *    `sv_starveNeutralTicks` ticks in a row; sanitize; pmove, whose movement events join the slot's
+ *    event history (the count and the two newest, as entities carry them). A player spawned this
+ *    tick is not simulated: its spawn state is its state at T.
+ * 6. Capture the world frame of T into the 64-tick world history every client's baseline comes
  *    from: every active player's state, serial, team, teleport counter and event history.
- * 5. Per active client: the SNAPSHOT of T (protocol v2, D-033, D-038): a delta against the frame of
+ * 7. Per active client: the SNAPSHOT of T (protocol v2, D-033, D-038): a delta against the frame of
  *    the newest valid tick the client acked (`lastSnapshotTick` of its INPUTs), or a full one when
  *    none is usable; its own state as the local block, every other active player as an entity
  *    record, inputBufferHealth = newest cmd tick received − T (clamped to i8), flagged STARVED.
  *    When its worst case is past 1100 B the byte-budget scheduler (D-046, `scheduler.ts`) leaves
  *    some players out, never one two ticks in a row; the tick counts as sent only once it encoded.
- * 6. Metrics.
+ * 8. Metrics.
  *
  * After warm-up a tick allocates nothing: messages decode into and encode from preallocated
  * structs, and the transports pool their packets. HELLO, CMD, kicks and cvar changes allocate
@@ -235,6 +283,10 @@ export class Match {
   private readonly scheduler = new SnapshotScheduler();
 
   private readonly log: MatchLog;
+  private readonly sessionEvents: MatchEventLog | null;
+  /** Rate limits, strike levels and timeouts (D-041). */
+  readonly limits: SessionLimits;
+  private readonly timeouts: boolean;
   private readonly sessions: Session[] = [];
   private currentTick = 0;
   private anyClosed = false;
@@ -282,6 +334,9 @@ export class Match {
     const cmap = options.cmap;
     this.world = options.world ?? buildCollisionWorld(cmap);
     this.log = options.log ?? ignoreLog;
+    this.sessionEvents = options.events ?? null;
+    this.limits = options.limits ?? new SessionLimits();
+    this.timeouts = options.timeouts ?? false;
     let cvars = options.cvars;
     if (cvars === undefined) {
       cvars = new CvarRegistry();
@@ -371,6 +426,11 @@ export class Match {
     }
     const s = new Session(id, transport, admin);
     if (this.mirrorsOn) s.mirror = this.mirrors.acquire();
+    const limits = this.limits;
+    s.unreliableTokens.configure(limits.inputBurst, UNRELIABLE_REFILL_UNITS);
+    s.reliableTokens.configure(limits.reliableBurst, RELIABLE_REFILL_UNITS);
+    s.connectTick = this.currentTick;
+    s.lastPacketTick = this.currentTick;
     const serial = ((this.serials[id] as number) + 1) & 0xffff;
     this.serials[id] = serial;
     s.serial = serial;
@@ -382,7 +442,10 @@ export class Match {
       if (s.state === SESSION_CLOSED) return;
       s.state = SESSION_CLOSED;
       this.anyClosed = true;
-      this.log("info", `client ${s.clientId} disconnected${reason === "" ? "" : `: ${reason}`}`);
+      if (this.sessionEvents !== null)
+        this.sessionEvents("info", "leave", { client: s.clientId, reason });
+      else
+        this.log("info", `client ${s.clientId} disconnected${reason === "" ? "" : `: ${reason}`}`);
     });
     this.log("info", `client ${id} connected${admin ? " (admin)" : ""}`);
     return s;
@@ -395,7 +458,12 @@ export class Match {
     s.state = SESSION_CLOSED;
     this.anyClosed = true;
     this.metrics.kicks++;
-    this.log("info", `client ${s.clientId} kicked: ${reason}`);
+    const strikes = s.strikeScore.score;
+    if (this.sessionEvents !== null) {
+      this.sessionEvents("info", "kick", { client: s.clientId, reason, strikes });
+    } else {
+      this.log("info", `client ${s.clientId} kicked: ${reason} (strike score ${strikes})`);
+    }
   }
 
   tick(): void {
@@ -405,7 +473,22 @@ export class Match {
     for (let i = 0; i < sessions.length; i++) {
       const s = sessions[i] as Session;
       s.snapFlags = 0;
-      if (s.state !== SESSION_CLOSED) s.transport.poll();
+      if (s.state === SESSION_CLOSED) continue;
+      s.unreliableTokens.refill();
+      s.reliableTokens.refill();
+      s.transport.poll();
+    }
+    if (this.timeouts) this.checkTimeouts(t);
+    for (let i = 0; i < sessions.length; i++) {
+      const s = sessions[i] as Session;
+      if (s.state === SESSION_CLOSED) continue;
+      if (s.rateLimitedNow) {
+        s.rateLimitedNow = false;
+        s.stats.rateLimitedTicks++;
+        this.metrics.rateLimitedTicks++;
+        this.strike(s, STRIKE_RATE_LIMITED);
+      }
+      s.strikeScore.tick();
     }
     if (this.anyClosed) this.removeClosed();
     if (this.cvars.version !== this.cvarVersion && this.refreshCvars()) {
@@ -433,44 +516,122 @@ export class Match {
   // -------------------------------------------------------------------------------------------
   // Receiving
 
-  private strike(s: Session): void {
-    s.stats.strikes++;
-    this.metrics.strikes++;
+  /**
+   * Adds `points` to the session's strike score (D-041): the first time it reaches `sv_strikeWarn`
+   * the client gets a PRINT; at `sv_strikeKick` it is KICKed "too many bad packets" at once, so
+   * nothing more it sent this poll is read.
+   */
+  private strike(s: Session, points: number): void {
+    s.stats.strikes += points;
+    this.metrics.strikes += points;
+    const limits = this.limits;
+    const crossed = s.strikeScore.add(points, limits.strikeWarn, limits.strikeKick);
+    if (crossed === STRIKE_KICK) {
+      this.kick(s, "too many bad packets");
+    } else if (crossed === STRIKE_WARN) {
+      this.sendPrint(s, PRINT_WARN, strikeWarning(s.strikeScore.score, limits.strikeKick));
+    }
+  }
+
+  /**
+   * Step 2's timeouts (D-041), by ticks so a stalled server never times anyone out: no HELLO
+   * `helloTimeout` ticks after the connection opened, or not READY `handshakeTimeout` ticks after,
+   * is "handshake timed out"; a welcomed or active session whose last message came `timeout` ticks
+   * ago is "timed out".
+   */
+  private checkTimeouts(t: number): void {
+    const limits = this.limits;
+    const sessions = this.sessions;
+    for (let i = 0; i < sessions.length; i++) {
+      const s = sessions[i] as Session;
+      const state = s.state;
+      if (state === SESSION_CLOSED) continue;
+      const age = t - s.connectTick;
+      if (state === SESSION_CONNECTING) {
+        if (age >= limits.helloTimeout) this.kick(s, "handshake timed out");
+      } else if (t - s.lastPacketTick >= limits.timeout) {
+        this.kick(s, "timed out");
+      } else if (state === SESSION_WELCOMED && age >= limits.handshakeTimeout) {
+        this.kick(s, "handshake timed out");
+      }
+    }
   }
 
   private receive(s: Session, d: Uint8Array, len: number, reliable: boolean): void {
     if (s.state === SESSION_CLOSED) return;
+    s.lastPacketTick = this.currentTick + 1;
+    // Size first, then the channel's rate limit (M3 design §2.5 step 1): an oversized message is
+    // struck even when its bucket is empty; a dropped one is never parsed. An empty one is the
+    // WebSocket transport's marker for a frame past MAX_UNRELIABLE_BYTES (and no message anyway).
+    if (!reliable && (len === 0 || len > MAX_UNRELIABLE_BYTES)) {
+      this.strike(s, STRIKE_MALFORMED);
+      return;
+    }
+    if (!(reliable ? s.reliableTokens : s.unreliableTokens).take()) {
+      s.rateLimitedNow = true;
+      s.stats.rateLimited++;
+      this.metrics.rateLimited++;
+      return;
+    }
     const type = peekMessageType(d, len);
     const r = this.reader;
     r.reset(d, len);
-    // Each message has its channel (docs/05 §3.3); one on the other channel is dropped.
+    // Each message has its channel (docs/05 §3.3); one on the other channel is dropped and
+    // struck as unexpected, like one the session's state has no use for; one that doesn't decode,
+    // or isn't a client message at all, is struck as malformed.
     if (type === MSG_INPUT) {
-      if (reliable || !decodeInput(r, this.input)) this.strike(s);
-      else if (s.state === SESSION_ACTIVE) this.onInput(s);
+      if (reliable) this.strike(s, STRIKE_UNEXPECTED);
+      else if (!decodeInput(r, this.input)) this.strike(s, STRIKE_MALFORMED);
+      else if (s.state !== SESSION_ACTIVE) this.strike(s, STRIKE_UNEXPECTED);
+      else this.onInput(s);
     } else if (type === MSG_PING) {
-      if (reliable || !decodePing(r, this.ping)) this.strike(s);
-      else if (s.state !== SESSION_CONNECTING) this.sendPong(s);
+      if (reliable) this.strike(s, STRIKE_UNEXPECTED);
+      else if (!decodePing(r, this.ping)) this.strike(s, STRIKE_MALFORMED);
+      else if (s.state === SESSION_CONNECTING) this.strike(s, STRIKE_UNEXPECTED);
+      else this.sendPong(s);
+    } else if (type !== MSG_HELLO && type !== MSG_READY && type !== MSG_CMD) {
+      this.strike(s, STRIKE_MALFORMED);
     } else if (!reliable) {
-      this.strike(s);
+      this.strike(s, STRIKE_UNEXPECTED);
     } else if (type === MSG_HELLO) {
       this.onHello(s, d, len);
     } else if (type === MSG_READY) {
-      if (s.state !== SESSION_WELCOMED || !decodeReady(r)) this.strike(s);
+      if (s.state !== SESSION_WELCOMED) this.strike(s, STRIKE_UNEXPECTED);
+      else if (!decodeReady(r)) this.strike(s, STRIKE_MALFORMED);
       else this.join(s, this.currentTick + 1);
-    } else if (type === MSG_CMD) {
-      if (s.state === SESSION_CONNECTING || !decodeCmd(r, this.cmdMsg)) this.strike(s);
-      else this.onCmd(s, this.cmdMsg.text);
+    } else if (s.state === SESSION_CONNECTING) {
+      this.strike(s, STRIKE_UNEXPECTED);
+    } else if (!decodeCmd(r, this.cmdMsg)) {
+      this.strike(s, STRIKE_MALFORMED);
     } else {
-      this.strike(s);
+      this.onCmd(s, this.cmdMsg.text);
     }
   }
 
-  /** INPUT: its cmds into the queue, its ack to the session's baseline (D-038). */
+  /**
+   * INPUT: its ack to the session's baseline (D-038), its packet sequence to the input-loss count
+   * (a forward step past 1 counts the packets between as lost; a reordered or repeated one counts
+   * nothing), its cmds into the queue.
+   */
   private onInput(s: Session): void {
     const m = this.input;
     if (acceptAck(s, m.lastSnapshotTick, this.currentTick + 1, this.history) === ACK_AHEAD) {
-      s.stats.strikes += ACK_AHEAD_STRIKES;
-      this.metrics.strikes += ACK_AHEAD_STRIKES;
+      this.strike(s, ACK_AHEAD_STRIKES);
+      if (s.state === SESSION_CLOSED) return;
+    }
+    const st = s.stats;
+    st.inputPackets++;
+    this.metrics.inputPackets++;
+    const seq = m.packetSeq;
+    if (s.inputSeq < 0) {
+      s.inputSeq = seq;
+    } else {
+      const step = (seq - s.inputSeq) & 0xffff;
+      if (step > 0 && step < 0x8000) {
+        st.inputLost += step - 1;
+        this.metrics.inputLost += step - 1;
+        s.inputSeq = seq;
+      }
     }
     const q = s.queue;
     for (let i = 0; i < m.count; i++) q.push(m.cmds[i] as UserCmd);
@@ -478,7 +639,7 @@ export class Match {
 
   private onHello(s: Session, d: Uint8Array, len: number): void {
     if (s.state !== SESSION_CONNECTING) {
-      this.strike(s);
+      this.strike(s, STRIKE_UNEXPECTED);
       return;
     }
     // The version first, from HELLO's frozen first 3 B, so a newer client hears why (D-026).
@@ -491,7 +652,7 @@ export class Match {
       return;
     }
     if (version < 0 || !decodeHello(this.reader, this.hello)) {
-      this.strike(s);
+      this.strike(s, STRIKE_MALFORMED);
       this.kick(s, "malformed HELLO");
       return;
     }
@@ -509,6 +670,9 @@ export class Match {
     }
     s.transport.sendReliable(this.writer.bytes, this.writer.byteLength);
     s.state = SESSION_WELCOMED;
+    if (this.sessionEvents !== null) {
+      this.sessionEvents("info", "welcome", { client: s.clientId, build: s.buildHash });
+    }
     if (otherBuild) {
       this.sendPrint(
         s,
@@ -563,7 +727,11 @@ export class Match {
     s.queue.reset(t + 1);
     this.spawn(s, t);
     s.state = SESSION_ACTIVE;
-    this.log("info", `client ${s.clientId} spawned at tick ${t} on team ${s.team}`);
+    if (this.sessionEvents !== null) {
+      this.sessionEvents("info", "ready", { client: s.clientId, tick: t, team: s.team });
+    } else {
+      this.log("info", `client ${s.clientId} spawned at tick ${t} on team ${s.team}`);
+    }
   }
 
   /**
@@ -600,6 +768,7 @@ export class Match {
     c.pitch = 0;
     c.weaponSlot = 0;
     s.spawnTick = t;
+    s.starvedRun = 0;
     const id = s.clientId;
     this.teleportSeqs[id] = ((this.teleportSeqs[id] as number) + 1) & 0xff;
   }
@@ -608,10 +777,22 @@ export class Match {
     const cmd = this.cmd;
     if (s.queue.take(t, cmd)) {
       s.stats.cmds++;
+      s.starvedRun = 0;
     } else {
-      // docs/05 §8.1 step 2: repeat the last cmd, but never a shot the client didn't send.
+      // docs/05 §8.1 step 2: repeat the last cmd, but never a shot the client didn't send; and
+      // once the client has been silent `sv_starveNeutralTicks` ticks (a hidden tab, a dead
+      // client), not its move either: the player stands still instead of running on (D-041).
       copyUserCmd(cmd, s.lastCmd);
-      cmd.buttons &= ~BUTTON_ATTACK;
+      if (s.starvedRun >= this.limits.starveNeutralTicks) {
+        cmd.buttons = 0;
+        cmd.forward = 0;
+        cmd.right = 0;
+        cmd.up = 0;
+        this.metrics.neutralTicks++;
+      } else {
+        cmd.buttons &= ~BUTTON_ATTACK;
+      }
+      s.starvedRun++;
       cmd.tick = t;
       s.stats.starved++;
       s.snapFlags |= SNAP_FLAG_STARVED;

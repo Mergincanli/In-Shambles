@@ -251,6 +251,7 @@ describe.concurrent("a bots run", () => {
       players: 3,
       strikes: 0,
       kicks: 0,
+      rateLimited: 0,
     });
     // The server's counters are the bots' window's (end minus start of /metrics); its run window
     // began at listen, before the bots, so the tick checks are reported, not judged.
@@ -302,6 +303,9 @@ describe("the summary's server section from /metrics", () => {
         snapshotOverflow: 0,
         strikes: 0,
         kicks: 0,
+        rateLimited: 0,
+        inputPackets: 990 * n,
+        inputLost: 10 * n,
         traffic: { bytesIn: 0, bytesOut: 0, kbInPerS: 0, kbOutPerS: 0 },
       },
     },

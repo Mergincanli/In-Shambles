@@ -39,7 +39,9 @@ describe("server cvars in docs/06 §8", () => {
   });
 
   it.each(reg.list().map((i) => [i.def.name, i] as const))("%s", (name, info) => {
-    expect(rows.get(name)?.def).toBe(String(info.def.default));
+    // An empty string default is written `""`.
+    const def = info.def.default === "" ? '""' : String(info.def.default);
+    expect(rows.get(name)?.def).toBe(def);
     expect(info.def.flags).toBe(CvarFlag.SERVER);
     const block = source.slice(source.indexOf(`name: "${name}"`)).split("});")[0] ?? "";
     expect(/ESTIMATE/.test(block), name).toBe(/ESTIMATE/.test(rows.get(name)?.note ?? ""));

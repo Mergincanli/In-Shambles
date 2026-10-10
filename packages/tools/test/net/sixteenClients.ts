@@ -2,6 +2,7 @@ import { findNetProfile, MAX_SNAPSHOT_BYTES, MSG_SNAPSHOT, type NetProfile } fro
 import { expect } from "vitest";
 import { createBotInput, runsRoute } from "../../src/bots/routes";
 import { DeltaWatch, ticksIn } from "./deltaWatch";
+import { expectNoStrikes } from "./honest";
 import {
   FRAMES_144HZ,
   FRAMES_BROWSER_HITCHES,
@@ -146,6 +147,6 @@ export function expectSixteen(run: SixteenRun): string {
   expect(watch.fullsWithBaseline).toBe(0);
   expect(watch.acksAhead).toBe(0);
   expect(watch.warmDeltaShare, account).toBeGreaterThanOrEqual(0.9);
-  expect(h.match.metrics.strikes).toBe(0);
+  expectNoStrikes(h.match, []);
   return account;
 }

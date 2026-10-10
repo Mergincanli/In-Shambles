@@ -22,3 +22,16 @@ export interface LoopHost {
 
 /** The log half of a host, for code that has no clock (the match itself). */
 export type MatchLog = (level: LogLevel, msg: string) => void;
+
+/** A field value of a structured match event. */
+export type MatchEventValue = string | number | boolean | null;
+
+/**
+ * Structured session events (`welcome`, `ready`, `leave`, `kick`; D-041): an event name and its
+ * fields, which the Node server writes as their own JSON lines (docs/06 §8).
+ */
+export type MatchEventLog = (
+  level: LogLevel,
+  ev: string,
+  fields: Readonly<Record<string, MatchEventValue>>,
+) => void;

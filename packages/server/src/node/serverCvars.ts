@@ -82,4 +82,98 @@ export function registerServerCvars(reg: CvarRegistry): void {
     description: "Bytes waiting in a client's socket past which it is closed as too slow",
     flags: CvarFlag.SERVER,
   });
+  // Session security (D-041, M3 design §2.13): timeouts in ticks, strike levels, rate limits and
+  // the listener's admission limits. Read when the server starts; every match shares them.
+  reg.register({
+    name: "sv_timeout",
+    type: "int",
+    default: 300, // design (docs/05 §2: 5 s without a packet)
+    min: 60,
+    max: 36000,
+    description: "Ticks without a packet after which a welcomed or playing client is KICKed",
+    flags: CvarFlag.SERVER,
+  });
+  reg.register({
+    name: "sv_helloTimeout",
+    type: "int",
+    default: 120, // ESTIMATE (D-041: 2 s to say HELLO)
+    min: 10,
+    max: 3600,
+    description: "Ticks a new connection has to send HELLO before it is KICKed",
+    flags: CvarFlag.SERVER,
+  });
+  reg.register({
+    name: "sv_handshakeTimeout",
+    type: "int",
+    default: 600, // ESTIMATE (D-041: 10 s from connect to READY)
+    min: 60,
+    max: 36000,
+    description: "Ticks a connection has from opening to READY before it is KICKed",
+    flags: CvarFlag.SERVER,
+  });
+  reg.register({
+    name: "sv_starveNeutralTicks",
+    type: "int",
+    default: 30, // ESTIMATE (D-041: a silent player stands still after 0.5 s)
+    min: 1,
+    max: 600,
+    description: "Starved ticks in a row that repeat the last cmd before a neutral one",
+    flags: CvarFlag.SERVER,
+  });
+  reg.register({
+    name: "sv_strikeWarn",
+    type: "int",
+    default: 15, // ESTIMATE (D-041)
+    min: 1,
+    max: 10000,
+    description: "Strike score at which a client is warned once (PRINT)",
+    flags: CvarFlag.SERVER,
+  });
+  reg.register({
+    name: "sv_strikeKick",
+    type: "int",
+    default: 30, // ESTIMATE (D-041)
+    min: 2,
+    max: 10000,
+    description: "Strike score at which a client is KICKed for too many bad packets",
+    flags: CvarFlag.SERVER,
+  });
+  reg.register({
+    name: "sv_inputBurst",
+    type: "int",
+    // ESTIMATE (D-041): the 64-packet anchor fill plus a 2 s TCP stall. The floor (docs/05 §12) is
+    // the fill alone: near it an honest client on a jittery link can be struck after a stall.
+    default: 240,
+    min: 64,
+    max: 4096,
+    description: "Unreliable packets a client may send in one burst (refill 2 a tick)",
+    flags: CvarFlag.SERVER,
+  });
+  reg.register({
+    name: "sv_reliableBurst",
+    type: "int",
+    default: 20, // ESTIMATE (D-041)
+    min: 8,
+    max: 1024,
+    description: "Reliable messages a client may send in one burst (refill 0.25 a tick)",
+    flags: CvarFlag.SERVER,
+  });
+  reg.register({
+    name: "sv_maxPerIp",
+    type: "int",
+    default: 8, // ESTIMATE (D-041)
+    min: 1,
+    max: 1024,
+    description: "Connections (open or upgrading) one address may hold; loopback is exempt",
+    flags: CvarFlag.SERVER,
+  });
+  reg.register({
+    name: "sv_allowedOrigins",
+    type: "string",
+    default: "", // design (D-041: any)
+    description:
+      "Comma-separated browser origins allowed to connect, compared lowercase and without a " +
+      "trailing slash (empty = any; no Origin header passes)",
+    flags: CvarFlag.SERVER,
+  });
 }

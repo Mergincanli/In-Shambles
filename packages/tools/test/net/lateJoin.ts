@@ -2,6 +2,7 @@ import { findNetProfile, type NetProfile } from "@game/shared";
 import { expect } from "vitest";
 import { createBotInput } from "../../src/bots/routes";
 import { DeltaWatch, ticksIn } from "./deltaWatch";
+import { expectNoStrikes } from "./honest";
 import { FRAMES_BOT_TIMER } from "./interpolation";
 import { FRAMES_BROWSER_HITCHES, type HarnessClient, MultiHarness } from "./multiHarness";
 
@@ -168,6 +169,6 @@ export function expectLateJoin(run: LateJoinRun): string {
       expect(c.digestsChecked, `client ${c.index}`).toBeGreaterThan(playedS * 60 * 0.7);
     }
   }
-  expect(h.match.metrics.strikes).toBe(0);
+  expectNoStrikes(h.match, []);
   return account;
 }

@@ -29,7 +29,8 @@ addEventListener("message", (event: MessageEvent<WorkerStartMsg>) => {
     const cmap = decodeCmap(new Uint8Array(m.cmap));
     const log = (level: "info" | "warn" | "error", msg: string) =>
       post({ type: "log", level, msg });
-    const match = new Match({ cmap, buildHash: m.buildHash, log });
+    // No timeouts (D-041): the page's one client may sit in a hidden tab for as long as it likes.
+    const match = new Match({ cmap, buildHash: m.buildHash, log, timeouts: false });
     match.connect(new PortTransport(m.unreliable, m.reliable), true);
     const loop = startMatchLoop(
       {

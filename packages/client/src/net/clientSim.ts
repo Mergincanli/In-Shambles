@@ -82,6 +82,13 @@ export const MAX_LEAD_TICKS = 64;
  * 8 fps and still counts a 200 ms GC pause as a stall.
  */
 export const HITCH_FRAME_MS = 150;
+/**
+ * How often the page calls `keepalive()` while hidden (D-041; design): one PING a second keeps
+ * the server's 5 s timeout far away.
+ */
+export const KEEPALIVE_INTERVAL_MS = 1000;
+/** `keepalive()` acts only this long after the last frame (design): frames that run do the work. */
+export const KEEPALIVE_IDLE_MS = 500;
 /** A snapshot cvar hash that stays different this long asks the server for the block (design). */
 export const CVAR_RESEND_AFTER_MS = 1000;
 
@@ -214,6 +221,8 @@ const MISMATCH_SINCE = 3;
 /** latestTick and the accumulator before this frame's clock step or re-anchor. */
 const PATH_TICK = 4;
 const PATH_ACC = 5;
+/** This frame's dilation gain in ticks, handed to the stats from its slot (`NetStats.addFrom`). */
+const GAIN_TICKS = 6;
 
 /**
  * The headless client (M2 design §1, §2): the connection, the clock, prediction and
@@ -230,7 +239,7 @@ const PATH_ACC = 5;
  *    D-039) before the poll: per tick, sample a cmd, predict it and send INPUT with the last four
  *    cmds (at most MAX_TICKS_PER_FRAME ticks; the rest is owed to the next frames). A hard resync
  *    re-anchors once per poll, after the poll, from the newest snapshot.
- * 4. Pings and READY (the connection's handshake).
+ * 4. The connection's timeouts (D-041), pings and READY (its handshake).
  *
  * The drawn position is `renderOrigin`: the predicted states of the last two ticks interpolated by
  * the accumulator's fraction (docs/05 §1.3), plus the render offset.
@@ -279,7 +288,7 @@ export class ClientSim {
    * [last frame time, tick accumulator, this frame's dt, cvar hash mismatch since, latestTick and
    * accumulator before the clock step].
    */
-  private readonly t = new Float64Array(6);
+  private readonly t = new Float64Array(7);
   private readonly cmd = new UserCmd();
   private readonly lastCmd = new UserCmd();
   private readonly fill = new UserCmd();
@@ -362,6 +371,7 @@ export class ClientSim {
       handler,
       options.buildHash,
       options.nonce ?? 0,
+      this.now,
     );
     this.remotes = new RemoteInterpolator(
       this.connection.store,
@@ -466,7 +476,9 @@ export class ClientSim {
       // re-anchored away, and its gain in one bucket would read as more than ±3% in the netgraph.
       const gain = (t[DT] as number) * (this.clock.dil[0] as number);
       t[ACC] = (t[ACC] as number) + (t[DT] as number) + gain;
-      if (!this.hitch) this.stats.add(STAT_DILATION, gain / TICK_MS);
+      t[GAIN_TICKS] = gain / TICK_MS;
+      // From the slot: a fractional double passed to a call the JIT leaves out of line boxes.
+      if (!this.hitch) this.stats.addFrom(STAT_DILATION, t, GAIN_TICKS);
       if (this.hitch) {
         // A stall: the ticks it owes go out in the next frames; their snapshots measure it alone.
         this.clock.skipHealthThrough(
@@ -511,6 +523,20 @@ export class ClientSim {
       if ((t[ACC] as number) > MAX_LEAD_TICKS * TICK_MS) t[ACC] = (t[ACC] as number) % TICK_MS;
     }
     conn.update();
+  }
+
+  /**
+   * While the page is hidden and frames stop (D-041, M3 design §2.13): the connection's keepalive
+   * (reliable messages handled, snapshots dropped, one PING, the timeouts checked). Does nothing
+   * when a frame ran within the last KEEPALIVE_IDLE_MS, so a page whose frames still run
+   * (throttled, not stopped) loses no snapshot to it. Returns whether it ran.
+   */
+  keepalive(): boolean {
+    const now = this.clockFn();
+    if (this.started && now - (this.t[LAST_FRAME] as number) < KEEPALIVE_IDLE_MS) return false;
+    this.now[0] = now;
+    this.connection.keepalive();
+    return true;
   }
 
   /** The drawn position of the local player: interpolated prediction plus the render offset. */

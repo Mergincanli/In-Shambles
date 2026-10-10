@@ -27,6 +27,7 @@ import {
   findNetProfile,
   MATCH_MAX_CLIENTS,
   MAX_RELIABLE_BYTES,
+  MSG_PING,
   MSG_WELCOME,
   PlayerState,
   PMEV_JUMP,
@@ -519,6 +520,174 @@ describe("client session", () => {
     expect(h.events.filter((e) => !e.jumped).length).toBeGreaterThan(6);
     const ticks = h.events.map((e) => e.tick);
     expect(ticks).toEqual([...ticks].sort((a, b) => a - b));
+  });
+});
+
+/** A server end that flips the top bit of every PING id it delivers: its PONGs match no ping. */
+class PingIdFlip implements Transport {
+  constructor(private readonly inner: Transport) {}
+  sendUnreliable(d: Uint8Array, len: number): void {
+    this.inner.sendUnreliable(d, len);
+  }
+  sendReliable(d: Uint8Array, len: number): void {
+    this.inner.sendReliable(d, len);
+  }
+  onMessage(cb: Parameters<Transport["onMessage"]>[0]): void {
+    this.inner.onMessage((d, len, reliable) => {
+      if (!reliable && len >= 3 && d[0] === MSG_PING) d[2] = (d[2] as number) ^ 0x80;
+      cb(d, len, reliable);
+    });
+  }
+  onClose(cb: Parameters<Transport["onClose"]>[0]): void {
+    this.inner.onClose(cb);
+  }
+  poll(): void {
+    this.inner.poll();
+  }
+  close(reason?: string): void {
+    this.inner.close(reason);
+  }
+  isOpen(): boolean {
+    return this.inner.isOpen();
+  }
+  stats(): ReturnType<Transport["stats"]> {
+    return this.inner.stats();
+  }
+}
+
+describe("client timeouts and keepalive (D-041)", () => {
+  /** A client and the match it plays on, `ms` of frames at 144 Hz with a tick every other frame. */
+  function playing() {
+    const { client, serverEnd, now } = bareClient();
+    const match = new Match({
+      cmap: course.cmap,
+      world: course.world,
+      buildHash: HARNESS_BUILD,
+      primer: false,
+    });
+    match.connect(serverEnd);
+    client.connect();
+    let frames = 0;
+    const run = (ms: number, server = true) => {
+      for (const end = now.t + ms; now.t < end; ) {
+        now.t += 1000 / 144;
+        if (server && frames++ % 2 === 0) match.tick();
+        client.frame();
+      }
+    };
+    run(1000);
+    expect(client.state).toBe(CONN_ACTIVE);
+    return { client, match, now, run };
+  }
+
+  it("times out after 5 s of a silent server, not before", () => {
+    const { client, run } = playing();
+    run(4900, false);
+    expect(client.closed).toBe(false);
+    run(200, false);
+    expect(client.connection.closeReason).toBe("timed out");
+  });
+
+  it("times out a handshake that gets no WELCOME within 10 s", () => {
+    const { client, now } = bareClient();
+    client.connect();
+    for (; now.t < 9990; now.t += 10) client.frame();
+    expect(client.state).toBe(CONN_CONNECTING);
+    now.t += 20;
+    client.frame();
+    expect(client.connection.closeReason).toBe("handshake timed out");
+  });
+
+  it("counts a long frame as at most 1 s of silence: back from a stall, it waits out the rest", () => {
+    const { client, now, run } = playing();
+    // 20 s without a frame and nothing queued (the server stalled too): the first frame back
+    // counts 1 s of it; the client then waits 4 s more for the server before it gives up.
+    now.t += 20_000;
+    client.frame();
+    expect(client.closed).toBe(false);
+    run(3500, false);
+    expect(client.closed).toBe(false);
+    run(1000, false);
+    expect(client.connection.closeReason).toBe("timed out");
+  });
+
+  it("times out from keepalives alone: a hidden page whose server went silent", () => {
+    const { client, now } = playing();
+    let beats = 0;
+    while (!client.closed && beats < 10) {
+      now.t += 1000;
+      client.keepalive();
+      beats++;
+    }
+    expect(client.connection.closeReason).toBe("timed out");
+    expect(beats).toBe(5);
+  });
+
+  it("times out a clock handshake whose pongs never match, though the server keeps answering", () => {
+    const [clientEnd, serverEnd] = createLoopbackPair();
+    const now = { t: 0 };
+    const client = new ClientSim({
+      primer: false,
+      transport: clientEnd,
+      cmap: course.cmap,
+      world: course.world,
+      buildHash: HARNESS_BUILD,
+      clock: () => now.t,
+    });
+    const match = new Match({
+      cmap: course.cmap,
+      world: course.world,
+      buildHash: HARNESS_BUILD,
+      primer: false,
+    });
+    // The server end flips every PING's id, so each PONG answers a ping the client never sent.
+    match.connect(new PingIdFlip(serverEnd));
+    client.connect();
+    let frames = 0;
+    for (; now.t < 9990; now.t += 1000 / 144) {
+      if (frames++ % 2 === 0) match.tick();
+      client.frame();
+    }
+    expect(client.state).toBe(CONN_SYNCING);
+    for (; now.t < 10_020; now.t += 1000 / 144) client.frame();
+    expect(client.connection.closeReason).toBe("handshake timed out");
+  });
+
+  it("keeps a session whose stall's backlog lands on the first frame back", () => {
+    const { client, match, now, run } = playing();
+    // 20 s without a frame (the server ticking on), then one frame: its poll finds the backlog.
+    for (let i = 0; i < 1200; i++) match.tick();
+    now.t += 20_000;
+    client.frame();
+    expect(client.closed).toBe(false);
+    run(1000);
+    expect(client.active).toBe(true);
+  });
+
+  it("keepalive: pings once a call, drops snapshots unread, takes no round trip, then resyncs", () => {
+    const { client, match, now, run } = playing();
+    const stored = client.store.newestTick;
+    const rtt = client.clock.rttMs;
+    const samples = client.clock.sampleCount;
+    const s = match.session(0);
+    expect(client.keepalive()).toBe(false); // a frame ran within 500 ms
+    for (let k = 0; k < 20; k++) {
+      for (let i = 0; i < 60; i++) {
+        now.t += 1000 / 60;
+        match.tick();
+      }
+      expect(client.keepalive()).toBe(true);
+    }
+    // The server heard from it every second; nothing it sent changed the client's state.
+    expect(s?.lastPacketTick).toBeGreaterThan(match.serverTick - 61);
+    expect(client.store.newestTick).toBe(stored);
+    expect(client.clock.rttMs).toBe(rtt);
+    expect(client.clock.sampleCount).toBe(samples);
+    expect(client.closed).toBe(false);
+    run(1000);
+    expect(client.active).toBe(true);
+    expect(client.store.newestTick).toBeGreaterThan(stored + 1200);
+    expect(client.stats.totals[STAT_STRIKES]).toBe(0);
   });
 });
 

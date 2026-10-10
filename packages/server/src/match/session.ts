@@ -7,6 +7,7 @@ import {
   UserCmd,
 } from "@game/shared";
 import { InputQueue } from "./inputQueue";
+import { StrikeScore, TokenBucket } from "./limits";
 import type { ClientMirror } from "./mirror";
 import type { SnapshotClient } from "./scheduler";
 
@@ -25,8 +26,17 @@ export class SessionStats {
   starved = 0;
   /** Ticks simulated with the client's own cmd. */
   cmds = 0;
-  /** Packets dropped as malformed, unexpected for the state, or on the wrong channel. */
+  /**
+   * Strike points (D-041, weighted: 5 malformed, 2 unexpected, 1 per rate-limited tick), without
+   * the decay `Session.strikeScore` applies; 0 for an honest client.
+   */
   strikes = 0;
+  /** Packets dropped because their channel's bucket was empty, and the ticks that dropped any. */
+  rateLimited = 0;
+  rateLimitedTicks = 0;
+  /** INPUT packets received, and those missing from their `packetSeq` run (input loss, D-041). */
+  inputPackets = 0;
+  inputLost = 0;
   snapshots = 0;
   /** Snapshots sent without a baseline (the first, and whenever no usable ack was held; D-038). */
   fullSnapshots = 0;
@@ -75,6 +85,24 @@ export class Session implements SnapshotClient {
    * players, from the match's pool; null otherwise (every frame plain).
    */
   mirror: ClientMirror | null = null;
+  /** Unreliable and reliable rate limits (D-041), refilled at the start of every tick. */
+  readonly unreliableTokens = new TokenBucket();
+  readonly reliableTokens = new TokenBucket();
+  /** The decaying strike score that warns and kicks (D-041). */
+  readonly strikeScore = new StrikeScore();
+  /** A bucket dropped a packet during this tick's poll (one strike point per such tick). */
+  rateLimitedNow = false;
+  /** The tick the session opened at (the match's serverTick then): the handshake timeouts' base. */
+  connectTick = 0;
+  /** The tick whose poll delivered the session's last message: the idle timeout's base. */
+  lastPacketTick = 0;
+  /** The newest INPUT `packetSeq` seen (−1 before the first), for the input-loss count. */
+  inputSeq = -1;
+  /**
+   * Consecutive starved ticks (M3 design §2.5): from `sv_starveNeutralTicks` on, the repeated cmd
+   * is a neutral one. A cmd that arrives in time, or a spawn, resets it.
+   */
+  starvedRun = 0;
   /** The client's nonce from HELLO. */
   nonce = 0;
   buildHash = "";

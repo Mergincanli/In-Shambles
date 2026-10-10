@@ -48,6 +48,8 @@ const server: SummaryServer = {
   snapshotOverflow: 0,
   strikes: 0,
   kicks: 0,
+  rateLimited: 0,
+  inputLossPct: 1.25,
   kbOutPerS: 6.1,
   kbInPerS: 7.3,
 };

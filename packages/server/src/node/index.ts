@@ -5,9 +5,13 @@
  */
 
 export {
+  AdmissionLimits,
+  isLoopback,
   type ListenerTarget,
   type ListenOptions,
   listen,
+  normalizeOrigin,
+  parseOrigins,
   WsListener,
 } from "../transport/wsListener";
 export {
@@ -18,7 +22,14 @@ export {
   WsTransport,
 } from "../transport/wsTransport";
 export { isBundledServer, serverBuildHash } from "./buildHash";
-export { type CommandLine, ConfigError, parseCommandLine, parseServerCfg } from "./config";
+export {
+  admissionLimits,
+  type CommandLine,
+  ConfigError,
+  parseCommandLine,
+  parseServerCfg,
+  sessionLimits,
+} from "./config";
 export { createNodeHost, type PassClock, type ServerMatch, TimedPass } from "./host";
 export { createJsonLog, type JsonLog } from "./log";
 export {

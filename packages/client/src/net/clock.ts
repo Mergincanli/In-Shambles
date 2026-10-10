@@ -285,6 +285,18 @@ export class ClientClock {
     return id;
   }
 
+  /**
+   * The id for a keepalive ping (D-041): unique like `nextPing`'s, but never registered, so its
+   * pong (read up to a keepalive period late) is no round-trip sample. It also forgets the pings
+   * still in flight, whose pongs a hidden page would read just as late.
+   */
+  keepalivePing(): number {
+    this.pingIds.fill(-1);
+    const id = this.nextPingId;
+    this.nextPingId = (id + 1) & 0xffff;
+    return id;
+  }
+
   /** Takes the round trip of the pong for `id`; false for an unknown or repeated id. */
   onPong(id: number): boolean {
     const slot = id & (PING_SLOTS - 1);

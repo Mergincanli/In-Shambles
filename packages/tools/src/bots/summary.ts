@@ -70,6 +70,9 @@ export interface SummaryServer {
   readonly snapshotOverflow: number;
   readonly strikes: number;
   readonly kicks: number;
+  /** Packets the server's rate limits dropped, and the INPUT loss it saw, % (D-041). */
+  readonly rateLimited: number;
+  readonly inputLossPct: number;
   readonly kbOutPerS: number;
   readonly kbInPerS: number;
 }
@@ -376,7 +379,7 @@ export function summaryMarkdown(s: BotsSummary): string {
     out.push(
       row([
         "counters",
-        `dropped ticks ${v.droppedTicks}, starved ${v.starved}, full snapshots ${v.fullSnapshots}, strikes ${v.strikes}, kicks ${v.kicks}`,
+        `dropped ticks ${v.droppedTicks}, starved ${v.starved}, full snapshots ${v.fullSnapshots}, strikes ${v.strikes}, rate-limited ${v.rateLimited}, kicks ${v.kicks}, input loss ${v.inputLossPct.toFixed(2)}%`,
       ]),
     );
     const share = v.snapshots === 0 ? 0 : (100 * v.deferredSnapshots) / v.snapshots;

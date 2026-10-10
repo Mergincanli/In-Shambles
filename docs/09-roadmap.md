@@ -207,7 +207,7 @@
 **Scope**
 - `WebTransportTransport` (datagrams) with WebSocket fallback + feature detection.
 - Relevance and visibility culling with hysteresis (`docs/05` §9); audio events for unseen players; cluster visibility from the compiler.
-- Server validation and strike system; rate limits.
+- Server validation and strike system; rate limits. M3 laid the basics (D-041: per-session token buckets, weighted strikes with a warning and a kick, handshake and idle timeouts, the neutral cmd for silent players, the hidden-tab keepalive, `sv_maxPerIp` and `sv_allowedOrigins` at the upgrade); M9 hardens them: temporary bans, limits per address across processes behind a proxy, `wss://`, tuning the ESTIMATEs on public servers.
 - Deployment (container image, one EU region), health checks, metrics endpoint, structured logs.
 - Crash/telemetry reporting (privacy-respecting), bandwidth/perf budgets in CI, 32-bot stress test, 24 h soak.
 

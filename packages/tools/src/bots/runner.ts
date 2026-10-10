@@ -474,6 +474,9 @@ interface MetricsJson {
       snapshotOverflow: number;
       strikes: number;
       kicks: number;
+      rateLimited: number;
+      inputPackets: number;
+      inputLost: number;
       traffic: { bytesIn: number; bytesOut: number; kbInPerS: number; kbOutPerS: number };
     }
   >;
@@ -531,9 +534,19 @@ export function serverSection(
     snapshotOverflow: since(match.snapshotOverflow, bm?.snapshotOverflow),
     strikes: since(match.strikes, bm?.strikes),
     kicks: since(match.kicks, bm?.kicks),
+    rateLimited: since(match.rateLimited, bm?.rateLimited),
+    inputLossPct: lossPct(
+      since(match.inputLost, bm?.inputLost),
+      since(match.inputPackets, bm?.inputPackets),
+    ),
     kbOutPerS: kb(since(match.traffic.bytesOut, bm?.traffic.bytesOut), match.traffic.kbOutPerS),
     kbInPerS: kb(since(match.traffic.bytesIn, bm?.traffic.bytesIn), match.traffic.kbInPerS),
   };
+}
+
+/** INPUT packets lost of those sent (received + lost), percent to 3 decimals (D-041). */
+function lossPct(lost: number, received: number): number {
+  return lost + received > 0 ? r3((100 * lost) / (lost + received)) : 0;
 }
 
 export interface BotRunResult {

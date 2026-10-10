@@ -21,6 +21,7 @@ import {
   ClientSim,
   type CmdSampler,
   createScriptedInput,
+  KEEPALIVE_INTERVAL_MS,
   NeutralInput,
   PortTransport,
   WebSocketTransport,
@@ -240,7 +241,31 @@ export async function boot(
   });
   client.connect();
   game.start();
+  keepAliveWhileHidden(client);
   return { game, client, renderer, worker, console: gameConsole };
+}
+
+/**
+ * The hidden-tab keepalive (D-041, M3 design §2.13): a hidden page gets no animation frames, so
+ * while it is hidden a 1 s `setTimeout` chain calls `client.keepalive()` (reliable messages, one
+ * PING, the timeouts; snapshots dropped). The server meanwhile has the silent player stand still;
+ * when the page shows again the frames resume and resync it. The chain ends when the page shows
+ * or the session ends. Chrome throttles the timers of a page hidden for more than about 5 minutes
+ * to one a minute, so such a tab may still time out (docs/05 §2).
+ */
+function keepAliveWhileHidden(client: ClientSim): void {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const beat = () => {
+    timer = null;
+    if (client.closed || document.visibilityState !== "hidden") return;
+    client.keepalive();
+    timer = setTimeout(beat, KEEPALIVE_INTERVAL_MS);
+  };
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden" && timer === null && !client.closed) {
+      timer = setTimeout(beat, KEEPALIVE_INTERVAL_MS);
+    }
+  });
 }
 
 /**

@@ -1473,7 +1473,13 @@ function runMatch(n: number): void {
 // match ticks, so a run is n / 40 ticks (2e4 player-ticks for n = 2e5) after a warm-up 8 times as
 // long (1.6e5 player-ticks, the design's): several real sessions in one match take V8 longer to
 // settle than one (the 16-session view-frame guard needed its full warm-up in increment 7).
+// The match runs with timeouts on (D-041), and a fifth, abusive session runs the per-packet and
+// per-tick security paths: it never sends a cmd (so it starves, then repeats the neutral cmd), a
+// PING a second keeps it from the idle timeout, a malformed INPUT every 300 ticks strikes it (+5,
+// decayed by the next one), and every 1024 ticks a burst of MM_BURST PINGs empties its unreliable
+// bucket (dropped packets, a rate-limited tick). Its score stays below the warn level.
 const MM_CLIENTS = 4;
+const MM_BURST = 244;
 const MM_RECONNECT_TICKS = 4096;
 const MM_POOL = 24;
 const MM_ACK_SLOTS = 8;
@@ -1517,11 +1523,21 @@ class MatchMultiRig {
   readonly hello = new HelloMsg();
   /** Loopback pairs for the reconnects, made at setup: [client end, server end] per entry. */
   private readonly pool: LoopbackEndpoint[] = [];
+  /** The abusive session's client end and its server session (D-041). */
+  readonly abuser: LoopbackEndpoint;
+  readonly abuserSession: Session;
+  readonly ping = new PingMsg();
+  readonly malformed = new Uint8Array([MSG_INPUT, 1, 2]);
   warmup = 1;
 
   constructor() {
     const course = loadCourse("arena_greybox");
-    this.match = new Match({ cmap: course.cmap, world: course.world, buildHash: "alloc" });
+    this.match = new Match({
+      cmap: course.cmap,
+      world: course.world,
+      buildHash: "alloc",
+      timeouts: true,
+    });
     this.hello.buildHash = "alloc";
     for (let i = 0; i < MM_POOL; i++) {
       const [c, s] = createLoopbackPair();
@@ -1532,8 +1548,21 @@ class MatchMultiRig {
       this.clients.push(c);
       this.join(c, k);
     }
+    const [abuser, abuserServer] = createLoopbackPair();
+    this.abuser = abuser;
+    abuser.onMessage(() => {});
+    const session = this.match.connect(abuserServer);
+    if (session === null) throw new Error("matchMulti: the match refused the abuser");
+    this.abuserSession = session;
+    const w = this.writer;
+    w.reset();
+    encodeHello(w, this.hello);
+    abuser.sendReliable(w.bytes, w.byteLength);
     // HELLO, then READY, then the first snapshot.
     this.match.tick();
+    w.reset();
+    encodeReady(w);
+    abuser.sendReliable(w.bytes, w.byteLength);
     for (const c of this.clients) this.ready(c);
     this.match.tick();
     for (const c of this.clients) (c.endpoint as LoopbackEndpoint).poll();
@@ -1601,7 +1630,8 @@ function sameFrame(got: WorldFrame, cur: WorldFrame, self: number): boolean {
 
 /**
  * Outcomes: stored frames equal to the server's, deltas stored, reconnects; `extra[0]` stored
- * frames that differed from the server's (must stay 0).
+ * frames that differed from the server's (must stay 0), then the abuser's strike points and
+ * rate-limited ticks and the match's neutral-cmd ticks (D-041).
  */
 function runMatchMulti(n: number): void {
   if (matchMultiRig === null) matchMultiRig = new MatchMultiRig();
@@ -1640,7 +1670,17 @@ function runMatchMulti(n: number): void {
       encodeInput(w, input);
       end.sendUnreliable(w.bytes, w.byteLength);
     }
+    const abuser = rig.abuser;
+    const pings = next % 1024 === 512 ? MM_BURST : next % 60 === 0 ? 1 : 0;
+    if (pings > 0) {
+      rig.ping.pingId = next & 0xffff;
+      w.reset();
+      encodePing(w, rig.ping);
+      for (let p = 0; p < pings; p++) abuser.sendUnreliable(w.bytes, w.byteLength);
+    }
+    if (next % 300 === 150) abuser.sendUnreliable(rig.malformed, rig.malformed.length);
     match.tick();
+    abuser.poll();
     const t = match.serverTick;
     for (let k = 0; k < MM_CLIENTS; k++) {
       const c = clients[k] as MultiClient;
@@ -1648,6 +1688,10 @@ function runMatchMulti(n: number): void {
       c.acks[t & (MM_ACK_SLOTS - 1)] = c.store.ackTick;
     }
   }
+  const abused = rig.abuserSession.stats;
+  extra[1] = abused.strikes;
+  extra[2] = abused.rateLimitedTicks;
+  extra[3] = match.metrics.neutralTicks;
 }
 
 // Prediction and reconciliation (M2 design §5, D-027/D-028): the real ClientSim on a fractional

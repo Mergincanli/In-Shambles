@@ -7,6 +7,7 @@ import {
   type FrameModel,
   NetHarness,
 } from "./harness";
+import { expectNoStrikes } from "./honest";
 
 // NET-07's runs and checks (docs/05 §14, M3 design §2.7 and §5, D-039), shared by its two tiers
 // (D-032): `net-07-time-dilation.test.ts` runs seed 1 at 144 Hz both ways and the dilation-off
@@ -109,6 +110,7 @@ export function runStep(
   h.run(bound);
   const correctionsAtBound = h.totals().corrections;
   h.run(WINDOW_MS - bound);
+  expectNoStrikes(h.match, [h.client]);
   return {
     h,
     up,

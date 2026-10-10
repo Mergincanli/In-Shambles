@@ -27,7 +27,8 @@ interface ChildResult {
    * wsTransport: the client end's outcomes; predict: [0] teleports, [1] the fewer of the frames
    * run sped up and slowed down (D-039), [2] holds; interp: [0] held; deltaCodec:
    * [0] full snapshots stored, [1] 64-slot snapshots stored as sent, [2] those that were not;
-   * match: [0] deltas stored; matchMulti: [0] stored frames that differed from the server's;
+   * match: [0] deltas stored; matchMulti: [0] stored frames that differed from the server's,
+   * [1] the abuser's strike points, [2] its rate-limited ticks, [3] neutral-cmd ticks (D-041);
    * snapshotSchedule: [0] failed builds, [1] builds past staleness 2, [2] the largest snapshot
    * (B); interp64: [0] NET-05 jumps.
    */
@@ -203,7 +204,7 @@ describe.concurrent("per-tick paths under native ES modules", () => {
     expect(r.clean, r.attempts.join("; ")).toBe(true);
   }, 30_000);
 
-  it("a match tick with several sessions allocates nothing: delta snapshots against rotating acks, lost inputs; a reconnect costs only its session (D-038)", async ({
+  it("a match tick with several sessions allocates nothing: delta snapshots against rotating acks, lost inputs, rate limits, strikes, neutral cmds; a reconnect costs only its session (D-038, D-041)", async ({
     expect,
   }) => {
     const r = await runChild("matchMulti");
@@ -212,6 +213,11 @@ describe.concurrent("per-tick paths under native ES modules", () => {
     for (const n of r.outcomes) expect(n).toBeGreaterThan(0);
     expect(r.extra[0]).toBe(0);
     expect(r.outcomes[1]).toBeGreaterThan(0.99 * (r.outcomes[0] as number));
+    // The abuser's security paths ran (D-041): strikes, rate-limited ticks, neutral cmds; it
+    // stayed in (the kick would allocate).
+    expect(r.extra[1]).toBeGreaterThan(0);
+    expect(r.extra[2]).toBeGreaterThan(0);
+    expect(r.extra[3]).toBeGreaterThan(0);
     expect(r.clean, r.attempts.join("; ")).toBe(true);
   }, 30_000);
 

@@ -112,6 +112,21 @@ export class NetStats {
     }
   }
 
+  /**
+   * `add(stat, src[index])` for a per-frame caller: the value stays in a typed array, so a
+   * fractional double never crosses the call boxed when it is not inlined (native ESM, D-041).
+   */
+  addFrom(stat: number, src: Float64Array, index: number): void {
+    const at = this.row * STAT_COUNT + stat;
+    if (isMaxStat(stat)) {
+      this.totals[stat] = Math.max(this.totals[stat] as number, src[index] as number);
+      this.buckets[at] = Math.max(this.buckets[at] as number, src[index] as number);
+    } else {
+      this.totals[stat] = (this.totals[stat] as number) + (src[index] as number);
+      this.buckets[at] = (this.buckets[at] as number) + (src[index] as number);
+    }
+  }
+
   /** Each stat over the last second (sums, or the maximum for max stats), into `out`. */
   lastSecond(out: Float64Array): void {
     out.fill(0);

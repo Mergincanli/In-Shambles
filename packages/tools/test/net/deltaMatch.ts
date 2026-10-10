@@ -11,6 +11,7 @@ import {
 import { expect } from "vitest";
 import { createBotInput } from "../../src/bots/routes";
 import { DeltaWatch, ticksIn } from "./deltaWatch";
+import { expectNoStrikes } from "./honest";
 import {
   FRAMES_144HZ,
   FRAMES_BROWSER_HITCHES,
@@ -188,6 +189,6 @@ export function expectDeltaMatch(run: DeltaMatchRun): string {
   expect(after, freezeAccount).toBeGreaterThan(0);
   expect(after, freezeAccount).toBeLessThanOrEqual(30);
   expect(frozen.tap.lastBaseBack, freezeAccount).toBeGreaterThan(0);
-  expect(h.match.metrics.strikes).toBe(0);
+  expectNoStrikes(h.match, []);
   return freezeAccount;
 }

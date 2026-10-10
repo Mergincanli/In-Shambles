@@ -1,13 +1,17 @@
 import { CvarRegistry, registerPmoveCvars } from "@game/shared";
 import { describe, expect, it } from "vitest";
+import { SessionLimits } from "../../src/match/limits";
 import {
+  admissionLimits,
   applyAssignments,
   ConfigError,
   parseCommandLine,
   parseServerCfg,
   sendLimits,
+  sessionLimits,
 } from "../../src/node/config";
 import { registerServerCvars } from "../../src/node/serverCvars";
+import { AdmissionLimits, isLoopback, parseOrigins } from "../../src/transport/wsListener";
 
 function registries() {
   const server = new CvarRegistry();
@@ -165,5 +169,81 @@ describe("sendLimits", () => {
     expect(() => sendLimits(server)).toThrow(
       new ConfigError("sv_sendBufferClose (32768) must be above sv_sendBufferDrop (32768)"),
     );
+  });
+});
+
+describe("sessionLimits and admissionLimits (D-041)", () => {
+  it("default to the design's values, the match's and the listener's defaults", () => {
+    const { server } = registries();
+    expect(sessionLimits(server)).toEqual(new SessionLimits());
+    expect(admissionLimits(server)).toEqual(new AdmissionLimits());
+  });
+
+  it("take every limit from its server cvar", () => {
+    const { server, both } = registries();
+    const sets: [string, string][] = [
+      ["sv_timeout", "90"],
+      ["sv_helloTimeout", "12"],
+      ["sv_handshakeTimeout", "180"],
+      ["sv_starveNeutralTicks", "10"],
+      ["sv_strikeWarn", "5"],
+      ["sv_strikeKick", "9"],
+      ["sv_inputBurst", "64"],
+      ["sv_reliableBurst", "8"],
+      ["sv_maxPerIp", "3"],
+      ["sv_allowedOrigins", "https://a.example, http://localhost:5173,"],
+    ];
+    applyAssignments(
+      sets.map(([name, value]) => ({ name, value, source: "x" })),
+      both,
+    );
+    expect({ ...sessionLimits(server) }).toEqual({
+      timeout: 90,
+      helloTimeout: 12,
+      handshakeTimeout: 180,
+      starveNeutralTicks: 10,
+      strikeWarn: 5,
+      strikeKick: 9,
+      inputBurst: 64,
+      reliableBurst: 8,
+    });
+    const a = admissionLimits(server);
+    expect([a.maxPerIp, a.allowedOrigins]).toEqual([
+      3,
+      ["https://a.example", "http://localhost:5173"],
+    ]);
+  });
+
+  it("refuses a burst below the 64-packet anchor fill and a kick level not above the warning", () => {
+    const { server, both } = registries();
+    expect(() =>
+      applyAssignments([{ name: "sv_inputBurst", value: "63", source: "x" }], both),
+    ).toThrow(ConfigError);
+    applyAssignments([{ name: "sv_strikeKick", value: "15", source: "x" }], both);
+    expect(() => sessionLimits(server)).toThrow(
+      new ConfigError("sv_strikeKick (15) must be above sv_strikeWarn (15)"),
+    );
+  });
+
+  it("exempts loopback addresses only", () => {
+    expect(["127.0.0.1", "127.8.0.2", "::1", "::ffff:127.0.0.1"].map(isLoopback)).toEqual([
+      true,
+      true,
+      true,
+      true,
+    ]);
+    expect(["10.0.0.1", "::ffff:10.0.0.1", "203.0.113.7", "", "1270::1"].map(isLoopback)).toEqual([
+      false,
+      false,
+      false,
+      false,
+      false,
+    ]);
+    expect(parseOrigins("")).toEqual([]);
+    // Written as a browser sends it: lowercase, no trailing slash.
+    expect(parseOrigins(" https://Play.Example.org/ ,http://localhost:5173")).toEqual([
+      "https://play.example.org",
+      "http://localhost:5173",
+    ]);
   });
 });

@@ -76,6 +76,7 @@ import {
   type SentState,
   WorldHistory,
 } from "../../src/match/history";
+import { SessionLimits, STRIKE_MALFORMED, STRIKE_UNEXPECTED } from "../../src/match/limits";
 import {
   effectiveMaxClients,
   MATCH_DEFAULT_MAX_CLIENTS,
@@ -383,7 +384,7 @@ describe("match handshake", () => {
     client.raw(new Uint8Array([1, PROTOCOL_VERSION, 0, 0xff]), true);
     run(match, client, 1);
     expect(client.kicks[0]?.reason).toBe("malformed HELLO");
-    expect(match.metrics.strikes).toBe(1);
+    expect(match.metrics.strikes).toBe(STRIKE_MALFORMED);
   });
 
   it("answers PING with PONG after WELCOME, carrying the newest tick simulated", () => {
@@ -399,28 +400,32 @@ describe("match handshake", () => {
     expect(client.pongs.map((p) => [p.pingId, p.serverTick])).toEqual([[8, 5]]);
   });
 
-  it("strikes packets that don't decode, arrive on the wrong channel or don't belong", () => {
+  it("strikes packets that don't decode, arrive on the wrong channel or don't belong, by weight", () => {
     const match = newMatch();
     const client = joined(match);
     const s = match.session(0);
-    client.raw(new Uint8Array([MSG_INPUT, 1, 2]), false);
-    client.raw(new Uint8Array([0xee, 0, 0]), true);
+    client.raw(new Uint8Array([MSG_INPUT, 1, 2]), false); // malformed
+    client.raw(new Uint8Array([0xee, 0, 0]), true); // no client message
     client.ping(1);
     client.hello(); // a second HELLO
     client.ready(); // a second READY
     run(match, client, 1);
-    expect(s?.stats.strikes).toBe(4);
+    expect(s?.stats.strikes).toBe(2 * STRIKE_MALFORMED + 2 * STRIKE_UNEXPECTED);
     // PING on the reliable channel.
     client.raw(new Uint8Array([6, 1, 0]), true);
     run(match, client, 1);
-    expect(s?.stats.strikes).toBe(5);
-    expect(match.metrics.strikes).toBe(5);
+    expect(s?.stats.strikes).toBe(2 * STRIKE_MALFORMED + 3 * STRIKE_UNEXPECTED);
+    expect(match.metrics.strikes).toBe(2 * STRIKE_MALFORMED + 3 * STRIKE_UNEXPECTED);
     expect(s?.state).toBe(SESSION_ACTIVE);
+    // 16 points: past the warn level (15), one PRINT says so.
+    expect(client.prints.map((p) => p.text)).toEqual([
+      "too many bad packets (16 strike points); the server disconnects at 30",
+    ]);
     // A valid INPUT on the reliable channel: a strike, nothing queued.
     const [d, len] = encodedInput([cmdAt(match.serverTick + 1)]);
     client.raw(d.slice(0, len), true);
     run(match, client, 1);
-    expect(s?.stats.strikes).toBe(6);
+    expect(s?.stats.strikes).toBe(2 * STRIKE_MALFORMED + 4 * STRIKE_UNEXPECTED);
     expect(s?.queue.accepted).toBe(0);
   });
 
@@ -431,7 +436,7 @@ describe("match handshake", () => {
     client.cmd("set pm_gravity 100");
     run(match, client, 2);
     const s = match.session(0);
-    expect(s?.stats.strikes).toBe(2);
+    expect(s?.stats.strikes).toBe(2 * STRIKE_UNEXPECTED);
     expect(s?.state).toBe(SESSION_CONNECTING);
     expect(client.snapshots).toHaveLength(0);
     expect(client.prints).toHaveLength(0);
@@ -448,7 +453,7 @@ describe("match handshake", () => {
     run(match, null, 1);
     expect(match.metrics.kicks).toBe(1);
     // The malformed HELLO's strike only; the packets after the kick are not looked at.
-    expect(match.metrics.strikes).toBe(1);
+    expect(match.metrics.strikes).toBe(STRIKE_MALFORMED);
     expect(t.sent).toHaveLength(1);
     expect(match.sessionCount).toBe(0);
   });
@@ -634,7 +639,7 @@ describe("match spawn and simulation", () => {
     expect(q?.early).toBe(1);
   });
 
-  it("ignores INPUT before READY", () => {
+  it("strikes INPUT before READY as unexpected and queues nothing (D-041)", () => {
     const match = newMatch();
     const client = connect(match);
     client.hello();
@@ -642,7 +647,8 @@ describe("match spawn and simulation", () => {
     client.input([cmdAt(2)]);
     run(match, client, 1);
     expect(client.snapshots).toHaveLength(0);
-    expect(match.session(0)?.stats.strikes).toBe(0);
+    expect(match.session(0)?.stats.strikes).toBe(STRIKE_UNEXPECTED);
+    expect(match.session(0)?.queue.accepted).toBe(0);
   });
 });
 
@@ -1246,7 +1252,13 @@ describe("match console commands and replicated cvars", () => {
 describe("match under hostile traffic", () => {
   it("never throws on seeded random packets in every session state, and only strikes", () => {
     const rng = new Mulberry32(0x5eed09);
-    const match = newMatch();
+    // Kicks off: this checks the decoders and handlers on every packet, not the strike levels.
+    const limits = new SessionLimits();
+    limits.strikeWarn = 1e9;
+    limits.strikeKick = 1e9;
+    limits.inputBurst = 1e6;
+    limits.reliableBurst = 1e6;
+    const match = new Match({ cmap, world, buildHash: TEST_BUILD, limits, primer: false });
     const active = joined(match);
     const welcomed = connect(match);
     welcomed.hello();
@@ -1274,6 +1286,7 @@ describe("match under hostile traffic", () => {
     // Most packets are struck; some decode (an INPUT or PING on the right channel), and once the
     // connecting session is kicked for a bad HELLO its packets go nowhere.
     expect(match.metrics.strikes).toBeGreaterThan(sent / 2);
+    expect(match.metrics.kicks).toBe(1);
     expect(match.session(0)?.state).toBe(SESSION_ACTIVE);
     expect(match.cvarHash).toBe(hash);
     expect(match.cvars.get("pm_gravity")).toBe(800);

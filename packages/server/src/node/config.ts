@@ -1,6 +1,8 @@
 import { parseArgs } from "node:util";
 import type { CvarRegistry } from "@game/shared";
 import { tokenizeCommand } from "../match/commands";
+import { SessionLimits } from "../match/limits";
+import { AdmissionLimits, parseOrigins } from "../transport/wsListener";
 import { WsLimits } from "../transport/wsTransport";
 
 /** A bad `server.cfg` line or command-line flag; the server refuses to start with it. */
@@ -172,4 +174,35 @@ export function sendLimits(cvars: CvarRegistry): WsLimits {
     );
   }
   return limits;
+}
+
+/**
+ * The session limits every match of the server applies (D-041): timeouts, the starved-cmd limit,
+ * strike levels and bucket sizes from their SERVER cvars. A kick level not above the warn level
+ * would kick before it ever warned: a ConfigError.
+ */
+export function sessionLimits(cvars: CvarRegistry): SessionLimits {
+  const l = new SessionLimits();
+  l.timeout = cvars.getNumber("sv_timeout", l.timeout);
+  l.helloTimeout = cvars.getNumber("sv_helloTimeout", l.helloTimeout);
+  l.handshakeTimeout = cvars.getNumber("sv_handshakeTimeout", l.handshakeTimeout);
+  l.starveNeutralTicks = cvars.getNumber("sv_starveNeutralTicks", l.starveNeutralTicks);
+  l.strikeWarn = cvars.getNumber("sv_strikeWarn", l.strikeWarn);
+  l.strikeKick = cvars.getNumber("sv_strikeKick", l.strikeKick);
+  l.inputBurst = cvars.getNumber("sv_inputBurst", l.inputBurst);
+  l.reliableBurst = cvars.getNumber("sv_reliableBurst", l.reliableBurst);
+  if (l.strikeKick <= l.strikeWarn) {
+    throw new ConfigError(
+      `sv_strikeKick (${l.strikeKick}) must be above sv_strikeWarn (${l.strikeWarn})`,
+    );
+  }
+  return l;
+}
+
+/** Who the listener admits (D-041): `sv_maxPerIp` and the `sv_allowedOrigins` list. */
+export function admissionLimits(cvars: CvarRegistry): AdmissionLimits {
+  const a = new AdmissionLimits();
+  a.maxPerIp = cvars.getNumber("sv_maxPerIp", a.maxPerIp);
+  a.allowedOrigins = parseOrigins(String(cvars.get("sv_allowedOrigins") ?? ""));
+  return a;
 }

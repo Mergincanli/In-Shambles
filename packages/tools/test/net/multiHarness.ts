@@ -1,6 +1,7 @@
 import {
   ClientSim,
   type CmdSampler,
+  KEEPALIVE_INTERVAL_MS,
   STAT_CLOCK_ADJUSTMENTS,
   STAT_CORRECTION_DIST,
   STAT_CORRECTION_MAX,
@@ -18,6 +19,7 @@ import {
   type MatchLog,
   type MatchLoop,
   type Session,
+  type SessionLimits,
   sentFrame,
   startMatchLoop,
   TickWindow,
@@ -289,6 +291,10 @@ export interface MultiHarnessOptions {
   readonly log?: MatchLog;
   /** `sv_maxClients` for the match (its default, 32, when absent). */
   readonly maxClients?: number;
+  /** The match's timeouts (D-041): off by default, as in the Worker; the Node server's are on. */
+  readonly timeouts?: boolean;
+  /** The match's session limits (D-041); the defaults when absent. */
+  readonly limits?: SessionLimits;
   /**
    * The pmove primer (D-040) at the match and every client. Default true, unless the test file
    * called `setHarnessPrimerDefault(false)`; unit tests that build many harnesses pass false.
@@ -451,6 +457,24 @@ export class HarnessClient {
   /** Stalls the client for `ms` from now (a GC, a tab switch): one frame then spans the gap. */
   hitch(ms: number): void {
     this.pausedUntil = this.harness.now + ms;
+  }
+
+  /**
+   * Hides the page for `ms` from now (D-041, M3 design §2.13): no frames, but `keepalive()` every
+   * KEEPALIVE_INTERVAL_MS, as the page's timer chain calls it. Returns how many keepalives ran.
+   */
+  hide(ms: number): { readonly keepalives: number } {
+    const h = this.harness;
+    const end = h.now + ms;
+    this.pausedUntil = end;
+    const out = { keepalives: 0 };
+    const beat = () => {
+      if (this.left || this.client.closed || h.now >= end) return;
+      if (this.client.keepalive()) out.keepalives++;
+      h.at(h.now + KEEPALIVE_INTERVAL_MS, beat);
+    };
+    h.at(h.now + KEEPALIVE_INTERVAL_MS, beat);
+    return out;
   }
 
   /** Disconnects (the server sees the close after the link's delay) and stops its frames. */
@@ -724,6 +748,8 @@ export class MultiHarness {
       buildHash: HARNESS_BUILD,
       log: options.log,
       primer: this.primer,
+      timeouts: options.timeouts ?? false,
+      ...(options.limits === undefined ? {} : { limits: options.limits }),
       ...(options.maxClients === undefined ? {} : { maxClients: options.maxClients }),
     });
     const host: LoopHost = {

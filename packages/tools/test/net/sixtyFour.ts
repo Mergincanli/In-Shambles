@@ -188,6 +188,8 @@ export function expectSixtyFour(run: SixtyFourRun): string {
   expect(m.sizePasses, account).toBeGreaterThanOrEqual(m.deferredSnapshots);
   expect(m.sizePasses, account).toBeGreaterThan(0);
   expect(m.strikes, account).toBe(0);
+  expect(m.rateLimited, account).toBe(0);
+  expect(m.kicks, account).toBe(0);
   expect(watch.warmDeltaShare, account).toBeGreaterThanOrEqual(0.9);
   expect(checkedFrames, account).toBeGreaterThan(0);
   if (options.storm === true) {

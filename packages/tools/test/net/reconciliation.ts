@@ -10,6 +10,7 @@ import {
   type FrameModel,
   NetHarness,
 } from "./harness";
+import { expectNoStrikes } from "./honest";
 
 // NET-04's runs, checks and case lists (the M2 basic version; docs/05 §14, M2 design §5), shared
 // by its two tiers (D-032): `net-04-reconciliation.test.ts` runs one seed per profile and one
@@ -107,6 +108,7 @@ export function run(
   });
   watchHealth(h);
   h.runTicks(idleTicks + TICKS);
+  expectNoStrikes(h.match, [h.client]);
   const t = h.totals();
   const maxOffset = Math.max(...h.frames.offset);
   const maxSpeed = Math.max(...h.frames.speed);
