@@ -41,7 +41,12 @@ describe("admin console line", () => {
     const log = createJsonLog((l) => lines.push(JSON.parse(l)), clock);
     const cvars = new CvarRegistry();
     registerPmoveCvars(cvars);
-    const match = new Match({ cmap: loadMap("movement_lab"), cvars, buildHash: TEST_BUILD });
+    const match = new Match({
+      cmap: loadMap("movement_lab"),
+      cvars,
+      buildHash: TEST_BUILD,
+      primer: false,
+    });
     runConsoleLine("set pm_gravity 400", "main", match, log);
     runConsoleLine("   ", "main", match, log);
     runConsoleLine("bogus", "main", match, log);

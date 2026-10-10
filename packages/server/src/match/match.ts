@@ -52,6 +52,7 @@ import {
   peekMessageType,
   playerStateToSlot,
   pmove,
+  primePmoveOnce,
   pushEntityEvent,
   quantizePlayerState,
   refreshPmoveParams,
@@ -126,6 +127,12 @@ export interface MatchOptions {
    */
   readonly maxClients?: number;
   readonly log?: MatchLog;
+  /**
+   * Run the pmove primer (D-040) at construction, once per module instance (default true): it
+   * warms pmove's late branches before the first tick. Unit helpers that build many matches pass
+   * false to save its cost; it never changes a result.
+   */
+  readonly primer?: boolean;
 }
 
 /** Match-wide counters (live). */
@@ -292,6 +299,7 @@ export class Match {
     this.spawns = new SpawnRotation(cmap, this.world, this.log);
 
     this.refreshCvars();
+    if (options.primer ?? true) primePmoveOnce(this.params);
     this.blockEffectiveTick = 0;
     // Setup-time check that the map name, map hash, build hash and block fit WELCOME.
     if (!this.encodeWelcomeFor(0)) {

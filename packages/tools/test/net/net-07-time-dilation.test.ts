@@ -2,6 +2,7 @@ import { STAT_COUNT, STAT_DILATION, StrafeCircuit } from "@game/client/net";
 import { TICK_RATE } from "@game/shared";
 import { describe, expect, it } from "vitest";
 import { FRAMES_144HZ, NetHarness } from "./harness";
+import { setHarnessPrimerDefault } from "./multiHarness";
 import {
   describeStep,
   dilationTicks,
@@ -29,6 +30,10 @@ import {
 // Tiers (D-032): this file runs seed 1 at 144 Hz both ways and the control; seeds 2–3, the
 // browser-hitch frames and the control on every seed run in `pnpm test:long`
 // (`packages/tools/long/net-07-time-dilation.long.ts`).
+
+// This file's checks are logical, so it skips the pmove primer to keep D-032's budget; NET-03,
+// NET-09 and the long tier run with it (D-040, reading 8).
+setHarnessPrimerDefault(false);
 
 describe("NET-07: time dilation after a round-trip step", () => {
   it.each([true, false])("144 Hz, seed 1, up %s: re-converges within the bound at ±3%", (up) => {

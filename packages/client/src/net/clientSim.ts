@@ -11,6 +11,9 @@ import {
   cvarBlockHash,
   PlayerState,
   PmoveEvent,
+  PmoveParams,
+  primePmoveOnce,
+  refreshPmoveParams,
   registerPmoveCvars,
   SNAP_FLAG_STARVED,
   type SnapshotHeader,
@@ -193,6 +196,12 @@ export interface ClientSimOptions {
    * default.
    */
   readonly dilation?: boolean;
+  /**
+   * Run the pmove primer (D-040) at construction, once per module instance (default true), so
+   * prediction never meets a late pmove branch first in play. Unit helpers pass false to save its
+   * cost; it never changes a result.
+   */
+  readonly primer?: boolean;
 }
 
 function ignoreLog(): void {}
@@ -235,6 +244,8 @@ export class ClientSim {
   readonly stats: NetStats;
   readonly offset: RenderOffset;
   readonly predictor: Predictor;
+  /** How long this instance's pmove primer took (clock ms); 0 when it skipped it (D-040). */
+  primerMs = 0;
   readonly connection: Connection;
   /**
    * The other players (D-037): every stored snapshot times its render clock as it arrives;
@@ -316,6 +327,19 @@ export class ClientSim {
     this.stats = new NetStats(this.now);
     this.offset = new RenderOffset(this.now);
     this.predictor = new Predictor(this.currentWorld);
+    // Synchronous and before `connect()` can send HELLO, so READY and the spawn always come
+    // after it (the READY gate on the primer, D-031, D-040, holds by construction).
+    if (options.primer ?? true) {
+      const start = this.clockFn();
+      // Parameters refreshed from a registry, as the predictor's are from WELCOME on: the same
+      // object shape, so code the primer optimizes is never deoptimized for a changed map.
+      const params = new PmoveParams();
+      refreshPmoveParams(cvars, params);
+      if (primePmoveOnce(params)) {
+        this.primerMs = this.clockFn() - start;
+        this.log("info", `pmove primer: ${Math.round(this.primerMs)} ms`);
+      }
+    }
     this.t[MISMATCH_SINCE] = Number.NaN;
     const onClosed = options.onClosed;
     const handler: ConnectionHandler = {

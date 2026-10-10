@@ -110,7 +110,7 @@
 - Remote entity interpolation; simple capsule player models in team colors.
 - Full netgraph.
 - Headless bots (`pnpm bots`), demo recording (server snapshot stream) and playback (basic).
-- Deterministic pmove primer at match and prediction start, guarded by a late-branch native-ESM allocation workload (the M2 warm-up transient, `docs/10` §4).
+- Deterministic pmove primer at match and prediction start, guarded by a late-branch native-ESM allocation workload (the M2 warm-up transient, `docs/10` §4). Done in increment 12 (D-040): a no-retry multi-process guard with a primer-off control and a block-coverage guard, in `pnpm test:long`.
 
 **Out of scope:** combat, relevance culling (send everything in M3), WebTransport.
 

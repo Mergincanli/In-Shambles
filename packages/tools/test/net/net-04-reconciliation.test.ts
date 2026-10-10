@@ -2,6 +2,7 @@ import { MAX_ADAPTIVE_TICKS, MixedInput, StrafeCircuit } from "@game/client/net"
 import { NET_PROFILES } from "@game/shared";
 import { describe, expect, it } from "vitest";
 import { NetHarness } from "./harness";
+import { setHarnessPrimerDefault } from "./multiHarness";
 import {
   BROWSER_LIKE_CASES,
   browserLikeCase,
@@ -44,6 +45,10 @@ import {
 // browser-like cases, the onset runs and lan with 60 fps hitches run in `pnpm test:long`
 // (`packages/tools/long/net-04-reconciliation.long.ts`). The runs and checks are shared
 // (`reconciliation.ts`); `pnpm test:net` runs both tiers.
+
+// This file's checks are logical, so it skips the pmove primer to keep D-032's budget; NET-03,
+// NET-09 and the long tier run with it (D-040, reading 8).
+setHarnessPrimerDefault(false);
 
 describe("NET-04 (M2 basic): reconciliation on every profile", () => {
   it("covers every docs/10 §3 profile", () => {

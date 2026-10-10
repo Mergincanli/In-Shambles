@@ -48,6 +48,8 @@ export interface HarnessOptions {
   readonly wrap?: (t: Transport) => Transport;
   /** False keeps the clock's dilation at 0 (NET-07's control). Default true. */
   readonly dilation?: boolean;
+  /** The pmove primer at the match and the client (MultiHarnessOptions.primer). */
+  readonly primer?: boolean;
 }
 
 export class NetHarness {
@@ -55,7 +57,11 @@ export class NetHarness {
   readonly player: HarnessClient;
 
   constructor(options: HarnessOptions) {
-    this.multi = new MultiHarness({ map: options.map, seed: options.seed });
+    this.multi = new MultiHarness({
+      map: options.map,
+      seed: options.seed,
+      ...(options.primer === undefined ? {} : { primer: options.primer }),
+    });
     this.player = this.multi.addClient({
       input: options.input,
       profile: options.profile,

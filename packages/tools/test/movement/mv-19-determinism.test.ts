@@ -1,6 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PMOVE_PRIMER_TICKS, PmoveParams, pmovePrimed, primePmove } from "@game/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { coursePath } from "../../src/scenarios/course";
 import {
@@ -22,7 +23,8 @@ const SERVER_BUILD_BANNER =
 // a teleport to the next anchor every 1000 ticks, is digested every tick. The browser leg is the
 // pmove vectors, which `pnpm test:browser` replays in Chromium, Firefox and WebKit (D-022). Tiers
 // (D-032): the client build's leg (Vite library mode) runs in `pnpm test:long`; `pnpm test:movement`
-// runs both.
+// runs both. The pmove primer (D-040) leaves the digests unchanged: a run after a full primer pass
+// matches the first.
 
 const cmapPath = coursePath("movement_lab");
 const bytes = () => new Uint8Array(readFileSync(cmapPath));
@@ -47,6 +49,14 @@ describe("MV-19: determinism across runs and builds", () => {
     expect(again).toEqual(reference);
     expect(reference.checkpoints).toHaveLength(MV19_TICKS / MV19_TELEPORT_TICKS);
     expect(reference.digest).toBe(first[MV19_TICKS - 1]);
+  });
+
+  it("gives the same digest every tick after a full pmove primer pass (D-040: the primer is inert)", () => {
+    expect(pmovePrimed()).toBe(false);
+    primePmove(new PmoveParams(), PMOVE_PRIMER_TICKS);
+    const primed = new Uint32Array(MV19_TICKS);
+    expect(runDeterminismProbe(bytes(), MV19_TICKS, primed)).toEqual(reference);
+    expect(firstDifference(first, primed)).toBe(-1);
   });
 
   it("the stream reaches every mode the courses offer", () => {

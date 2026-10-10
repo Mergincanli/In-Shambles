@@ -1,10 +1,15 @@
 import { describe, it } from "vitest";
 import { expectLateJoin, runLateJoin } from "./lateJoin";
+import { setHarnessPrimerDefault } from "./multiHarness";
 
 // NET-12, the fast tier (docs/05 §14; M3 design §5, §6 increment 9; D-036, D-038): late join and
 // reconnect on a compressed timeline, 12 s in all (`lateJoin.ts` says what is checked; D-032's
 // placement rule: the design's 60 s smoke cost some 3.5 s of a fast run). The long tier runs the
 // design's timeline over 5 simulated minutes (`packages/tools/long/net-12-late-join.long.ts`).
+
+// This file's checks are logical, so it skips the pmove primer to keep D-032's budget; NET-03,
+// NET-09 and the long tier run with it (D-040, reading 8).
+setHarnessPrimerDefault(false);
 
 describe("NET-12: late join and reconnect get a full snapshot and stay in sync (D-038)", () => {
   it("8 bots, a late joiner at 3 s, slot 3 rejoined at 7 s, 12 s at wan-100-loss1", () => {

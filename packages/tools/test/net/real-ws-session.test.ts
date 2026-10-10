@@ -30,10 +30,12 @@ describe("client over a real WebSocket to the Node server (D-031)", () => {
     const server = await startServer({
       args: ["--port", "0"],
       cwd: fromRoot("packages", "server"),
+      primer: false,
     });
     const ws = new WebSocket(`ws://127.0.0.1:${server.listener.port}/`);
     let asked: [string, string] | null = null;
     const client = new ClientSim({
+      primer: false,
       transport: new WebSocketTransport(ws),
       buildHash: server.buildHash,
       clock: () => performance.now(),

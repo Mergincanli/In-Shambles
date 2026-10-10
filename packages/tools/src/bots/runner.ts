@@ -96,6 +96,11 @@ export interface BotRunOptions {
   readonly abort?: AbortSignal;
   /** Called with the server child once it listens (tests stop it mid-run). */
   readonly onServerChild?: (child: ServerChild) => void;
+  /**
+   * The pmove primer (D-040) at the first bot's ClientSim, once per process (default true, as in
+   * play). In-process tests pass false to save its cost; it never changes a result.
+   */
+  readonly primer?: boolean;
 }
 
 /** A run the runner will not start: a bad option or a count the match can't hold. */
@@ -239,6 +244,7 @@ class Bot {
     profile: NetProfile,
     seed: number,
     buildHash: string,
+    primer: boolean,
   ) {
     const ws = new WebSocket(url);
     this.tap = new BotTap(new WebSocketTransport(ws));
@@ -258,6 +264,7 @@ class Bot {
       buildHash,
       clock: () => performance.now(),
       input,
+      primer,
       onMapRequest: (name) => {
         // Thrown here, ClientSim ends the session with the reason.
         if (!MAP_NAME.test(name)) throw new Error(`refused map name ${JSON.stringify(name)}`);
@@ -580,7 +587,15 @@ export async function runBots(o: BotRunOptions): Promise<BotRunResult> {
 
     for (let i = 0; i < o.count; i++) {
       bots.push(
-        new Bot(i, url, createBotInput(match.map, i, o.seed), profile, o.seed + i, buildHash),
+        new Bot(
+          i,
+          url,
+          createBotInput(match.map, i, o.seed),
+          profile,
+          o.seed + i,
+          buildHash,
+          o.primer ?? true,
+        ),
       );
     }
     loop = new FrameLoop(bots);

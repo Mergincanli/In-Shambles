@@ -137,7 +137,11 @@ export async function expectStartsAndStops(signal: NodeJS.Signals): Promise<void
   );
   await waitFor(run, READY, 10_000, true);
   // Monotonic time since process start, not a wall-clock epoch timestamp.
-  expect(events(run.output(), "server_ok")[0]?.startupMs).toBeLessThan(60_000);
+  const ok = events(run.output(), "server_ok")[0];
+  expect(ok?.startupMs).toBeLessThan(60_000);
+  // A fresh process runs the pmove primer once, within its startup (D-040).
+  expect(ok?.primerMs).toBeGreaterThan(0);
+  expect(ok?.primerMs).toBeLessThan(ok?.startupMs as number);
   const { port, buildHash } = listening(run);
   expect((await httpJson(port, "/status")).body).toMatchObject({ buildHash });
   // stdin is the admin console.

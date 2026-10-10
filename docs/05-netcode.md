@@ -49,7 +49,7 @@
   1. `HELLO`: protocol version, build hash, client nonce.
   2. `WELCOME`: client id, tick rate, current server tick, map id + content hash, replicated cvar block, match rules (match rules join WELCOME in a later protocol version; v2 has none, §3.6).
   3. Clock sync: 5 × `PING`/`PONG`, median RTT.
-  4. The client loads the map (if it has not yet: on a dedicated server, the one WELCOME names, D-031), then sends `READY` once the clock sync is done too.
+  4. The client loads the map (if it has not yet: on a dedicated server, the one WELCOME names, D-031), then sends `READY` once the clock sync is done too. The pmove primer (D-040) has run by then: it runs when the client is created, before `HELLO`.
   5. The client starts as a spectator; it joins a team and picks a loadout through reliable messages.
 - **Players per match** (D-034, design: "Cap 64, default 32"): a match has 64 slots (`MATCH_MAX_CLIENTS`; client id = slot = entity id, 0–63) and admits `sv_maxClients` players (default 32, 1–64). Up to 37 every snapshot fits 1100 B by construction (§4.2); above that the byte-budget scheduler keeps it within (D-046, §4.3). A connection takes the lowest free id below that cap at once (before HELLO); with none free it is KICKed "server full". The Worker's match keeps the default.
 - **M2 handshake on the server** (`packages/server/src/match/match.ts`, D-027):

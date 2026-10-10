@@ -91,7 +91,13 @@ const world = buildCollisionWorld(cmap);
 const spawnEntity = cmap.entities.find((e) => e.classname === "info_player_start");
 
 function newMatch(cvars?: CvarRegistry): Match {
-  return new Match({ cmap, world, buildHash: TEST_BUILD, ...(cvars ? { cvars } : {}) });
+  return new Match({
+    cmap,
+    world,
+    buildHash: TEST_BUILD,
+    ...(cvars ? { cvars } : {}),
+    primer: false,
+  });
 }
 
 /**
@@ -230,6 +236,7 @@ describe("match handshake", () => {
   it("handles clients in id order within a tick", () => {
     const logs: string[] = [];
     const match = new Match({
+      primer: false,
       cmap,
       world,
       buildHash: TEST_BUILD,
@@ -284,9 +291,16 @@ describe("match handshake", () => {
       37,
     ]);
     expect(
-      new Match({ cmap, world, buildHash: TEST_BUILD, maxClients: Number.NaN }).maxClients,
+      new Match({ cmap, world, buildHash: TEST_BUILD, maxClients: Number.NaN, primer: false })
+        .maxClients,
     ).toBe(MATCH_DEFAULT_MAX_CLIENTS);
-    const full = new Match({ cmap, world, buildHash: TEST_BUILD, maxClients: MATCH_MAX_CLIENTS });
+    const full = new Match({
+      cmap,
+      world,
+      buildHash: TEST_BUILD,
+      maxClients: MATCH_MAX_CLIENTS,
+      primer: false,
+    });
     expect(full.maxClients).toBe(64);
     for (let i = 0; i < 64; i++) connect(full);
     const [clientEnd, serverEnd] = createLoopbackPair();
@@ -295,7 +309,7 @@ describe("match handshake", () => {
     late.poll();
     expect(late.kicks[0]?.reason).toBe("server full");
     expect(full.session(63)).toBeDefined();
-    const duel = new Match({ cmap, world, buildHash: TEST_BUILD, maxClients: 2 });
+    const duel = new Match({ cmap, world, buildHash: TEST_BUILD, maxClients: 2, primer: false });
     const left = connect(duel);
     connect(duel);
     expect(duel.connect(createLoopbackPair()[1])).toBeNull();
@@ -333,7 +347,13 @@ describe("match handshake", () => {
   });
 
   it("lets another build in with a warning when strictBuild is off (sv_strictBuild 0, D-031)", () => {
-    const match = new Match({ cmap, world, buildHash: TEST_BUILD, strictBuild: false });
+    const match = new Match({
+      cmap,
+      world,
+      buildHash: TEST_BUILD,
+      strictBuild: false,
+      primer: false,
+    });
     const client = connect(match);
     client.hello("other-build");
     run(match, client, 1);
@@ -461,7 +481,7 @@ describe("match spawn and simulation", () => {
     const tower = loadMap("fall_tower");
     const yaw = degreesToU16(90);
     expect(tower.entities.find((e) => e.classname === "info_player_start")?.angles?.[1]).toBe(90);
-    const match = new Match({ cmap: tower, buildHash: TEST_BUILD });
+    const match = new Match({ cmap: tower, buildHash: TEST_BUILD, primer: false });
     const client = joined(match);
     expect(client.lastSnapshot().state.viewYaw).toBe(yaw);
     run(match, client, 1);
@@ -682,7 +702,7 @@ describe("match snapshots (protocol v2, D-033–D-035)", () => {
   });
 
   it("fits the full snapshot of a 37-player match in 1100 B", () => {
-    const match = new Match({ cmap, world, buildHash: TEST_BUILD, maxClients: 37 });
+    const match = new Match({ cmap, world, buildHash: TEST_BUILD, maxClients: 37, primer: false });
     const clients: TestClient[] = [];
     for (let i = 0; i < 37; i++) {
       const cl = connect(match);
@@ -827,6 +847,7 @@ describe("match spawns, teams, events and respawns (D-034, D-035)", () => {
 
   function arenaMatch(maxClients?: number): Match {
     return new Match({
+      primer: false,
       cmap: arena,
       world: arenaWorld,
       buildHash: TEST_BUILD,

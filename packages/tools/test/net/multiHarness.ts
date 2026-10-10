@@ -289,6 +289,24 @@ export interface MultiHarnessOptions {
   readonly log?: MatchLog;
   /** `sv_maxClients` for the match (its default, 32, when absent). */
   readonly maxClients?: number;
+  /**
+   * The pmove primer (D-040) at the match and every client. Default true, unless the test file
+   * called `setHarnessPrimerDefault(false)`; unit tests that build many harnesses pass false.
+   */
+  readonly primer?: boolean;
+}
+
+let primerDefault = true;
+
+/**
+ * Sets whether harnesses built without `primer` run the pmove primer (D-040), for the rest of the
+ * calling test file (Vitest gives each file its own module instances). The fast tier's NET files
+ * whose checks are logical (NET-02, NET-04, NET-05, NET-07, NET-08, NET-12) turn it off to keep
+ * D-032's budget, since each file pays the primer afresh; NET-03, NET-09 and every long-tier NET
+ * file keep it, as play does (D-040, reading 8).
+ */
+export function setHarnessPrimerDefault(on: boolean): void {
+  primerDefault = on;
 }
 
 export interface ClientOptions {
@@ -424,6 +442,7 @@ export class HarnessClient {
       clock: () => h.now,
       input: options.input,
       dilation: options.dilation,
+      primer: h.primer,
     });
     this.client.connect();
     h.at(h.now + this.frameInterval(), () => this.frame());
@@ -675,6 +694,8 @@ export class MultiHarness {
   readonly raws: RawClient[] = [];
   /** `match.tick()` times on the real clock, µs (`timeTicks`), else null. */
   readonly tickTimes: TickWindow | null;
+  /** Whether the match and its clients run the pmove primer (MultiHarnessOptions.primer). */
+  readonly primer: boolean;
   now = 0;
   /** Runs before every server tick (tests move players or change the match here). */
   beforeServerTick: (() => void) | null = null;
@@ -696,11 +717,13 @@ export class MultiHarness {
     this.course = loadCourse(this.mapName);
     this.seed = options.seed ?? 1;
     this.tickTimes = options.timeTicks === true ? new TickWindow() : null;
+    this.primer = options.primer ?? primerDefault;
     this.match = new Match({
       cmap: this.course.cmap,
       world: this.course.world,
       buildHash: HARNESS_BUILD,
       log: options.log,
+      primer: this.primer,
       ...(options.maxClients === undefined ? {} : { maxClients: options.maxClients }),
     });
     const host: LoopHost = {

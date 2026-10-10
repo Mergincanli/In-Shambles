@@ -91,6 +91,7 @@ class TapTransport implements Transport {
 function tapped(input: CmdSampler, map?: string): { h: NetHarness; tap: TapTransport } {
   let tap: TapTransport | null = null;
   const h = new NetHarness({
+    primer: false,
     input,
     map,
     wrap: (t) => {
@@ -156,7 +157,7 @@ function firstOffsetFrame(h: NetHarness, from: number): number {
 
 describe("render offset", () => {
   it("carries a 20 u correction and glides it away over cl_correctionSmoothMs", () => {
-    const h = new NetHarness({ input: new NeutralInput() });
+    const h = new NetHarness({ input: new NeutralInput(), primer: false });
     h.runTicks(120);
     const from = h.frames.offset.length;
     bump(h, 20);
@@ -183,7 +184,7 @@ describe("render offset", () => {
   });
 
   it("snaps a correction longer than cl_teleportDist", () => {
-    const h = new NetHarness({ input: new NeutralInput() });
+    const h = new NetHarness({ input: new NeutralInput(), primer: false });
     h.runTicks(120);
     const from = h.frames.offset.length;
     bump(h, h.client.settings.teleportDist + 36);
@@ -456,7 +457,11 @@ describe("ClientSim recovery paths", () => {
     // The Worker keeps sending a snapshot every tick while the page does not poll (F01). No
     // jitter, so the backlog comes due in one poll: one hard resync (one per poll, docs/05 §8).
     const wan50 = findNetProfile("wan-50") as NetProfile;
-    const h = new NetHarness({ input: new NeutralInput(), profile: { ...wan50, jitterMs: 0 } });
+    const h = new NetHarness({
+      input: new NeutralInput(),
+      profile: { ...wan50, jitterMs: 0 },
+      primer: false,
+    });
     h.runTicks(120);
     const sim = h.sim as NetSimTransport;
     h.hitch(30_000);
@@ -513,7 +518,7 @@ describe("ClientSim recovery paths", () => {
   });
 
   it("runs at most MAX_TICKS_PER_FRAME ticks a frame and stops MAX_LEAD_TICKS past the newest snapshot", () => {
-    const h = new NetHarness({ input: new MixedInput() });
+    const h = new NetHarness({ input: new MixedInput(), primer: false });
     h.runTicks(300);
     const c = h.client;
     const p = c.predictor;
@@ -558,7 +563,7 @@ describe("ClientSim recovery paths", () => {
 
   it("a lone long frame on lan resyncs without growing the lead; a second within 1.5 s grows it", () => {
     // On lan the lead is all buffer (3 ticks, 50 ms): a 60–70 ms gap overtakes the prediction.
-    const h = new NetHarness({ input: new NeutralInput() });
+    const h = new NetHarness({ input: new NeutralInput(), primer: false });
     h.runTicks(600);
     const c = h.client;
     h.hitch(70);
@@ -600,7 +605,7 @@ describe("ClientSim recovery paths", () => {
   });
 
   it("a hard resync in the same poll as a step request drops the step (it measured the old anchor)", () => {
-    const h = new NetHarness({ input: new NeutralInput() });
+    const h = new NetHarness({ input: new NeutralInput(), primer: false });
     h.runTicks(200);
     const c = h.client;
     const p = c.predictor;

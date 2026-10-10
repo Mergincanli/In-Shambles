@@ -183,6 +183,7 @@ describe.concurrent("a bots run", () => {
     const server = await startServer({
       args: ["--port", "0", "--set", "sv_maxClients=4"],
       cwd: fromRoot("packages", "server"),
+      primer: false,
     });
     onTestFinished(() => server.stop());
     const url = `ws://127.0.0.1:${server.listener.port}/`;
@@ -195,6 +196,7 @@ describe.concurrent("a bots run", () => {
       seed: 1,
       human: false,
       outDir: null,
+      primer: false,
     });
     await expect(run).rejects.toThrow(new BotsRefused("count 5 > maxClients 4 on match main"));
     expect(server.matches.main?.match.sessionCount).toBe(0);
@@ -208,6 +210,7 @@ describe.concurrent("a bots run", () => {
     const server = await startServer({
       args: ["--port", "0", "--set", "sv_strictBuild=1"],
       cwd: fromRoot("packages", "server"),
+      primer: false,
     });
     onTestFinished(() => server.stop());
     const dir = outDir(onTestFinished);
@@ -221,6 +224,7 @@ describe.concurrent("a bots run", () => {
       seed: 3,
       human: false,
       outDir: dir,
+      primer: false,
       log: (t) => lines.push(t),
     });
     expect(lines[0]).toMatch(/^bots: 3 on arena_greybox \(match main, maxClients 32\) at wan-50/);

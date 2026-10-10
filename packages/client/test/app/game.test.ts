@@ -139,7 +139,7 @@ function session(
 ) {
   const now = { t: 0 };
   const [clientEnd, serverEnd] = createLoopbackPair();
-  const match = new Match({ cmap, world, buildHash: BUILD });
+  const match = new Match({ cmap, world, buildHash: BUILD, primer: false });
   match.connect(serverEnd, true);
   // The page's registry (boot.ts), so the client cvars are the registered ones.
   const cvars = new CvarRegistry();
@@ -147,6 +147,7 @@ function session(
   registerClientCvars(cvars);
   const link = new StallableLink(clientEnd);
   const client = new ClientSim({
+    primer: false,
     transport: link,
     cmap,
     world,

@@ -33,6 +33,7 @@ import {
   PMEV_LAND,
   PMF_GROUNDED,
   PongMsg,
+  pmovePrimed,
   SNAP_FLAG_SPECTATOR,
   SnapshotHeader,
   slotToPlayerState,
@@ -56,6 +57,7 @@ function bareClient(buildHash = HARNESS_BUILD) {
   const [clientEnd, serverEnd] = createLoopbackPair();
   const now = { t: 0 };
   const client = new ClientSim({
+    primer: false,
     transport: clientEnd,
     cmap: course.cmap,
     world: course.world,
@@ -66,9 +68,41 @@ function bareClient(buildHash = HARNESS_BUILD) {
 }
 
 describe("client session", () => {
+  it("runs the pmove primer at construction, once per module instance, unless told not to (D-040)", () => {
+    // Every other client and match in this file passes primer: false, and Vitest gives the file
+    // its own module instances, so nothing has primed pmove yet.
+    expect(bareClient().client.primerMs).toBe(0);
+    expect(pmovePrimed()).toBe(false);
+    const lines: string[] = [];
+    const now = { t: 0 };
+    const make = () =>
+      new ClientSim({
+        transport: createLoopbackPair()[0],
+        cmap: course.cmap,
+        world: course.world,
+        buildHash: HARNESS_BUILD,
+        // The primer's time on the client's clock: 5 ms a call, so its two reads differ.
+        clock: () => (now.t += 5),
+        log: (_level, msg) => lines.push(msg),
+      });
+    const first = make();
+    expect(pmovePrimed()).toBe(true);
+    expect(first.primerMs).toBe(5);
+    expect(lines).toContain("pmove primer: 5 ms");
+    // A second client in the same module instance finds it done.
+    const count = lines.length;
+    expect(make().primerMs).toBe(0);
+    expect(lines.slice(count).some((l) => l.startsWith("pmove primer"))).toBe(false);
+  });
+
   it("walks HELLO → WELCOME → five pings → READY → spawn, then predicts", () => {
     const { client, serverEnd, now } = bareClient();
-    const match = new Match({ cmap: course.cmap, world: course.world, buildHash: HARNESS_BUILD });
+    const match = new Match({
+      cmap: course.cmap,
+      world: course.world,
+      buildHash: HARNESS_BUILD,
+      primer: false,
+    });
     match.connect(serverEnd, true);
     expect(client.sendCommand("cvars")).toBe(false);
     client.connect();
@@ -91,7 +125,12 @@ describe("client session", () => {
   it("refuses a WELCOME for another map", () => {
     const { client, serverEnd, now } = bareClient();
     const other = loadCourse("jump_lab");
-    const match = new Match({ cmap: other.cmap, world: other.world, buildHash: HARNESS_BUILD });
+    const match = new Match({
+      cmap: other.cmap,
+      world: other.world,
+      buildHash: HARNESS_BUILD,
+      primer: false,
+    });
     match.connect(serverEnd, true);
     client.connect();
     for (let i = 0; i < 10; i++) {
@@ -108,13 +147,19 @@ describe("client session", () => {
     const now = { t: 0 };
     const asked: [string, string][] = [];
     const client = new ClientSim({
+      primer: false,
       transport: clientEnd,
       buildHash: HARNESS_BUILD,
       clock: () => now.t,
       onMapRequest: (name, hash) => asked.push([name, hash]),
     });
     expect(client.map).toBeNull();
-    const match = new Match({ cmap: course.cmap, world: course.world, buildHash: HARNESS_BUILD });
+    const match = new Match({
+      cmap: course.cmap,
+      world: course.world,
+      buildHash: HARNESS_BUILD,
+      primer: false,
+    });
     match.connect(serverEnd, true);
     client.connect();
     const step = (frames: number) => {
@@ -144,6 +189,7 @@ describe("client session", () => {
     // A file of the same name but another hash ends the session with both versions.
     const [otherEnd, otherServerEnd] = createLoopbackPair();
     const stale = new ClientSim({
+      primer: false,
       transport: otherEnd,
       buildHash: HARNESS_BUILD,
       clock: () => now.t,
@@ -177,10 +223,16 @@ describe("client session", () => {
     expect(welcomeMapHash(m)).toBe("ffffffff80000000");
     // End to end: a map whose hash has leading zeros is the client's own, not "another version".
     const padded = { ...course.cmap, contentHash: "0000abcd00000001" };
-    const match = new Match({ cmap: padded, world: course.world, buildHash: HARNESS_BUILD });
+    const match = new Match({
+      cmap: padded,
+      world: course.world,
+      buildHash: HARNESS_BUILD,
+      primer: false,
+    });
     const [clientEnd, serverEnd] = createLoopbackPair();
     const now = { t: 0 };
     const client = new ClientSim({
+      primer: false,
       transport: clientEnd,
       buildHash: HARNESS_BUILD,
       clock: () => now.t,
@@ -198,7 +250,12 @@ describe("client session", () => {
   });
 
   it("takes the map from inside onMapRequest, and stays closed when it refuses or throws", () => {
-    const match = new Match({ cmap: course.cmap, world: course.world, buildHash: HARNESS_BUILD });
+    const match = new Match({
+      cmap: course.cmap,
+      world: course.world,
+      buildHash: HARNESS_BUILD,
+      primer: false,
+    });
     const now = { t: 0 };
     const jump = loadCourse("jump_lab").cmap;
     /** A client whose loader runs synchronously in WELCOME's poll, as a Node host's would. */
@@ -206,6 +263,7 @@ describe("client session", () => {
       const [clientEnd, serverEnd] = createLoopbackPair();
       const box: { c: ClientSim | null } = { c: null };
       const c = new ClientSim({
+        primer: false,
         transport: clientEnd,
         buildHash: HARNESS_BUILD,
         clock: () => now.t,
@@ -253,7 +311,12 @@ describe("client session", () => {
 
   it("refuses a WELCOME whose client id is past the 64 slots (D-034)", () => {
     const { client, serverEnd, now } = bareClient();
-    const match = new Match({ cmap: course.cmap, world: course.world, buildHash: HARNESS_BUILD });
+    const match = new Match({
+      cmap: course.cmap,
+      world: course.world,
+      buildHash: HARNESS_BUILD,
+      primer: false,
+    });
     // The match's WELCOME with its client id byte (after type and version) set to 64.
     const send = serverEnd.sendReliable.bind(serverEnd);
     serverEnd.sendReliable = (d, len) => {
@@ -274,7 +337,12 @@ describe("client session", () => {
 
   it("reports the server's kick", () => {
     const { client, serverEnd, now } = bareClient("other-build");
-    const match = new Match({ cmap: course.cmap, world: course.world, buildHash: HARNESS_BUILD });
+    const match = new Match({
+      cmap: course.cmap,
+      world: course.world,
+      buildHash: HARNESS_BUILD,
+      primer: false,
+    });
     match.connect(serverEnd, true);
     client.connect();
     for (let i = 0; i < 10; i++) {
@@ -310,7 +378,7 @@ describe("client session", () => {
   });
 
   it("strikes and drops a spectator snapshot on a live connection (demo files only, D-033)", () => {
-    const h = new NetHarness({ input: new NeutralInput() });
+    const h = new NetHarness({ input: new NeutralInput(), primer: false });
     h.runTicks(60);
     const c = h.client;
     const strikes = c.stats.totals[STAT_STRIKES] as number;
@@ -335,7 +403,7 @@ describe("client session", () => {
   });
 
   it("drops a duplicate or older snapshot without a strike (D-033)", () => {
-    const h = new NetHarness({ input: new NeutralInput() });
+    const h = new NetHarness({ input: new NeutralInput(), primer: false });
     h.runTicks(120);
     h.match.tick = () => {};
     h.run(50);
@@ -377,7 +445,7 @@ describe("client session", () => {
 
   it("smooths a correction into the render offset instead of jumping", () => {
     // Drop the client's inputs for a stretch: the server starves, the prediction is corrected.
-    const h = new NetHarness({ input: new StrafeCircuit() });
+    const h = new NetHarness({ input: new StrafeCircuit(), primer: false });
     h.runTicks(400);
     const session = h.match.session(0);
     expect(session).toBeDefined();
@@ -397,7 +465,11 @@ describe("client session", () => {
   it("counts a correction on a starved snapshot apart: a late cmd, not a misprediction", () => {
     // wan-50: a 70 ms stall sends cmds past the input buffer, so the server repeats one it had
     // not received; the client already predicted that tick with the real cmd and is corrected.
-    const h = new NetHarness({ input: new StrafeCircuit(), profile: findNetProfile("wan-50") });
+    const h = new NetHarness({
+      input: new StrafeCircuit(),
+      profile: findNetProfile("wan-50"),
+      primer: false,
+    });
     h.run(3000);
     const t = h.client.stats.totals;
     expect([t[STAT_STARVED], t[STAT_CORRECTIONS], t[STAT_STARVED_CORRECTIONS]]).toEqual([0, 0, 0]);
@@ -420,7 +492,7 @@ describe("client session", () => {
   });
 
   it("files each first prediction's movement events under its tick, once", () => {
-    const h = new NetHarness({ input: new StrafeCircuit() });
+    const h = new NetHarness({ input: new StrafeCircuit(), primer: false });
     h.runTicks(600);
     const jumps = h.events.filter((e) => e.type === PMEV_JUMP);
     const lands = h.events.filter((e) => e.type === PMEV_LAND);
@@ -505,7 +577,7 @@ describe("NET-04: a server stall's catch-up ticks", () => {
     // ticks find the cmds that were sent on time. Without the yield, the ticks past the input
     // buffer repeated a cmd: 13 starved ticks here, each a correction, with no client frame over
     // 18 ms (the e2e's "starved cmds, no long frame").
-    const h = new NetHarness({ input: new StrafeCircuit(), frameHz: 60, seed: 7 });
+    const h = new NetHarness({ input: new StrafeCircuit(), frameHz: 60, seed: 7, primer: false });
     h.run(4000);
     const t = h.client.stats.totals;
     const before = [t[STAT_STARVED], t[STAT_CORRECTIONS], t[STAT_HARD_RESYNCS]];

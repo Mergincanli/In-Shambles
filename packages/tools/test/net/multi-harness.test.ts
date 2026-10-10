@@ -59,7 +59,7 @@ function helloBytes(build = HARNESS_BUILD): Uint8Array {
 
 /** A harness whose match loop is stopped: only the timers a test schedules do anything. */
 function idleHarness(): MultiHarness {
-  const h = new MultiHarness();
+  const h = new MultiHarness({ primer: false });
   h.loop.stop();
   return h;
 }
@@ -117,7 +117,7 @@ describe("MultiHarness: event loop", () => {
 
 describe("MultiHarness: clients", () => {
   it("plays several clients at once, each in its own session, all reconciled", () => {
-    const h = new MultiHarness({ seed: 3 });
+    const h = new MultiHarness({ seed: 3, primer: false });
     const clients: HarnessClient[] = [];
     for (let i = 0; i < 4; i++) {
       clients.push(
@@ -145,7 +145,7 @@ describe("MultiHarness: clients", () => {
     // so only their seeds can tell their losses and frame gaps apart. Frames are compared on a
     // lossless link, where nothing else moves their recording's start.
     const pair = (link: NetProfile, seeds: [number, number] | null) => {
-      const h = new MultiHarness({ seed: 4 });
+      const h = new MultiHarness({ seed: 4, primer: false });
       const cs = [0, 1].map((k) =>
         h.addClient({
           input: new NeutralInput(),
@@ -175,7 +175,7 @@ describe("MultiHarness: clients", () => {
 
   it("gives one run per seed, and another for another seed", () => {
     const play = (seed: number) => {
-      const h = new MultiHarness({ seed });
+      const h = new MultiHarness({ seed, primer: false });
       for (let i = 0; i < 3; i++) {
         h.addClient({
           input: i === 0 ? new StrafeCircuit() : new MixedInput(),
@@ -192,7 +192,7 @@ describe("MultiHarness: clients", () => {
   });
 
   it("counts each session's traffic by message type, as the server end sees it", () => {
-    const h = new MultiHarness();
+    const h = new MultiHarness({ primer: false });
     const c = h.addClient({ input: new MixedInput() });
     h.run(3000);
     const s = c.session;
@@ -221,7 +221,7 @@ describe("MultiHarness: clients", () => {
   });
 
   it("lets a client join late, leave, and a new one rejoin into the freed slot", () => {
-    const h = new MultiHarness({ seed: 2 });
+    const h = new MultiHarness({ seed: 2, primer: false });
     const wan = profile("wan-100-loss1");
     const a = h.addClient({ input: new MixedInput(), profile: wan });
     const b = h.addClient({ input: new StrafeCircuit(), profile: wan, record: true });
@@ -277,7 +277,7 @@ describe("MultiHarness: clients", () => {
   });
 
   it("drives raw endpoints: a valid HELLO gets a WELCOME, garbage gets strikes", () => {
-    const h = new MultiHarness();
+    const h = new MultiHarness({ primer: false });
     const honest = h.addClient({ input: new NeutralInput() });
     const raw = h.addRaw();
     const junk = h.addRaw();
@@ -296,8 +296,8 @@ describe("MultiHarness: clients", () => {
   });
 
   it("holds the match's maxClients clients and raw endpoints together, as the match counts them", () => {
-    expect(new MultiHarness().match.maxClients).toBe(32);
-    const h = new MultiHarness({ maxClients: 20 });
+    expect(new MultiHarness({ primer: false }).match.maxClients).toBe(32);
+    const h = new MultiHarness({ maxClients: 20, primer: false });
     const raws = Array.from({ length: 19 }, () => h.addRaw());
     h.addClient({ input: new NeutralInput() });
     expect(() => h.addClient({ input: new NeutralInput() })).toThrow(/20 clients/);
@@ -309,7 +309,7 @@ describe("MultiHarness: clients", () => {
   });
 
   it("stops the frames of a client the match KICKed", () => {
-    const h = new MultiHarness();
+    const h = new MultiHarness({ primer: false });
     const ok = h.addClient({ input: new NeutralInput() });
     const kicked = h.addClient({ input: new NeutralInput() });
     h.run(500);
@@ -327,11 +327,11 @@ describe("MultiHarness: clients", () => {
   });
 
   it("times every match tick on request", () => {
-    const h = new MultiHarness({ timeTicks: true });
+    const h = new MultiHarness({ timeTicks: true, primer: false });
     h.addClient({ input: new MixedInput() });
     h.run(1000);
     expect(h.tickTimes?.count).toBe(h.match.serverTick);
     expect(h.match.serverTick).toBeGreaterThanOrEqual(59);
-    expect(new MultiHarness().tickTimes).toBeNull();
+    expect(new MultiHarness({ primer: false }).tickTimes).toBeNull();
   });
 });

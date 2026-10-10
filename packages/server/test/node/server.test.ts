@@ -35,6 +35,7 @@ async function start(args: string[] = [], console?: NodeJS.ReadableStream) {
     cwd: serverDir,
     write: (line) => lines.push(JSON.parse(line) as Line),
     ...(console === undefined ? {} : { console }),
+    primer: false,
   });
   return { server: running, lines, port: running.listener.port };
 }
@@ -58,6 +59,9 @@ describe("Node server (in process, real WebSocket)", () => {
     const { server, lines, port } = await start();
     expect(lines.map((l) => l.ev).slice(0, 2)).toEqual(["server_ok", "listening"]);
     expect(lines[0]?.startupMs).toEqual(expect.any(Number));
+    // The pmove primer's time (D-040): 0, as these servers start without it (the process smoke
+    // checks a real one).
+    expect(lines[0]?.primerMs).toBe(0);
     expect(lines[1]).toMatchObject({
       lvl: "info",
       port,

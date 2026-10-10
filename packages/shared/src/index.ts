@@ -30,6 +30,7 @@ export * from "./sim/pmove/ground";
 export * from "./sim/pmove/ladder";
 export * from "./sim/pmove/params";
 export * from "./sim/pmove/pmove";
+export * from "./sim/pmove/primer";
 export * from "./sim/pmove/slideMove";
 export * from "./sim/pmove/stepSlideMove";
 export * from "./sim/pmove/walk";

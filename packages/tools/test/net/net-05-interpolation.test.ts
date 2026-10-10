@@ -12,7 +12,7 @@ import {
   profile,
   RemoteWatch,
 } from "./interpolation";
-import { MultiHarness } from "./multiHarness";
+import { MultiHarness, setHarnessPrimerDefault } from "./multiHarness";
 
 // NET-05 (docs/05 §14, M3 design §2.8 and §5, D-037): remote players' drawn paths are continuous.
 // A mover strafe-jumps a route on arena_greybox that climbs the south ledge's 6 steps of 16 u, at
@@ -66,6 +66,10 @@ function distanceToPath(p: readonly number[], path: readonly number[][]): number
   }
   return best;
 }
+
+// This file's checks are logical, so it skips the pmove primer to keep D-032's budget; NET-03,
+// NET-09 and the long tier run with it (D-040, reading 8).
+setHarnessPrimerDefault(false);
 
 describe("NET-05: remote interpolation is continuous", () => {
   it.each(["wan-50", "wan-100-loss1", "wan-150-loss2"])(

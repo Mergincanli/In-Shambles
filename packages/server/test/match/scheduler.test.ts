@@ -420,11 +420,11 @@ describe("Match mirrors (M3 design §2.3, D-046)", () => {
   const connect = (m: Match) => m.connect(createLoopbackPair()[1]);
 
   it("allocates none at 32 players, one per session above 37, reused across reconnects", () => {
-    const small = new Match({ cmap, buildHash: TEST_BUILD });
+    const small = new Match({ cmap, buildHash: TEST_BUILD, primer: false });
     for (let i = 0; i < 32; i++) connect(small);
     expect(small.mirrors.allocated).toBe(0);
     expect(small.session(0)?.mirror).toBeNull();
-    const big = new Match({ cmap, buildHash: TEST_BUILD, maxClients: 64 });
+    const big = new Match({ cmap, buildHash: TEST_BUILD, maxClients: 64, primer: false });
     const [clientEnd, serverEnd] = createLoopbackPair();
     const first = big.connect(serverEnd);
     connect(big);
@@ -439,7 +439,7 @@ describe("Match mirrors (M3 design §2.3, D-046)", () => {
   });
 
   it("gives every present session a mirror when the cap is raised above 37", () => {
-    const m = new Match({ cmap, buildHash: TEST_BUILD });
+    const m = new Match({ cmap, buildHash: TEST_BUILD, primer: false });
     for (let i = 0; i < 3; i++) connect(m);
     expect(m.setMaxClients(37)).toBe(37);
     expect(m.mirrors.allocated).toBe(0);

@@ -1,7 +1,14 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
-import { CvarRegistry, PROTOCOL_VERSION, registerPmoveCvars } from "@game/shared";
+import {
+  CvarRegistry,
+  PmoveParams,
+  PROTOCOL_VERSION,
+  primePmoveOnce,
+  refreshPmoveParams,
+  registerPmoveCvars,
+} from "@game/shared";
 import { MatchLoop } from "../match/loop";
 import { MATCH_DEFAULT_MAX_CLIENTS, MATCH_MAX_CLIENTS, Match } from "../match/match";
 import { TickHistogram } from "../match/tickStats";
@@ -37,6 +44,11 @@ export interface StartOptions {
   readonly cwd?: string;
   /** Read admin console lines from this stream (stdin in the process); none when absent. */
   readonly console?: NodeJS.ReadableStream;
+  /**
+   * Run the pmove primer (D-040) before the first match (default true). In-process tests that
+   * start many servers pass false; `server_ok` then reports `primerMs` 0.
+   */
+  readonly primer?: boolean;
 }
 
 export interface RunningServer {
@@ -65,8 +77,9 @@ function round3(x: number): number {
 
 /**
  * Starts the dedicated server (D-029): flags and `server.cfg` → SERVER cvars and the match's
- * replicated template → the map → the match (`main`) → the listener → the loop, then logs
- * `server_ok` and `listening` (M3 design §2.14). Throws a ConfigError (or a map
+ * replicated template → the map → the pmove primer (D-040) → the match (`main`) → the listener →
+ * the loop, then logs `server_ok` (with `startupMs` and `primerMs`) and `listening` (M3 design
+ * §2.14). Throws a ConfigError (or a map
  * or bind error) instead of starting with a setting other than the one written.
  */
 export async function startServer(options: StartOptions = {}): Promise<RunningServer> {
@@ -95,6 +108,16 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   const mapName = String(cvars.get("sv_map"));
   const cmap = loadMap(mapName, mapsDir);
   const buildHash = serverBuildHash();
+  // Checked before the primer, so a bad setting stops the server without paying for it.
+  const limits = sendLimits(cvars);
+
+  // The pmove primer (D-040) runs once per process, timed here for `server_ok`: the match's own
+  // call at construction then finds it done. Parameters from the template, as the match's are.
+  const primerStart = performance.now();
+  const primerParams = new PmoveParams();
+  refreshPmoveParams(template, primerParams);
+  const primer = options.primer ?? true;
+  const primerMs = primer && primePmoveOnce(primerParams) ? performance.now() - primerStart : 0;
 
   const maxClients = cvars.getNumber("sv_maxClients", MATCH_DEFAULT_MAX_CLIENTS);
   const main: ServerMatch = {
@@ -106,6 +129,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
       strictBuild: cvars.getNumber("sv_strictBuild", 1) === 1,
       maxClients,
       log: matchLog(log, DEFAULT_MATCH),
+      primer,
     }),
     ticks: new TickHistogram(),
     traffic: new WireTraffic(),
@@ -113,7 +137,6 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   const matches: Record<string, ServerMatch> = { [DEFAULT_MATCH]: main };
   const list = [main];
 
-  const limits = sendLimits(cvars);
   const pass = new TimedPass(list, log);
 
   const listener = new WsListener({
@@ -152,7 +175,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   metrics.gc.start();
   const timers = startMetricsTimers(metrics, cvars.getNumber("sv_metricsInterval", 10), cli, log);
   loop.start();
-  log("info", "server_ok", { startupMs: round3(performance.now()) });
+  log("info", "server_ok", { startupMs: round3(performance.now()), primerMs: round3(primerMs) });
   log("info", "listening", {
     port: listener.port,
     buildHash,
