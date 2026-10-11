@@ -147,13 +147,28 @@ export class FileDemoSink implements DemoSink {
   }
 }
 
+/** The `-<utc>` part of a default name: `-YYYYMMDD-HHMMSS`. */
+const STAMP_PART = 16;
+/** The longest DEMO_NAME (`^[a-z0-9_-]{1,64}$`). */
+const DEMO_NAME_MAX = 64;
+
+/**
+ * A demo's default name (D-044, D-047): `<match>-<map>-<utc>`, so two matches recording in the
+ * same second never share a name; the `<match>-<map>` part is cut to fit DEMO_NAME's 64 chars
+ * (both are short ids: only an unusually long pair is cut, and the stamp always stays).
+ */
+export function defaultDemoName(match: string, mapName: string, stamp: string): string {
+  return `${`${match}-${mapName}`.slice(0, DEMO_NAME_MAX - STAMP_PART)}-${stamp}`;
+}
+
 /**
  * The Node server's demo files (D-044, M3 design §2.12): `record [name]` of one match opens
- * `<demosDir>/<name>.demo`, `<map>-<utc>.demo` without a name. A name must be a DEMO_NAME; the
- * path is built with `path.join` and refused unless it resolves inside the demos folder (its real
- * path, so a symlinked folder still confines), and the file is created exclusively (`wx`): an
- * existing file, or a symlink in its place, is never written through; the name then gets a `-2`,
- * `-3`, … suffix. The folder comes from the server's options, never from a command.
+ * `<demosDir>/<name>.demo`, `<match>-<map>-<utc>.demo` without a name (`defaultDemoName`). A
+ * name must be a DEMO_NAME; the path is built with `path.join` and refused unless it resolves
+ * inside the demos folder (its real path, so a symlinked folder still confines), and the file is
+ * created exclusively (`wx`): an existing file, or a symlink in its place, is never written
+ * through; the name then gets a `-2`, `-3`, … suffix. The folder comes from the server's options,
+ * never from a command.
  */
 export class DemoWriter implements DemoHost {
   /**
@@ -173,7 +188,7 @@ export class DemoWriter implements DemoHost {
   ) {}
 
   open(name: string | null, mapName: string): DemoOpened | string {
-    const base = name ?? `${mapName}-${utcStamp(this.clock())}`;
+    const base = name ?? defaultDemoName(this.match, mapName, utcStamp(this.clock()));
     if (!DEMO_NAME.test(base)) return `"${base}" is not a demo name`;
     let real: string;
     try {

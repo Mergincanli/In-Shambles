@@ -1,4 +1,5 @@
 import type { IncomingMessage } from "node:http";
+import type { Duplex } from "node:stream";
 import { type RunningServer, startServer } from "@game/server/node";
 import {
   BitReader,
@@ -15,18 +16,38 @@ import { afterEach, describe, expect, it } from "vitest";
 import { fromRoot } from "../src/paths";
 import { closeAll, TEST_PEER_HEADER, upgrade, upgradeAtOnce } from "../test/net/wsProbe";
 
+type HandleUpgrade = (
+  req: IncomingMessage,
+  socket: Duplex,
+  head: Buffer,
+  cb: (ws: unknown) => void,
+) => void;
+
 // NET-10 (b) (M3 design §5, §2.6, §2.13, D-030, D-041): the Node server in process on real
 // sockets, with lowered timeouts via its config: frames past the 2048 B cap and past the client's
 // 16384 B receive cap are closed 1009, a text frame 1003, a 1300 B INPUT is struck as oversized
 // (six kick), a connection that never says HELLO is KICKed after sv_helloTimeout, a reliable
 // flood is closed or kicked, sv_maxPerIp holds for one injected non-loopback address both one
 // after another and with 20 upgrades in flight at once (loopback exempt), and sv_allowedOrigins
-// refuses other browser origins. Unknown paths and query strings (404), sv_maxTotalClients (503)
-// and an upgrade to a match removed mid-handshake (1001) come with several matches (increment
-// 17). rcon's lockout (D-042) holds per address across reconnects: a fresh session does not
-// reset it, and a locked address is refused even with the right password.
+// refuses other browser origins. With several matches (D-047): unknown paths, names and query
+// strings get 404 before any socket opens, sv_maxTotalClients holds across matches with N
+// upgrades at once (exactly the limit admitted, the rest 503) and counts handshakes still in
+// flight, and an upgrade whose match is removed while its handshake is in flight closes 1001
+// "match closed". rcon's lockout (D-042) holds per address across reconnects: a fresh session
+// does not reset it, and a locked address is refused even with the right password.
 
 const TIMEOUT_MS = 20_000;
+
+/** Holds every handshake `s` starts, as a slow client's would be, until the test runs its entry. */
+function holdHandshakes(s: RunningServer): (() => void)[] {
+  const wss = (s.listener as unknown as { wss: { handleUpgrade: HandleUpgrade } }).wss;
+  const real = wss.handleUpgrade.bind(wss);
+  const held: (() => void)[] = [];
+  wss.handleUpgrade = (...a) => {
+    held.push(() => real(...a));
+  };
+  return held;
+}
 const PEER = "203.0.113.7";
 
 let server: RunningServer | null = null;
@@ -43,9 +64,10 @@ async function start(
   sets: readonly string[] = [],
   rconPassword = "",
   write?: (line: string) => void,
+  args: readonly string[] = [],
 ): Promise<RunningServer> {
   server = await startServer({
-    args: ["--port", "0", ...sets.flatMap((s) => ["--set", s])],
+    args: ["--port", "0", ...sets.flatMap((s) => ["--set", s]), ...args],
     cwd: fromRoot("packages", "server"),
     primer: false,
     rconPassword,
@@ -61,10 +83,10 @@ interface Closed {
   readonly reason: string;
 }
 
-/** Opens a WebSocket to `server`; resolves once it is open. */
-function open(s: RunningServer): Promise<WebSocket> {
+/** Opens a WebSocket to `server` on `path`; resolves once it is open. */
+function open(s: RunningServer, path = "/"): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${s.listener.port}/`);
+    const ws = new WebSocket(`ws://127.0.0.1:${s.listener.port}${path}`);
     ws.binaryType = "arraybuffer";
     sockets.push(ws);
     ws.onopen = () => resolve(ws);
@@ -288,6 +310,105 @@ describe("NET-10 (b): abuse on real sockets (D-030, D-041)", () => {
       const all = lines.join("\n");
       expect(all).not.toContain("right one");
       expect(all).not.toContain("guess-");
+    },
+    TIMEOUT_MS,
+  );
+
+  it(
+    "refuses unknown paths, match names and query strings with 404 before a socket opens (D-047)",
+    async () => {
+      const s = await start([], "", undefined, ["--match", "a=movement_lab"]);
+      const port = s.listener.port;
+      const paths = ["/m/b", "/m/a?x", "/?m=a", "/m", "/m/a/", "/match/a", "/m/A", "/x/../m/a"];
+      const ups = await Promise.all(paths.map((p) => upgrade(port, {}, p)));
+      expect(ups.map((u) => u.status)).toEqual(paths.map(() => 404));
+      expect(s.listener.totalConnections).toBe(0);
+      expect(s.matches.a?.match.sessionCount).toBe(0);
+      const ok = await Promise.all([upgrade(port, {}, "/"), upgrade(port, {}, "/m/a")]);
+      expect(ok.map((u) => u.status)).toEqual([101, 101]);
+      closeAll(ok);
+    },
+    TIMEOUT_MS,
+  );
+
+  it(
+    "admits exactly sv_maxTotalClients of N simultaneous upgrades across matches; the rest get 503 (D-047)",
+    async () => {
+      const s = await start(["sv_maxTotalClients=5"], "", undefined, [
+        "--match",
+        "a=movement_lab",
+        "--match",
+        "b=movement_lab",
+      ]);
+      const port = s.listener.port;
+      // Loopback is exempt from sv_maxPerIp, not from the process's total.
+      const ups = await Promise.all([
+        ...Array.from({ length: 6 }, () => upgrade(port, {}, "/m/a")),
+        ...Array.from({ length: 6 }, () => upgrade(port, {}, "/m/b")),
+      ]);
+      const statuses = ups.map((u) => u.status);
+      expect(statuses.filter((c) => c === 101)).toHaveLength(5);
+      expect(statuses.filter((c) => c === 503)).toHaveLength(7);
+      expect(s.listener.totalConnections).toBe(5);
+      closeAll(ups);
+      await until(() => s.listener.totalConnections === 0, "the closed sockets released");
+      // Freed: the next ones are admitted again.
+      const again = await upgradeAtOnce(5, port, {}, "/m/b");
+      expect(again.map((u) => u.status)).toEqual([101, 101, 101, 101, 101]);
+      closeAll(again);
+    },
+    TIMEOUT_MS,
+  );
+
+  it(
+    "counts upgrades still in their handshake against sv_maxTotalClients (503, D-047)",
+    async () => {
+      const s = await start(["sv_maxTotalClients=2"], "", undefined, [
+        "--match",
+        "a=movement_lab",
+        "--match",
+        "b=movement_lab",
+      ]);
+      const port = s.listener.port;
+      const held = holdHandshakes(s);
+      const first = [upgrade(port, {}, "/m/a"), upgrade(port, {}, "/m/b")];
+      await until(() => held.length === 2, "the held handshakes");
+      // Neither socket is open yet: the third is refused on the two in flight alone.
+      expect((await upgrade(port, {}, "/m/a")).status).toBe(503);
+      for (const go of held.splice(0)) go();
+      const ups = await Promise.all(first);
+      expect(ups.map((u) => u.status)).toEqual([101, 101]);
+      closeAll(ups);
+    },
+    TIMEOUT_MS,
+  );
+
+  it(
+    'closes an upgrade whose match was removed during its handshake 1001 "match closed" (D-047)',
+    async () => {
+      const s = await start([], "", undefined, [
+        "--match",
+        "a=movement_lab",
+        "--match",
+        "b=movement_lab",
+        "--match",
+        "c=movement_lab",
+      ]);
+      const held = holdHandshakes(s);
+      // `/` names the default match, a, when it asks: a's removal closes it too, rather than
+      // handing it to c, the default by the time its handshake completes.
+      const closing = [open(s, "/m/b").then(closed), open(s, "/").then(closed)];
+      await until(() => held.length === 2, "the held handshakes");
+      expect(s.listener.totalConnections).toBe(2);
+      expect(s.removeMatch("b")).toEqual({ ok: true, text: "match b removed (0 kicked)" });
+      expect(s.removeMatch("a")).toEqual({ ok: true, text: "match a removed (0 kicked)" });
+      for (const go of held.splice(0)) go();
+      expect(await Promise.all(closing)).toEqual([
+        { code: 1001, reason: "match closed" },
+        { code: 1001, reason: "match closed" },
+      ]);
+      expect(s.matches.c?.match.sessionCount).toBe(0);
+      await until(() => s.listener.totalConnections === 0, "the sockets released");
     },
     TIMEOUT_MS,
   );

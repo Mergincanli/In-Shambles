@@ -1,4 +1,12 @@
-import { mkdtempSync, readdirSync, readFileSync, rmSync, write, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  write,
+  writeFileSync,
+} from "node:fs";
 import type { IncomingMessage } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -421,12 +429,25 @@ describe("Node server (in process, real WebSocket)", () => {
     const connects = () => lines.filter((l) => l.ev === "connect").length;
     expect(await upgradeStatus(port, "/")).toBe(101);
     await until(() => connects() === 1, "the accepted upgrade's connect line");
-    expect(await upgradeStatus(port, "/m/main")).toBe(404);
-    expect(await upgradeStatus(port, "/nope")).toBe(404);
-    expect(await upgradeStatus(port, "/?connect=1")).toBe(404);
-    expect(await upgradeStatus(port, "//")).toBe(404);
+    // The default match by name too (D-047).
+    expect(await upgradeStatus(port, "/m/main")).toBe(101);
+    await until(() => connects() === 2, "the named upgrade's connect line");
+    for (const path of [
+      "/nope",
+      "/?connect=1",
+      "//",
+      "/m/nope",
+      "/m/",
+      "/m/main/",
+      "/m/Main",
+      "/m/main?x=1",
+      "/m/__proto__",
+      "/m/constructor",
+    ]) {
+      expect(await upgradeStatus(port, path), path).toBe(404);
+    }
     // None of the refused upgrades reached a match.
-    expect(connects()).toBe(1);
+    expect(connects()).toBe(2);
     expect((await httpJson(port, "/nope")).status).toBe(404);
     expect((await httpJson(port, "/status", "POST")).status).toBe(405);
   });
@@ -547,19 +568,166 @@ describe("sv_autoRecord (D-044)", () => {
         setTimeout(() => write(fd, buf, off, len, pos, (e, n) => cb(e, n)), 150),
     });
     const match = server.matches.main?.match;
-    expect(match?.recording).toMatch(/^demos\/arena_greybox-\d{8}-\d{6}\.demo$/);
+    expect(match?.recording).toMatch(/^demos\/main-arena_greybox-\d{8}-\d{6}\.demo$/);
     await until(() => (match?.serverTick ?? 0) > 0, "a tick");
-    const sink = server.demos.last;
+    const demos = server.matches.main?.demos;
+    const sink = demos?.last;
     await server.stop();
     // stop() resolves only once the demo is on disk and closed.
     expect(sink?.written).toBeGreaterThan(0);
     expect(sink?.flushed).toBe(sink?.written);
-    expect(server.demos.pending.size).toBe(0);
+    expect(demos?.pending.size).toBe(0);
     const files = readdirSync(join(root, "demos"));
     expect(files).toHaveLength(1);
     const check = validateDemo(
       new Uint8Array(readFileSync(join(root, "demos", files[0] as string))),
     );
     expect(check.ok, check.ok ? "" : check.error).toBe(true);
+  });
+});
+
+describe("a refused start (D-044, D-047)", () => {
+  it("leaves no demo file behind: a bad cfg line after a record, a bind error, sv_autoRecord", async () => {
+    const root = mkdtempSync(join(tmpdir(), "server-refused-"));
+    onTestFinished(() => rmSync(root, { recursive: true, force: true }));
+    const demosDir = join(root, "demos");
+    const run = (port: number, cfg: string) => {
+      writeFileSync(join(root, "r.cfg"), cfg);
+      return startServer({
+        args: ["--port", String(port), "--cfg", join(root, "r.cfg"), "--set", "sv_autoRecord=1"],
+        cwd: serverDir,
+        primer: false,
+        rconPassword: "",
+        demosDir,
+      });
+    };
+    const files = () => (existsSync(demosDir) ? readdirSync(demosDir) : []);
+    await expect(run(0, "match_add a movement_lab\n@zz status\n")).rejects.toThrow(/no match zz/);
+    await expect(
+      run(0, "match_add a movement_lab\nmatch_add b movement_lab\n@a record x\n@b nope\n"),
+    ).rejects.toThrow(/r\.cfg:4: /);
+    expect(files()).toEqual([]);
+    const taken = await run(0, "match_add a movement_lab\n");
+    onTestFinished(() => taken.stop());
+    expect(files()).toHaveLength(1);
+    await expect(run(taken.listener.port, "match_add b movement_lab\n")).rejects.toThrow(
+      /EADDRINUSE/,
+    );
+    expect(files()).toHaveLength(1);
+  });
+});
+
+describe("several matches per process (D-047): the fast smoke", () => {
+  it("serves two matches by path, lists them, and removes one with its clients KICKed", async () => {
+    const input = new PassThrough();
+    const { server, lines, port } = await start(
+      ["--match", "a=arena_greybox", "--match", "b=movement_lab:2"],
+      input,
+    );
+    expect(lines[1]?.matches).toEqual([
+      { name: "a", map: "arena_greybox" },
+      { name: "b", map: "movement_lab" },
+    ]);
+    // `/` is the default match, the first created; `/m/<name>` any match.
+    const a = await client(port, "/");
+    const b = await client(port, "/m/b");
+    for (const c of [a, b]) c.hello(server.buildHash);
+    await poll(a, () => a.welcomes.length === 1, "a's WELCOME");
+    await poll(b, () => b.welcomes.length === 1, "b's WELCOME");
+    expect([a.welcomes[0]?.mapName, a.welcomes[0]?.clientId]).toEqual(["arena_greybox", 0]);
+    expect([b.welcomes[0]?.mapName, b.welcomes[0]?.clientId]).toEqual(["movement_lab", 0]);
+    expect(((await httpJson(port, "/status")).body as { matches: unknown[] }).matches).toEqual([
+      { name: "a", map: "arena_greybox", players: 1, maxClients: 32 },
+      { name: "b", map: "movement_lab", players: 1, maxClients: 2 },
+    ]);
+    expect(await upgradeStatus(port, "/m/main")).toBe(404);
+    expect(lines.filter((l) => l.ev === "connect").map((l) => l.match)).toEqual(["a", "b"]);
+
+    input.write("matches\n@b status\nmatch_remove b\nmatch_remove a\n@a match_remove a\n");
+    await until(() => lines.filter((l) => l.ev === "console").length === 5, "the replies");
+    const replies = lines.filter((l) => l.ev === "console").map((l) => [l.match, l.text]);
+    expect(replies).toEqual([
+      [undefined, "a: arena_greybox, 1 of 32 players\nb: movement_lab, 1 of 2 players"],
+      ["b", expect.stringMatching(/^movement_lab, tick \d+, 1 of 2 players\n#0 /)],
+      [undefined, "match b removed (1 kicked)"],
+      [undefined, "match_remove: a is the last match; it cannot be removed"],
+      [undefined, "match_remove is a process command: no @<match> prefix"],
+    ]);
+    expect(lines.find((l) => l.ev === "match_remove")).toMatchObject({ match: "b", kicked: 1 });
+    await poll(b, () => b.closed !== null, "b's close");
+    expect(b.kicks.map((k) => k.reason)).toEqual(["match closed"]);
+    expect(Object.keys(server.matches)).toEqual(["a"]);
+    expect(await upgradeStatus(port, "/m/b")).toBe(404);
+    // a plays on.
+    a.ready();
+    await poll(a, () => a.snapshots.length >= 3, "a's snapshots");
+    expect(a.kicks).toEqual([]);
+  });
+
+  it("builds matches from server.cfg and --match, the template before the first match_add (D-047)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "server-matches-"));
+    onTestFinished(() => rmSync(dir, { recursive: true, force: true }));
+    const cfg = join(dir, "m.cfg");
+    writeFileSync(
+      cfg,
+      [
+        "set pm_gravity 700",
+        "match_add a arena_greybox",
+        // After a match_add: a replicated set goes to the default match, a SERVER one to the
+        // process.
+        "set pm_jumpVelocity 300",
+        "set sv_maxPerIp 5",
+        "match_add b movement_lab 2",
+        "@b set pm_gravity 500",
+        "@b set pm_airAccelerate 5",
+        "set pm_airAccelerate 4",
+        "@c set sv_cheats 1",
+      ].join("\n"),
+    );
+    const { server } = await start([
+      "--cfg",
+      cfg,
+      "--match",
+      "c=movement_lab",
+      // The command line overrides the cfg (D-029), its match lines included.
+      "--set",
+      "pm_airAccelerate=2",
+    ]);
+    const m = (name: string) => server.matches[name]?.match;
+    expect(server.set.list.map((x) => x.name)).toEqual(["a", "b", "c"]);
+    expect([m("a")?.cvars.get("pm_gravity"), m("a")?.cvars.get("pm_jumpVelocity")]).toEqual([
+      700, 300,
+    ]);
+    expect([m("b")?.cvars.get("pm_gravity"), m("b")?.cvars.get("pm_jumpVelocity")]).toEqual([
+      500, 270,
+    ]);
+    expect([m("c")?.cvars.get("pm_gravity"), m("c")?.cvars.get("sv_cheats")]).toEqual([700, 1]);
+    expect([m("a")?.maxClients, m("b")?.maxClients]).toEqual([32, 2]);
+    expect(server.cvars.get("sv_maxPerIp")).toBe(5);
+    // Each match its own registry; the template stays as configured.
+    expect(server.template.get("pm_gravity")).toBe(700);
+    expect(server.template.get("pm_jumpVelocity")).toBe(270);
+    for (const name of ["a", "b", "c"]) expect(m(name)?.cvars.get("pm_airAccelerate")).toBe(2);
+    expect(server.template.get("pm_airAccelerate")).toBe(2);
+  });
+
+  it("refuses a configuration with too many matches, a name twice or a line for no match", async () => {
+    const run = (args: string[]) =>
+      startServer({ args: ["--port", "0", ...args], cwd: serverDir, primer: false });
+    await expect(
+      run(["--set", "sv_maxMatches=1", "--match", "a=movement_lab", "--match", "b=movement_lab"]),
+    ).rejects.toThrow("2 matches configured; sv_maxMatches is 1");
+    await expect(run(["--match", "a=movement_lab", "--match", "a=arena_greybox"])).rejects.toThrow(
+      "--match: match a exists",
+    );
+    await expect(run(["--match", "a=nope"])).rejects.toThrow(/map nope: cannot read/);
+    const dir = mkdtempSync(join(tmpdir(), "server-matches-"));
+    onTestFinished(() => rmSync(dir, { recursive: true, force: true }));
+    writeFileSync(join(dir, "x.cfg"), "@x status\n");
+    await expect(run(["--cfg", join(dir, "x.cfg")])).rejects.toThrow(/x\.cfg:1: no match x$/);
+    writeFileSync(join(dir, "y.cfg"), "@main set sv_port 1\n");
+    await expect(run(["--cfg", join(dir, "y.cfg")])).rejects.toThrow(
+      /y\.cfg:1: unknown cvar sv_port$/,
+    );
   });
 });

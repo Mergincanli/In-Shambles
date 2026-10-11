@@ -133,7 +133,15 @@ export function checkCount(count: number, human: boolean, match: StatusMatch): s
   return `${who}${already} > maxClients ${match.maxClients} on match ${match.name}`;
 }
 
-/** The `/status` URL of a server's WebSocket URL (`ws://host:port/…` → `http://host:port/status`). */
+/** A named match's path (D-047): the server's own rule (`/m/<name>`, wsListener.ts). */
+const MATCH_PATH = /^\/m\/([a-z0-9_]{1,32})$/;
+
+/**
+ * The `/status` URL of a server's WebSocket URL (`ws://host:port/…` → `http://host:port/status`).
+ * The URL must address a match the way the server's listener does: `/` (or nothing) for the
+ * default match, `/m/<name>` for a named one, no query string (D-047); anything else the server
+ * would refuse with a 404, so it is refused here with the reason.
+ */
 export function statusUrl(server: string, page = "status"): string {
   let u: URL;
   try {
@@ -142,13 +150,21 @@ export function statusUrl(server: string, page = "status"): string {
     throw new BotsRefused(`--server ${server}: not a URL (expected ws://host:port)`);
   }
   if (u.protocol !== "ws:") throw new BotsRefused(`--server ${server}: expected ws://host:port`);
+  // URL reports a bare `?` or `#` as "", so the raw text is checked too (a fragment would make
+  // WebSocket throw at connect, a query string is refused by the server).
+  const extra = server.includes("?") || server.includes("#");
+  if (extra || (u.pathname !== "/" && !MATCH_PATH.test(u.pathname))) {
+    throw new BotsRefused(
+      `--server ${server}: expected ws://host:port or ws://host:port/m/<match> (D-047)`,
+    );
+  }
   return `http://${u.host}/${page}`;
 }
 
-/** The match a WebSocket URL addresses: `/m/<name>` names one (D-047), anything else the default. */
+/** The match a WebSocket URL addresses: `/m/<name>` names one (D-047), `/` the default. */
 export function matchOf(server: string, status: ServerStatus): StatusMatch {
   const path = new URL(server).pathname;
-  const named = /^\/m\/([a-z0-9_]{1,32})$/.exec(path)?.[1];
+  const named = MATCH_PATH.exec(path)?.[1];
   const match =
     named === undefined ? status.matches[0] : status.matches.find((m) => m.name === named);
   if (match === undefined) {

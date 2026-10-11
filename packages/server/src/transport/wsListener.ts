@@ -14,11 +14,13 @@ import {
 /** What the listener serves: the matches sockets join and the two JSON pages. */
 export interface ListenerTarget {
   /**
-   * Whether a match answers to `name`, the match part of an upgrade path ("" for `/`, the
-   * default match). Asked before the upgrade (HTTP 404 when false) and again once it completes.
+   * The name of the match that answers to `name`, the match part of an upgrade path ("" for `/`:
+   * the default match's name), or null (HTTP 404). Asked before the upgrade and, with the name it
+   * gave, again once the upgrade completes, so a `/` upgrade whose default match was removed
+   * meanwhile closes 1001 rather than joining whichever match is the default by then.
    */
-  hasMatch(name: string): boolean;
-  /** A socket upgraded for match `name` (`hasMatch` was just true): hand it to the match. */
+  matchFor(name: string): string | null;
+  /** A socket upgraded for match `name` (`matchFor(name)` was just `name`): hand it over. */
   accept(name: string, transport: WsTransport, remoteAddress: string): void;
   /** `GET /status`. */
   status(): unknown;
@@ -35,6 +37,11 @@ export class AdmissionLimits {
   maxPerIp = 8;
   /** Browser origins allowed to connect; empty = any. A request without Origin always passes. */
   allowedOrigins: readonly string[] = [];
+  /**
+   * Connections the whole process may hold across its matches (`sv_maxTotalClients`, D-047),
+   * upgrades still in flight included; loopback counts too.
+   */
+  maxTotal = 64;
 }
 
 export interface ListenOptions {
@@ -75,13 +82,18 @@ export function normalizeOrigin(origin: string): string {
   return o.endsWith("/") ? o.slice(0, -1) : o;
 }
 
+/** `/m/<name>`: a named match's path (D-047; the name as `MATCH_NAME` in node/matchSet.ts). */
+const MATCH_PATH = /^\/m\/([a-z0-9_]{1,32})$/;
+
 /**
- * The match name an upgrade path addresses, or null (HTTP 404). Only `/` (the default match) in
- * this version; a query string is refused, so nothing rides in on the URL.
+ * The match name an upgrade path addresses, or null (HTTP 404): "" for `/` (the default match),
+ * the name for `/m/<name>` (D-047, M3 design §2.17). Anything else is refused, a query string
+ * too, so nothing rides in on the URL.
  */
 export function matchNameForPath(url: string | undefined): string | null {
   if (url === undefined || url.includes("?")) return null;
-  return url === "/" ? "" : null;
+  if (url === "/") return "";
+  return MATCH_PATH.exec(url)?.[1] ?? null;
 }
 
 /** Writes a bare HTTP refusal on a socket that asked to upgrade, and drops it. */
@@ -104,10 +116,11 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
  * behind a single `upgrade` handler, so every check runs before a socket opens (ws refuses
  * `server` and `noServer` together, so it can't attach a second, unchecked handler). In order the
  * handler resolves the path to a match (else 404), refuses a browser origin `sv_allowedOrigins`
- * doesn't list (403) and an address already holding `sv_maxPerIp` connections (429; loopback
- * exempt), and only then calls `handleUpgrade`. An address's count covers its upgrades in flight
- * as well as its open sockets: it is taken before the handshake and given back when the TCP
- * socket closes, however it ends, so simultaneous upgrades can't slip past the limit (D-041).
+ * doesn't list (403), an address already holding `sv_maxPerIp` connections (429; loopback
+ * exempt) and, once the process holds `sv_maxTotalClients` across its matches, any upgrade (503
+ * "server full", D-047), and only then calls `handleUpgrade`. Both counts cover upgrades in
+ * flight as well as open sockets: each is taken before the handshake and given back when the TCP
+ * socket closes, however it ends, so simultaneous upgrades can't slip past a limit (D-041).
  * Once the upgrade completes the handler looks the match up again (a match removed meanwhile
  * closes the socket 1001). Frames past MAX_CLIENT_MESSAGE_BYTES are closed by ws (1009); no
  * compression; no automatic pongs; ws sets TCP noDelay. Plain HTTP serves `GET /status` and
@@ -121,6 +134,8 @@ export class WsListener {
   private closing = false;
   /** Connections per counted address (open or upgrading). */
   private readonly perIp = new Map<string, number>();
+  /** Connections of every address, loopback included (open or upgrading; `sv_maxTotalClients`). */
+  private total = 0;
   private readonly admission: AdmissionLimits;
   /** Called when the last open socket closes (shutdown waits on it). */
   private drained: (() => void) | null = null;
@@ -161,6 +176,11 @@ export class WsListener {
   /** Connections (open or upgrading) counted for `ip` (0 for a loopback address). */
   connectionsFrom(ip: string): number {
     return this.perIp.get(ip) ?? 0;
+  }
+
+  /** Connections (open or upgrading) of the whole process, against `sv_maxTotalClients`. */
+  get totalConnections(): number {
+    return this.total;
   }
 
   /** Binds the port; rejects on a bind error (EADDRINUSE, EACCES). */
@@ -212,8 +232,9 @@ export class WsListener {
   private upgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void {
     socket.on("error", () => socket.destroy());
     const target = this.options.target;
-    const name = matchNameForPath(req.url);
-    if (name === null || !target.hasMatch(name)) {
+    const path = matchNameForPath(req.url);
+    const name = path === null ? null : target.matchFor(path);
+    if (name === null) {
       refuseUpgrade(socket, 404, "Not Found");
       return;
     }
@@ -236,12 +257,24 @@ export class WsListener {
         refuseUpgrade(socket, 429, "Too Many Requests");
         return;
       }
-      this.perIp.set(remoteAddress, held + 1);
+    }
+    // Counted the same way across every match (D-047): taken before the handshake, given back
+    // when the TCP socket closes.
+    if (this.total >= this.admission.maxTotal) {
+      refuseUpgrade(socket, 503, "server full");
+      return;
+    }
+    this.total++;
+    if (!isLoopback(remoteAddress)) {
+      this.perIp.set(remoteAddress, (this.perIp.get(remoteAddress) ?? 0) + 1);
       socket.once("close", () => this.release(remoteAddress));
     }
+    socket.once("close", () => {
+      this.total--;
+    });
     this.wss.handleUpgrade(req, socket, head, (ws) => {
       ignoreWsErrors(ws);
-      if (this.closing || !target.hasMatch(name)) {
+      if (this.closing || target.matchFor(name) !== name) {
         ws.close(WS_CLOSE_GOING_AWAY, this.closing ? "server shutting down" : "match closed");
         return;
       }

@@ -46,6 +46,11 @@ export class MirrorPool {
     this.free.push(m);
   }
 
+  /** Drops the spare mirrors (a closed match, D-047): the memory goes back to the process. */
+  clear(): void {
+    this.free.length = 0;
+  }
+
   /** Mirrors waiting to be reused. */
   get spare(): number {
     return this.free.length;

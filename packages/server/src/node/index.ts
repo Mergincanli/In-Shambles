@@ -24,22 +24,28 @@ export {
 export { isBundledServer, serverBuildHash } from "./buildHash";
 export {
   admissionLimits,
+  type CfgEntry,
   type CommandLine,
   ConfigError,
+  type MatchSpec,
+  matchSpec,
   parseCommandLine,
   parseServerCfg,
   sessionLimits,
 } from "./config";
+export { type ConsoleHost, runConsoleLine } from "./console";
 export {
   DEMO_WRITE_BUFFER,
   type DemoWriteFn,
   DemoWriter,
+  defaultDemoName,
   defaultDemosDir,
   FileDemoSink,
   utcStamp,
 } from "./demoWriter";
 export { createNodeHost, type PassClock, type ServerMatch, TimedPass } from "./host";
 export { createJsonLog, type JsonLog } from "./log";
+export { MATCH_NAME, MatchSet } from "./matchSet";
 export {
   GcTracker,
   GcWindow,
@@ -47,5 +53,12 @@ export {
   type MetricsSources,
   ServerMetrics,
 } from "./metrics";
-export { DEFAULT_MATCH, type RunningServer, type StartOptions, startServer } from "./server";
+export {
+  DEFAULT_MATCH,
+  type HostedMatch,
+  MATCH_CLOSED,
+  type RunningServer,
+  type StartOptions,
+  startServer,
+} from "./server";
 export { DEFAULT_PORT, registerServerCvars } from "./serverCvars";

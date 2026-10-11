@@ -8,17 +8,19 @@ import { summaryMarkdown } from "./summary";
  * server, then a JSON + markdown summary in `reports/bots/` with PASS/FAIL against docs/10 §4 and
  * the prediction's health.
  *
- *   pnpm bots --count N --profile P --minutes M --map X [--server ws://host:port] [--seed S]
- *             [--strict] [--out dir]
+ *   pnpm bots --count N --profile P --minutes M --map X [--server ws://host:port[/m/<match>]]
+ *             [--seed S] [--strict] [--out dir]
  *
- * Without `--server` it starts the server itself. Exit codes: 0 done (FAILs only reported), 1 a
- * FAIL under `--strict`, 2 a refused run (bad flag, a count the match can't hold) or an error.
+ * Without `--server` it starts the server itself; `/m/<match>` joins a named match of a server
+ * that runs several (D-047), the bare address its default match. Exit codes: 0 done (FAILs only
+ * reported), 1 a FAIL under `--strict`, 2 a refused run (bad flag, a count the match can't hold)
+ * or an error.
  * Ctrl+C ends the measured window early and still writes the summary.
  */
 
 export const BOTS_USAGE =
-  "usage: pnpm bots --count N --profile P --minutes M --map X [--server ws://host:port] " +
-  "[--seed S] [--strict] [--out dir]";
+  "usage: pnpm bots --count N --profile P --minutes M --map X " +
+  "[--server ws://host:port[/m/<match>]] [--seed S] [--strict] [--out dir]";
 
 /** The options a command line asks for (defaults: 16 bots, wan-100-loss1, 2 min, arena_greybox). */
 export function parseBotArgs(

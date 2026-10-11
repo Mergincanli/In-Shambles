@@ -29,7 +29,7 @@ export function registerServerCvars(reg: CvarRegistry): void {
     name: "sv_map",
     type: "string",
     default: "arena_greybox", // design
-    description: "Map of the server's match (content/maps/<name>.cmap)",
+    description: "Map of the match `main` when no match is configured (content/maps/<name>.cmap)",
     flags: CvarFlag.SERVER,
   });
   reg.register({
@@ -40,7 +40,28 @@ export function registerServerCvars(reg: CvarRegistry): void {
     default: MATCH_DEFAULT_MAX_CLIENTS,
     min: 1,
     max: MATCH_MAX_CLIENTS,
-    description: "Players the match admits (client ids are the lowest free below it)",
+    description:
+      "Players a match admits unless its match_add says otherwise (ids the lowest free below it)",
+    flags: CvarFlag.SERVER,
+  });
+  // Several matches per process (D-047, M3 design §2.17).
+  reg.register({
+    name: "sv_maxMatches",
+    type: "int",
+    default: 4, // ESTIMATE (D-047)
+    min: 1,
+    max: 16,
+    description: "Matches the process may run at once (server.cfg, --match and match_add)",
+    flags: CvarFlag.SERVER,
+  });
+  reg.register({
+    name: "sv_maxTotalClients",
+    type: "int",
+    default: 64, // ESTIMATE (D-047): one full match
+    min: 1,
+    max: 1024,
+    description:
+      "Connections (open or upgrading) the process holds across its matches; HTTP 503 past it",
     flags: CvarFlag.SERVER,
   });
   reg.register({
@@ -164,7 +185,8 @@ export function registerServerCvars(reg: CvarRegistry): void {
     default: 0, // design (D-044): a toggle
     min: 0,
     max: 1,
-    description: "1: record a demo of the match from startup to shutdown (demos/<map>-<utc>.demo)",
+    description:
+      "1: record a demo of every match from its start to its end (demos/<match>-<map>-<utc>.demo)",
     flags: CvarFlag.SERVER,
   });
   reg.register({

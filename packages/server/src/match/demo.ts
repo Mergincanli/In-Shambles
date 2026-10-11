@@ -30,8 +30,9 @@ export interface DemoSink {
 
 /**
  * What `record` asks of the match's host (D-044): a sink for a demo named `name` (already checked
- * against DEMO_NAME), or for the host's default name (`<map>-<utc>`) when null. Returns the sink
- * and the file it writes (for the reply and the logs), or why it can't.
+ * against DEMO_NAME), or for the host's default name (the Node server's `<match>-<map>-<utc>`)
+ * when null. Returns the sink and the file it writes (for the reply and the logs), or why it
+ * can't.
  */
 export interface DemoHost {
   open(name: string | null, mapName: string): DemoOpened | string;

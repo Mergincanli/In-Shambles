@@ -184,7 +184,7 @@ describe.concurrent("per-tick paths under native ES modules", () => {
     expect(r.clean, r.attempts.join("; ")).toBe(true);
   }, 30_000);
 
-  it("the Node server's TimedPass and its tick histograms allocate nothing per pass (D-029)", async ({
+  it("the Node server's MatchSet, its TimedPass and the tick histograms allocate nothing per pass (D-029, D-047)", async ({
     expect,
   }) => {
     const r = await runChild("timedPass");

@@ -52,14 +52,15 @@ export function upgrade(
   });
 }
 
-/** `n` upgrades sent at once (none waits for another's answer), in sending order. */
+/** `n` upgrades of `path` sent at once (none waits for another's answer), in sending order. */
 export function upgradeAtOnce(
   n: number,
   port: number,
   headers: Readonly<Record<string, string>> = {},
+  path = "/",
 ): Promise<Upgrade[]> {
   const all: Promise<Upgrade>[] = [];
-  for (let i = 0; i < n; i++) all.push(upgrade(port, headers));
+  for (let i = 0; i < n; i++) all.push(upgrade(port, headers, path));
   return Promise.all(all);
 }
 

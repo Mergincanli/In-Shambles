@@ -1,7 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startServer } from "@game/server/node";
+import { MATCH_NAME, startServer } from "@game/server/node";
 import { describe, expect, it } from "vitest";
 import { BOTS_USAGE, botsMain, exitCode, parseBotArgs } from "../../src/bots/command";
 import {
@@ -140,6 +140,30 @@ describe("the count check (maxClients from /status)", () => {
     expect(() => matchOf("ws://127.0.0.1:1/m/duel", status)).toThrow(/no match duel/);
     expect(statusUrl("ws://example.org:28700/m/lab")).toBe("http://example.org:28700/status");
     expect(() => statusUrl("wss://example.org")).toThrow(BotsRefused);
+    // Only what the server's listener addresses (D-047): `/`, `/m/<name>`, no query string.
+    for (const bad of [
+      "ws://127.0.0.1:1/lab",
+      "ws://127.0.0.1:1/m/Lab",
+      "ws://127.0.0.1:1/m/lab/",
+      "ws://127.0.0.1:1/?m=lab",
+      "ws://127.0.0.1:1/m/lab#x",
+      "ws://127.0.0.1:1/m/lab#",
+      "ws://127.0.0.1:1/m/lab?",
+    ]) {
+      expect(() => statusUrl(bad), bad).toThrow(/expected ws:\/\/host:port or .*\/m\/<match>/);
+    }
+    // The server's own name rule, name for name.
+    for (const n of ["lab", "a_1", "x".repeat(32), "x".repeat(33), "Lab", "a-b", "__proto__"]) {
+      const ok = (() => {
+        try {
+          statusUrl(`ws://127.0.0.1:1/m/${n}`);
+          return true;
+        } catch {
+          return false;
+        }
+      })();
+      expect(ok, n).toBe(MATCH_NAME.test(n));
+    }
   });
 });
 
@@ -180,26 +204,36 @@ describe.concurrent("a bots run", () => {
   it("refuses a count over the match's maxClients before connecting", async ({
     onTestFinished,
   }) => {
+    // Two matches (D-047): the check reads the match the URL addresses.
     const server = await startServer({
-      args: ["--port", "0", "--set", "sv_maxClients=4"],
+      args: ["--port", "0", "--set", "sv_maxClients=4"].concat([
+        "--match",
+        "a=movement_lab",
+        "--match",
+        "b=movement_lab:3",
+      ]),
       cwd: fromRoot("packages", "server"),
       primer: false,
     });
     onTestFinished(() => server.stop());
-    const url = `ws://127.0.0.1:${server.listener.port}/`;
-    const run = runBots({
-      count: 5,
-      profile: "lan",
-      minutes: 0.05,
-      map: "arena_greybox",
-      server: url,
-      seed: 1,
-      human: false,
-      outDir: null,
-      primer: false,
-    });
-    await expect(run).rejects.toThrow(new BotsRefused("count 5 > maxClients 4 on match main"));
-    expect(server.matches.main?.match.sessionCount).toBe(0);
+    const run = (count: number, path: string) =>
+      runBots({
+        count,
+        profile: "lan",
+        minutes: 0.05,
+        map: "movement_lab",
+        server: `ws://127.0.0.1:${server.listener.port}${path}`,
+        seed: 1,
+        human: false,
+        outDir: null,
+        primer: false,
+      });
+    await expect(run(5, "/")).rejects.toThrow(new BotsRefused("count 5 > maxClients 4 on match a"));
+    await expect(run(4, "/m/b")).rejects.toThrow(
+      new BotsRefused("count 4 > maxClients 3 on match b"),
+    );
+    expect(server.matches.a?.match.sessionCount).toBe(0);
+    expect(server.matches.b?.match.sessionCount).toBe(0);
   });
 
   it("plays 3 bots against a server and writes the JSON + markdown summary", async ({

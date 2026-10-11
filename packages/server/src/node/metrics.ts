@@ -114,6 +114,27 @@ class MatchCounts {
   }
 }
 
+/**
+ * One match's window bases (D-047: a match joins or leaves the process at any time): its counters
+ * at its run window's start, at the process run window's start (the process's traffic), at the
+ * interval's start, and a reading of now.
+ */
+class MatchWindows {
+  readonly runBase = new MatchCounts();
+  readonly processBase = new MatchCounts();
+  readonly intervalBase = new MatchCounts();
+  readonly current = new MatchCounts();
+  /** Its run window's start (ms): the process's, or its own `metrics reset`'s. */
+  runStart = 0;
+
+  constructor(m: ServerMatch, now: number) {
+    this.runBase.read(m);
+    this.processBase.read(m);
+    this.intervalBase.read(m);
+    this.runStart = now;
+  }
+}
+
 /** Memory in bytes, as `process.memoryUsage()` reports it. */
 export interface MemorySample {
   readonly heapUsed: number;
@@ -122,6 +143,10 @@ export interface MemorySample {
 }
 
 export interface MetricsSources {
+  /**
+   * The process's matches, read live: a match added later gets its windows from `addMatch` (or
+   * when first seen), and one taken out must be passed to `removeMatch` first.
+   */
   readonly matches: readonly ServerMatch[];
   readonly pass: TimedPass;
   /** The loop's counters (dropped ticks, yields). */
@@ -199,13 +224,13 @@ export class ServerMetrics {
   private readonly t = new Float64Array(6);
   /** Peak heapUsed + external and peak RSS (bytes): [0..1] the run window, [2..3] the interval. */
   private readonly peaks = new Float64Array(4);
-  private readonly runBase: MatchCounts[];
-  /** Each match's counters at the process run window's start: the process's traffic. */
-  private readonly processBase: MatchCounts[];
-  /** Each match's run window start (ms): the process's, or its own `metrics reset`'s. */
-  private readonly matchRunStart: Float64Array;
-  private readonly intervalBase: MatchCounts[];
-  private readonly current: MatchCounts[];
+  /** Each match's window bases, by match. */
+  private readonly windows = new Map<ServerMatch, MatchWindows>();
+  /**
+   * The traffic of matches removed inside the windows (D-047), so the process's bytes never step
+   * back: [0] in and [1] out in the run window, [2] in and [3] out in the interval.
+   */
+  private readonly retired = new Float64Array(4);
   /** Loop counters at the run window's and the interval's start: dropped, yields. */
   private readonly loopBase = new Float64Array(4);
 
@@ -216,12 +241,6 @@ export class ServerMetrics {
     this.now = src.now ?? (() => performance.now());
     this.memory = src.memory ?? (() => process.memoryUsage());
     this.cpuMicros = src.cpuMicros ?? processCpuMicros;
-    const n = src.matches.length;
-    this.runBase = Array.from({ length: n }, () => new MatchCounts());
-    this.processBase = Array.from({ length: n }, () => new MatchCounts());
-    this.matchRunStart = new Float64Array(n);
-    this.intervalBase = Array.from({ length: n }, () => new MatchCounts());
-    this.current = Array.from({ length: n }, () => new MatchCounts());
     this.t[0] = this.now();
     this.resetRun();
     this.resetInterval();
@@ -243,10 +262,46 @@ export class ServerMetrics {
     const loop = src.loop();
     this.loopBase[0] = loop.dropped;
     this.loopBase[1] = loop.yields;
+    this.retired[0] = 0;
+    this.retired[1] = 0;
     for (let i = 0; i < src.matches.length; i++) {
-      (this.processBase[i] as MatchCounts).read(src.matches[i] as ServerMatch);
-      this.resetMatchAt(i, this.t[1] as number);
+      const m = src.matches[i] as ServerMatch;
+      this.windowsOf(m).processBase.read(m);
+      this.resetMatch(m, this.t[1] as number);
     }
+  }
+
+  /**
+   * A match that joined the process (D-047's `match_add`): its windows start now, from its
+   * counters as they are. Idempotent.
+   */
+  addMatch(m: ServerMatch): void {
+    this.windowsOf(m);
+  }
+
+  /**
+   * A match leaving the process (`match_remove`), before it leaves `matches`: its traffic stays in
+   * the process's run window and interval; its own windows go.
+   */
+  removeMatch(m: ServerMatch): void {
+    const w = this.windows.get(m);
+    if (w === undefined) return;
+    const c = w.current.read(m);
+    this.retired[0] = (this.retired[0] as number) + c.bytesIn - w.processBase.bytesIn;
+    this.retired[1] = (this.retired[1] as number) + c.bytesOut - w.processBase.bytesOut;
+    this.retired[2] = (this.retired[2] as number) + c.bytesIn - w.intervalBase.bytesIn;
+    this.retired[3] = (this.retired[3] as number) + c.bytesOut - w.intervalBase.bytesOut;
+    this.windows.delete(m);
+  }
+
+  /** `m`'s windows, started now when it has none yet. */
+  private windowsOf(m: ServerMatch): MatchWindows {
+    let w = this.windows.get(m);
+    if (w === undefined) {
+      w = new MatchWindows(m, this.now());
+      this.windows.set(m, w);
+    }
+    return w;
   }
 
   /**
@@ -257,19 +312,20 @@ export class ServerMetrics {
   resetMatchRun(name: string): boolean {
     const matches = this.src.matches;
     for (let i = 0; i < matches.length; i++) {
-      if ((matches[i] as ServerMatch).name !== name) continue;
-      this.resetMatchAt(i, this.now());
+      const m = matches[i] as ServerMatch;
+      if (m.name !== name) continue;
+      this.resetMatch(m, this.now());
       return true;
     }
     return false;
   }
 
-  /** Match `i`'s run window from `at` (ms; the process's start when the whole run resets). */
-  private resetMatchAt(i: number, at: number): void {
-    const m = this.src.matches[i] as ServerMatch;
-    this.matchRunStart[i] = at;
+  /** `m`'s run window from `at` (ms; the process's start when the whole run resets). */
+  private resetMatch(m: ServerMatch, at: number): void {
+    const w = this.windowsOf(m);
+    w.runStart = at;
     m.ticks.resetRun();
-    (this.runBase[i] as MatchCounts).read(m);
+    w.runBase.read(m);
   }
 
   /**
@@ -302,17 +358,19 @@ export class ServerMetrics {
     const loop = src.loop();
     const memory = this.sampleMemory();
     const cpu = this.cpuMicros() - (this.t[3] as number);
-    let bytesIn = 0;
-    let bytesOut = 0;
-    const matches: Record<string, unknown> = {};
+    let bytesIn = this.retired[0] as number;
+    let bytesOut = this.retired[1] as number;
+    // A null-prototype record: a match name such as "__proto__" is an own key like any other.
+    const matches: Record<string, unknown> = Object.create(null);
     for (let i = 0; i < src.matches.length; i++) {
       const m = src.matches[i] as ServerMatch;
-      const c = (this.current[i] as MatchCounts).read(m);
-      const b = this.runBase[i] as MatchCounts;
-      const p = this.processBase[i] as MatchCounts;
+      const w = this.windowsOf(m);
+      const c = w.current.read(m);
+      const b = w.runBase;
+      const p = w.processBase;
       bytesIn += c.bytesIn - p.bytesIn;
       bytesOut += c.bytesOut - p.bytesOut;
-      const matchS = (now - (this.matchRunStart[i] as number)) / 1000;
+      const matchS = (now - w.runStart) / 1000;
       matches[m.name] = {
         runS: round3(matchS),
         map: m.match.mapName,
@@ -369,12 +427,13 @@ export class ServerMetrics {
     const s = (this.now() - (this.t[2] as number)) / 1000;
     const memory = this.sampleMemory();
     const cpu = this.cpuMicros() - (this.t[4] as number);
-    let bytesIn = 0;
-    let bytesOut = 0;
+    let bytesIn = this.retired[2] as number;
+    let bytesOut = this.retired[3] as number;
     for (let i = 0; i < src.matches.length; i++) {
       const m = src.matches[i] as ServerMatch;
-      const c = (this.current[i] as MatchCounts).read(m);
-      const b = this.intervalBase[i] as MatchCounts;
+      const w = this.windowsOf(m);
+      const c = w.current.read(m);
+      const b = w.intervalBase;
       bytesIn += c.bytesIn - b.bytesIn;
       bytesOut += c.bytesOut - b.bytesOut;
       this.log("info", "metrics", {
@@ -421,10 +480,12 @@ export class ServerMetrics {
     const loop = src.loop();
     this.loopBase[2] = loop.dropped;
     this.loopBase[3] = loop.yields;
+    this.retired[2] = 0;
+    this.retired[3] = 0;
     for (let i = 0; i < src.matches.length; i++) {
       const m = src.matches[i] as ServerMatch;
       m.ticks.resetInterval();
-      (this.intervalBase[i] as MatchCounts).read(m);
+      this.windowsOf(m).intervalBase.read(m);
     }
   }
 }

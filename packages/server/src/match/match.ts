@@ -383,6 +383,8 @@ export class Match implements MatchAdmin {
   private readonly sessions: Session[] = [];
   private currentTick = 0;
   private anyClosed = false;
+  /** Why the match closed (`close`), or null while it runs. */
+  private closedReason: string | null = null;
 
   /** The replicated block simulated now, its u32 hash and the tick it took effect. */
   private readonly block = new CvarBlock();
@@ -531,6 +533,10 @@ export class Match implements MatchAdmin {
    * or null (after a KICK) when the match holds `maxClients` already.
    */
   connect(transport: Transport, admin = false): Session | null {
+    if (this.closedReason !== null) {
+      this.sendKickTo(transport, this.closedReason);
+      return null;
+    }
     const id = freeClientId(this.sessions, this.maxClients);
     if (id < 0) {
       this.sendKickTo(transport, "server full");
@@ -586,9 +592,37 @@ export class Match implements MatchAdmin {
     }
   }
 
+  /**
+   * Closes the match for good (D-047's `match_remove`; called between ticks): ends its demo (the
+   * END record, so the kicks are not in it), KICKs every session `reason` with LEAVE reason
+   * kicked, drops the sessions with their mirrors and empties the mirror pool. Later ticks do
+   * nothing and a later connect is KICKed `reason`. Returns the sessions it kicked; a second call
+   * does nothing and returns 0.
+   */
+  close(reason: string): number {
+    if (this.closedReason !== null) return 0;
+    this.stopRecording();
+    let kicked = 0;
+    for (let i = 0; i < this.sessions.length; i++) {
+      const s = this.sessions[i] as Session;
+      if (s.state === SESSION_CLOSED) continue;
+      this.kick(s, reason, EV_LEAVE_KICKED);
+      kicked++;
+    }
+    this.removeClosed();
+    this.mirrors.clear();
+    this.closedReason = reason;
+    return kicked;
+  }
+
+  /** Whether `close` ended the match. */
+  get closed(): boolean {
+    return this.closedReason !== null;
+  }
+
   tick(): void {
     const t = this.currentTick + 1;
-    if (t > TICK_MAX) return;
+    if (t > TICK_MAX || this.closedReason !== null) return;
     const sessions = this.sessions;
     for (let i = 0; i < sessions.length; i++) {
       const s = sessions[i] as Session;

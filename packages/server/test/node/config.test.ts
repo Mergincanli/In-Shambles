@@ -33,9 +33,32 @@ describe("parseServerCfg", () => {
       "set sv_map arena greybox",
     ].join("\r\n");
     expect(parseServerCfg(text, "server.cfg")).toEqual([
-      { name: "sv_port", value: "1234", source: "server.cfg:4" },
-      { name: "sv_host", value: "127.0.0.1", source: "server.cfg:5" },
-      { name: "sv_map", value: "arena greybox", source: "server.cfg:6" },
+      { kind: "set", name: "sv_port", value: "1234", source: "server.cfg:4" },
+      { kind: "set", name: "sv_host", value: "127.0.0.1", source: "server.cfg:5" },
+      { kind: "set", name: "sv_map", value: "arena greybox", source: "server.cfg:6" },
+    ]);
+  });
+
+  it("reads match_add and @<match> lines (D-047)", () => {
+    const text = [
+      "set pm_gravity 700",
+      "match_add duel movement_lab 2",
+      "MATCH_ADD big arena_greybox",
+      '@duel set sv_cheats "1"',
+      "@big record",
+    ].join("\n");
+    expect(parseServerCfg(text, "s.cfg")).toEqual([
+      { kind: "set", name: "pm_gravity", value: "700", source: "s.cfg:1" },
+      {
+        kind: "match_add",
+        spec: { name: "duel", map: "movement_lab", maxClients: 2, source: "s.cfg:2" },
+      },
+      {
+        kind: "match_add",
+        spec: { name: "big", map: "arena_greybox", maxClients: null, source: "s.cfg:3" },
+      },
+      { kind: "match", match: "duel", text: 'set sv_cheats "1"', source: "s.cfg:4" },
+      { kind: "match", match: "big", text: "record", source: "s.cfg:5" },
     ]);
   });
 
@@ -45,6 +68,20 @@ describe("parseServerCfg", () => {
     ['set sv_host "open', "a.cfg:1: unterminated quote"],
     ["set sv_port 1 // default", "a.cfg:1: a comment must be on a line of its own"],
     ["set sv_host 0.0.0.0 # any", "a.cfg:1: a comment must be on a line of its own"],
+    ["match_add duel", "a.cfg:1: usage: match_add <name> <map> [maxClients]"],
+    ["match_add a b 2 3", "a.cfg:1: usage: match_add <name> <map> [maxClients]"],
+    [
+      "match_add Duel movement_lab",
+      'a.cfg:1: "Duel" is not a match name (a-z, 0-9 and _, 1–32 chars)',
+    ],
+    ["match_add duel ../x", 'a.cfg:1: "../x" is not a map id'],
+    ["match_add duel movement_lab 65", "a.cfg:1: maxClients 65: expected 1 to 64"],
+    ["match_add duel movement_lab 0", "a.cfg:1: maxClients 0: expected 1 to 64"],
+    ["match_add duel movement_lab 1.5", "a.cfg:1: maxClients 1.5: expected 1 to 64"],
+    ["@duel", "a.cfg:1: usage: @<match> <command…>"],
+    ["@ status", 'a.cfg:1: "" is not a match name'],
+    ["@m/x status", 'a.cfg:1: "m/x" is not a match name'],
+    ["@duel status // x", "a.cfg:1: a comment must be on a line of its own"],
   ])("refuses %j", (line, message) => {
     expect(() => parseServerCfg(line, "a.cfg")).toThrow(new ConfigError(message));
   });
@@ -55,7 +92,13 @@ describe("parseServerCfg", () => {
     const { server, match, both } = registries();
     const defaults = server.list().map((i) => [i.def.name, i.value]);
     const matchDefaults = match.list().map((i) => [i.def.name, i.value]);
-    applyAssignments(parseServerCfg(text, "server.cfg"), both);
+    const entries = parseServerCfg(text, "server.cfg");
+    applyAssignments(
+      entries.flatMap((e) => (e.kind === "set" ? [e] : [])),
+      both,
+    );
+    // It configures no match: the server runs `main` on sv_map (D-047).
+    expect(entries.every((e) => e.kind === "set")).toBe(true);
     expect(server.list().map((i) => [i.def.name, i.value])).toEqual(defaults);
     expect(match.list().map((i) => [i.def.name, i.value])).toEqual(matchDefaults);
     expect(text).toMatch(/^set sv_cheats 0$/m);
@@ -90,6 +133,7 @@ describe("parseCommandLine", () => {
       ],
       metricsOut: null,
       metricsDiscardS: 0,
+      matches: [],
     });
     expect(parseCommandLine([])).toEqual({
       cfg: null,
@@ -97,7 +141,17 @@ describe("parseCommandLine", () => {
       sets: [],
       metricsOut: null,
       metricsDiscardS: 0,
+      matches: [],
     });
+  });
+
+  it("takes repeatable --match <name>=<map>[:<maxClients>] in order (D-047)", () => {
+    expect(
+      parseCommandLine(["--match", "main=arena_greybox", "--match", "lab=movement_lab:4"]).matches,
+    ).toEqual([
+      { name: "main", map: "arena_greybox", maxClients: null, source: "--match" },
+      { name: "lab", map: "movement_lab", maxClients: 4, source: "--match" },
+    ]);
   });
 
   it("takes the metrics file and the seconds discarded before the run window (D-029)", () => {
@@ -121,6 +175,13 @@ describe("parseCommandLine", () => {
     [["--metrics-discard", " "]],
     [["--metrics-discard", "3000000"]],
     [["--metrics-out"]],
+    [["--match", "lab"]],
+    [["--match", "=movement_lab"]],
+    [["--match", "Lab=movement_lab"]],
+    [["--match", "lab=movement_lab:"]],
+    [["--match", "lab=movement_lab:65"]],
+    [["--match", "lab=a/b"]],
+    [["--match", `${"x".repeat(33)}=movement_lab`]],
   ])("refuses %j", (args) => {
     expect(() => parseCommandLine(args)).toThrow(ConfigError);
   });

@@ -43,9 +43,9 @@ import {
   WorldHistory,
 } from "@game/server";
 import {
+  MatchSet,
   type PassClock,
   type ServerMatch,
-  TimedPass,
   WireTraffic,
   WsLimits,
   type WsSocket,
@@ -2030,9 +2030,10 @@ function runPredict(n: number): void {
   extra[2] = client.clock.holds;
 }
 
-// The Node server's per-tick wrapper (D-029): TimedPass over two matches, both histograms and the
-// 1 s windows it closes every 60 passes. Small-integer clocks stand in for performance.now and
-// process.cpuUsage, whose boxed results are the host's own cost, not the pass's.
+// The Node server's per-tick wrapper (D-029, D-047): the MatchSet the loop ticks, over two
+// matches, through its TimedPass (both histograms and the 1 s windows it closes every 60 passes).
+// Small-integer clocks stand in for performance.now and process.cpuUsage, whose boxed results
+// are the host's own cost, not the pass's.
 let passClockMs = 0;
 const passClock: PassClock = {
   now: () => {
@@ -2051,15 +2052,25 @@ const idleMatch = {
     idleTimes[2] = maxUs;
   },
 } as unknown as Match;
-const timedMatches: ServerMatch[] = [
-  { name: "a", match: idleMatch, ticks: new TickHistogram(), traffic: new WireTraffic() },
-  { name: "b", match: idleMatch, ticks: new TickHistogram(), traffic: new WireTraffic() },
-];
-const timedPass = new TimedPass(timedMatches, () => {}, passClock);
+const matchSet = new MatchSet(() => {}, passClock);
+matchSet.add({
+  name: "a",
+  match: idleMatch,
+  ticks: new TickHistogram(),
+  traffic: new WireTraffic(),
+});
+matchSet.add({
+  name: "b",
+  match: idleMatch,
+  ticks: new TickHistogram(),
+  traffic: new WireTraffic(),
+});
+const timedMatches: readonly ServerMatch[] = matchSet.list;
+const timedPass = matchSet.pass;
 timedPass.loopStats = new LoopStats();
 
 function runTimedPass(n: number): void {
-  for (let i = 0; i < n; i++) timedPass.tick();
+  for (let i = 0; i < n; i++) matchSet.tick();
   outcomes[0] = timedPass.passes;
   outcomes[1] = (timedMatches[0] as ServerMatch).ticks.lastP99Us;
   outcomes[2] = timedPass.ticks.lastMaxUs;

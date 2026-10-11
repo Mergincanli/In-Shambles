@@ -302,6 +302,81 @@ describe("ServerMetrics", () => {
     expect(k.process.runS).toBe(0);
   });
 
+  it("gives a match added later windows from its start, and keeps a removed match's traffic (D-047)", () => {
+    const clock = { ms: 0 };
+    const passClock: PassClock = { now: () => clock.ms, cpuMicros: () => 0 };
+    const make = (name: string): ServerMatch => ({
+      name,
+      match: {
+        metrics: new MatchMetrics(),
+        mapName: "movement_lab",
+        sessionCount: 1,
+        serverTick: 0,
+        tick() {},
+        reportTickStats() {},
+      } as unknown as Match,
+      ticks: new TickHistogram(),
+      traffic: new WireTraffic(),
+    });
+    const a = make("a");
+    const list: ServerMatch[] = [a];
+    const pass = new TimedPass(list, () => {}, passClock);
+    const loop = new LoopStats();
+    const lines: [string, LogFields | undefined][] = [];
+    const metrics = new ServerMetrics(
+      {
+        matches: list,
+        pass,
+        loop: () => loop,
+        connections: () => 0,
+        now: () => clock.ms,
+        memory: () => ({ heapUsed: MB, external: 0, rss: MB }),
+        cpuMicros: () => 0,
+      },
+      (_lvl, ev, fields) => lines.push([ev, fields]),
+    );
+    a.traffic.bytesOut = 1000;
+    clock.ms = 4000;
+    const b = make("__proto__");
+    // Counters it had before it joined (none in a real match) are not its window's.
+    b.traffic.bytesIn = 200;
+    b.traffic.bytesOut = 500;
+    list.push(b);
+    metrics.addMatch(b);
+    clock.ms = 6000;
+    b.traffic.bytesIn += 600;
+    b.traffic.bytesOut += 3000;
+    const j = metrics.json();
+    expect(Object.keys(j.matches)).toEqual(["a", "__proto__"]);
+    expect(Object.getOwnPropertyDescriptor(j.matches, "__proto__")?.value).toMatchObject({
+      runS: 2,
+      traffic: { bytesIn: 600, bytesOut: 3000 },
+    });
+    expect(j.process.traffic).toMatchObject({ bytesIn: 600, bytesOut: 4000 });
+    // An interval boundary inside b's life: the interval and the run window part ways.
+    metrics.logInterval();
+    clock.ms = 8000;
+    b.traffic.bytesIn += 400;
+    b.traffic.bytesOut += 2000;
+    // Removed: its bytes stay in the process's run window and interval, its own windows go.
+    metrics.removeMatch(b);
+    list.splice(1, 1);
+    a.traffic.bytesOut += 1000;
+    const k = metrics.json();
+    expect(Object.keys(k.matches)).toEqual(["a"]);
+    expect(k.process.traffic).toMatchObject({ bytesIn: 1000, bytesOut: 7000 });
+    clock.ms = 10_000;
+    metrics.logInterval();
+    // The interval from 6 s: a's 1000 B out and b's 2000 B out and 400 B in, over 4 s.
+    expect(lines.at(-1)?.[1]).toMatchObject({ kbInPerS: 0.1, kbOutPerS: 0.75 });
+    // A new run window or interval starts without it.
+    metrics.resetRun();
+    expect(metrics.json().process.traffic).toMatchObject({ bytesIn: 0, bytesOut: 0 });
+    clock.ms = 20_000;
+    metrics.logInterval();
+    expect(lines.at(-1)?.[1]).toMatchObject({ kbInPerS: 0, kbOutPerS: 0 });
+  });
+
   it("logs one metrics line per match and one for the process per interval, then starts the next", () => {
     const { clock, fake, m, pass, lines, metrics } = setup();
     for (let i = 0; i < 600; i++) pass.tick();

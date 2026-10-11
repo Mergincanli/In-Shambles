@@ -54,18 +54,22 @@ describe("admin console line", () => {
       primer: false,
     });
     match.connect(createLoopbackPair()[1]);
-    runConsoleLine("set pm_gravity 400", "main", match, log);
-    runConsoleLine("   ", "main", match, log);
-    runConsoleLine("bogus", "main", match, log);
+    const host = { match: () => ({ name: "main", match }) };
+    runConsoleLine("set pm_gravity 400", host, log);
+    runConsoleLine("   ", host, log);
+    runConsoleLine("bogus", host, log);
     // The console is admin of the match itself too (D-042): status and kick.
-    runConsoleLine("status", "main", match, log);
-    runConsoleLine("kick 0", "main", match, log);
+    runConsoleLine("status", host, log);
+    runConsoleLine("kick 0", host, log);
+    // Without a process (a match's own console), the process commands are refused.
+    runConsoleLine("matches", host, log);
     expect(cvars.get("pm_gravity")).toBe(400);
     expect(lines.map((l) => [l.lvl, l.ev, l.text])).toEqual([
       ["info", "console", "pm_gravity = 400"],
       ["error", "console", "unknown server command bogus"],
       ["info", "console", "movement_lab, tick 0, 1 of 32 players\n#0 connecting strikes 0 build -"],
       ["info", "console", "client 0 kicked: kicked by an admin"],
+      ["error", "console", "matches: this console has no process commands"],
     ]);
   });
 });

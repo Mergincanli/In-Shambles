@@ -72,7 +72,8 @@ beforeAll(async () => {
     port: 0,
     limits: new WsLimits(),
     target: {
-      hasMatch: (name) => name === "",
+      // The one match: `/` names it, and the check after the handshake asks by that name.
+      matchFor: (name) => (name === "" || name === "main" ? "main" : null),
       accept: (_name, t) => accepted.push(t),
       status: () => ({}),
       metrics: () => ({}),

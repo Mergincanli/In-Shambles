@@ -11,7 +11,13 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildCollisionWorld, PRINT_ERROR, PRINT_INFO, validateDemo } from "@game/shared";
+import {
+  buildCollisionWorld,
+  DEMO_NAME,
+  PRINT_ERROR,
+  PRINT_INFO,
+  validateDemo,
+} from "@game/shared";
 import { afterEach, describe, expect, it } from "vitest";
 import { Match } from "../../src/match/match";
 import { runConsoleLine } from "../../src/node/console";
@@ -19,6 +25,7 @@ import {
   DEMO_WRITE_BUFFER,
   type DemoWriteFn,
   DemoWriter,
+  defaultDemoName,
   type FileDemoSink,
   utcStamp,
 } from "../../src/node/demoWriter";
@@ -87,9 +94,10 @@ describe("demo writer (D-044)", () => {
     const consoleLog: JsonLog = (_lvl, ev, fields) => {
       if (ev === "console") replies.push(String(fields?.text));
     };
-    runConsoleLine("record con_1", "main", match, consoleLog);
+    const host = { match: () => ({ name: "main", match }) };
+    runConsoleLine("record con_1", host, consoleLog);
     for (let i = 0; i < 5; i++) match.tick();
-    runConsoleLine("stoprecord", "main", match, consoleLog);
+    runConsoleLine("stoprecord", host, consoleLog);
     expect(replies[0]).toBe("recording demos/con_1.demo");
     expect(replies[1]).toMatch(/^stopped recording demos\/con_1\.demo \(5 ticks, \d+ B\)$/);
     await (writer.last as FileDemoSink).done;
@@ -114,7 +122,7 @@ describe("demo writer (D-044)", () => {
     expect(readFileSync(outside, "utf8")).toBe("outside");
   });
 
-  it("confines to the folder's real path and names a default demo <map>-<utc>", () => {
+  it("confines to the folder's real path and names a default demo <match>-<map>-<utc> (D-047)", () => {
     const root = tempDir();
     const real = join(root, "real");
     mkdirSync(real);
@@ -124,9 +132,26 @@ describe("demo writer (D-044)", () => {
     const writer = new DemoWriter(join(root, "demos"), log, "main", () => at);
     const opened = writer.open(null, "arena_greybox");
     if (typeof opened === "string") throw new Error(opened);
-    expect(opened.file).toBe("demos/arena_greybox-20261011-070509.demo");
+    expect(opened.file).toBe("demos/main-arena_greybox-20261011-070509.demo");
     opened.sink.close();
-    expect(readdirSync(real)).toEqual(["arena_greybox-20261011-070509.demo"]);
+    expect(readdirSync(real)).toEqual(["main-arena_greybox-20261011-070509.demo"]);
+    // Two matches recording in the same second get names of their own.
+    const lab = new DemoWriter(join(root, "demos"), log, "lab", () => at).open(
+      null,
+      "arena_greybox",
+    );
+    if (typeof lab === "string") throw new Error(lab);
+    expect(lab.file).toBe("demos/lab-arena_greybox-20261011-070509.demo");
+    lab.sink.close();
+  });
+
+  it("cuts the <match>-<map> part of a default name to fit DEMO_NAME, keeping the stamp", () => {
+    const stamp = "20261011-070509";
+    expect(defaultDemoName("a", "b", stamp)).toBe(`a-b-${stamp}`);
+    const long = defaultDemoName("m".repeat(32), "x".repeat(63), stamp);
+    expect(long).toHaveLength(64);
+    expect(long.endsWith(`-${stamp}`)).toBe(true);
+    expect(DEMO_NAME.test(long)).toBe(true);
   });
 
   it("writes across buffer boundaries in order", async () => {

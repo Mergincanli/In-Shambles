@@ -4,6 +4,7 @@ import { tokenizeCommand } from "../match/commands";
 import { SessionLimits } from "../match/limits";
 import { AdmissionLimits, parseOrigins } from "../transport/wsListener";
 import { WsLimits } from "../transport/wsTransport";
+import { MATCH_NAME } from "./matchSet";
 
 /** A bad `server.cfg` line or command-line flag; the server refuses to start with it. */
 export class ConfigError extends Error {
@@ -15,6 +16,20 @@ export interface CvarAssignment {
   readonly name: string;
   readonly value: string;
   /** `server.cfg:3`, `--port`, `--set`. */
+  readonly source: string;
+}
+
+/**
+ * A match to create (D-047, M3 design §2.17): `match_add <name> <map> [maxClients]` in server.cfg
+ * or on stdin, `--match <name>=<map>[:<maxClients>]` on the command line.
+ */
+export interface MatchSpec {
+  /** A MATCH_NAME: what `/m/<name>` and `@<name>` address. */
+  readonly name: string;
+  readonly map: string;
+  /** Players it admits, 1–64; null = `sv_maxClients`. */
+  readonly maxClients: number | null;
+  /** `server.cfg:3`, `--match`, `console`. */
   readonly source: string;
 }
 
@@ -30,6 +45,8 @@ export interface CommandLine {
   readonly metricsOut: string | null;
   /** `--metrics-discard <s>`: the run window starts this many seconds after listen; 0 = at listen. */
   readonly metricsDiscardS: number;
+  /** Each `--match <name>=<map>[:<maxClients>]`, in order (after server.cfg's, D-047). */
+  readonly matches: readonly MatchSpec[];
 }
 
 /**
@@ -38,10 +55,54 @@ export interface CommandLine {
  */
 export const METRICS_DISCARD_MAX_S = 86_400;
 
+/** Map ids a match may name (the server's own rule, node/maps.ts). */
+const MAP_ID = /^[a-z0-9_]{1,63}$/;
+
+/**
+ * Checks a match's name, map and player cap as typed (`maxClients` text, or null for
+ * `sv_maxClients`): the spec, or the reason it is refused, prefixed with `source`.
+ */
+export function matchSpec(
+  name: string,
+  map: string,
+  maxClients: string | null,
+  source: string,
+): MatchSpec | string {
+  if (!MATCH_NAME.test(name)) {
+    return `${source}: "${name}" is not a match name (a-z, 0-9 and _, 1–32 chars)`;
+  }
+  if (!MAP_ID.test(map)) return `${source}: "${map}" is not a map id`;
+  let cap: number | null = null;
+  if (maxClients !== null) {
+    cap = /^\d{1,2}$/.test(maxClients) ? Number(maxClients) : Number.NaN;
+    if (!(cap >= 1 && cap <= 64)) {
+      return `${source}: maxClients ${maxClients}: expected 1 to 64`;
+    }
+  }
+  return { name, map, maxClients: cap, source };
+}
+
+/** `<name>=<map>[:<maxClients>]` (`--match`), or a ConfigError. */
+function parseMatchFlag(item: string): MatchSpec {
+  const eq = item.indexOf("=");
+  if (eq <= 0) throw new ConfigError(`--match ${item}: expected <name>=<map>[:<maxClients>]`);
+  const rest = item.slice(eq + 1);
+  const colon = rest.indexOf(":");
+  const spec = matchSpec(
+    item.slice(0, eq),
+    colon < 0 ? rest : rest.slice(0, colon),
+    colon < 0 ? null : rest.slice(colon + 1),
+    "--match",
+  );
+  if (typeof spec === "string") throw new ConfigError(spec);
+  return spec;
+}
+
 /**
  * Parses the server's flags: `--cfg <file>`, `--port <n>` (= `--set sv_port=<n>`), `--map <name>`
- * (= `--set sv_map=<name>`), `--maps <dir>`, repeatable `--set <cvar>=<value>`, `--metrics-out
- * <file>` and `--metrics-discard <s>`. Anything else is a ConfigError.
+ * (= `--set sv_map=<name>`), `--maps <dir>`, repeatable `--set <cvar>=<value>`, repeatable
+ * `--match <name>=<map>[:<maxClients>]` (D-047), `--metrics-out <file>` and `--metrics-discard
+ * <s>`. Anything else is a ConfigError.
  */
 export function parseCommandLine(args: readonly string[]): CommandLine {
   let parsed: ReturnType<typeof parseFlags>;
@@ -74,12 +135,15 @@ export function parseCommandLine(args: readonly string[]): CommandLine {
       );
     }
   }
+  const matches: MatchSpec[] = [];
+  for (const item of v.match ?? []) matches.push(parseMatchFlag(item));
   return {
     cfg: v.cfg ?? null,
     mapsDir: v.maps ?? null,
     sets,
     metricsOut: v["metrics-out"] ?? null,
     metricsDiscardS,
+    matches,
   };
 }
 
@@ -94,20 +158,48 @@ function parseFlags(args: readonly string[]) {
       map: { type: "string" },
       maps: { type: "string" },
       set: { type: "string", multiple: true },
+      match: { type: "string", multiple: true },
       "metrics-out": { type: "string" },
       "metrics-discard": { type: "string" },
     },
   });
 }
 
+/** A `set <cvar> <value>` line of server.cfg. */
+export interface CfgSet extends CvarAssignment {
+  readonly kind: "set";
+}
+
+/** A `match_add <name> <map> [maxClients]` line of server.cfg (D-047). */
+export interface CfgMatchAdd {
+  readonly kind: "match_add";
+  readonly spec: MatchSpec;
+}
+
 /**
- * Parses `server.cfg` (D-029): one `set <cvar> <value>` per line, tokenized like the console
- * (double quotes group a value with spaces; unquoted words are joined with one space); blank
- * lines and lines starting with `//` or `#` are comments. A comment after a value is refused
- * rather than read into the value. `file` names the file in error messages.
+ * An `@<name> <command…>` line of server.cfg (D-047): one of the match's admin commands (a
+ * `set` on its replicated cvars, `record`, …), run once the match exists.
  */
-export function parseServerCfg(text: string, file: string): CvarAssignment[] {
-  const out: CvarAssignment[] = [];
+export interface CfgMatchLine {
+  readonly kind: "match";
+  readonly match: string;
+  /** The command after the prefix, as written. */
+  readonly text: string;
+  readonly source: string;
+}
+
+export type CfgEntry = CfgSet | CfgMatchAdd | CfgMatchLine;
+
+/**
+ * Parses `server.cfg` (D-029, D-047): one `set <cvar> <value>`, `match_add <name> <map>
+ * [maxClients]` or `@<match> <command…>` per line, tokenized like the console (double quotes group
+ * a value with spaces; unquoted words are joined with one space); blank lines and lines starting
+ * with `//` or `#` are comments. A comment after a value is refused rather than read into the
+ * value. `file` names the file in error messages. What each line does (the template, the default
+ * match, a named one) is `startServer`'s: this only checks the form.
+ */
+export function parseServerCfg(text: string, file: string): CfgEntry[] {
+  const out: CfgEntry[] = [];
   const lines = text.split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
     const line = (lines[i] as string).trim();
@@ -115,20 +207,39 @@ export function parseServerCfg(text: string, file: string): CvarAssignment[] {
     const source = `${file}:${i + 1}`;
     const tokens = tokenizeCommand(line);
     if (tokens === null) throw new ConfigError(`${source}: unterminated quote`);
-    if ((tokens[0] ?? "").toLowerCase() !== "set") {
-      throw new ConfigError(`${source}: unknown command ${tokens[0] ?? ""}`);
-    }
-    const name = tokens[1];
-    if (name === undefined || tokens.length < 3) {
-      throw new ConfigError(`${source}: usage: set <cvar> <value>`);
-    }
-    for (let t = 2; t < tokens.length; t++) {
+    for (let t = 1; t < tokens.length; t++) {
       const word = tokens[t] as string;
       if (word.startsWith("//") || word.startsWith("#")) {
         throw new ConfigError(`${source}: a comment must be on a line of its own`);
       }
     }
-    out.push({ name, value: tokens.slice(2).join(" "), source });
+    const head = tokens[0] ?? "";
+    if (head.startsWith("@")) {
+      const match = head.slice(1);
+      if (!MATCH_NAME.test(match)) {
+        throw new ConfigError(`${source}: "${match}" is not a match name`);
+      }
+      const rest = line.slice(line.indexOf(head) + head.length).trim();
+      if (rest === "") throw new ConfigError(`${source}: usage: @<match> <command…>`);
+      out.push({ kind: "match", match, text: rest, source });
+      continue;
+    }
+    const command = head.toLowerCase();
+    if (command === "match_add") {
+      if (tokens.length < 3 || tokens.length > 4) {
+        throw new ConfigError(`${source}: usage: match_add <name> <map> [maxClients]`);
+      }
+      const spec = matchSpec(tokens[1] as string, tokens[2] as string, tokens[3] ?? null, source);
+      if (typeof spec === "string") throw new ConfigError(spec);
+      out.push({ kind: "match_add", spec });
+      continue;
+    }
+    if (command !== "set") throw new ConfigError(`${source}: unknown command ${head}`);
+    const name = tokens[1];
+    if (name === undefined || tokens.length < 3) {
+      throw new ConfigError(`${source}: usage: set <cvar> <value>`);
+    }
+    out.push({ kind: "set", name, value: tokens.slice(2).join(" "), source });
   }
   return out;
 }
@@ -199,10 +310,14 @@ export function sessionLimits(cvars: CvarRegistry): SessionLimits {
   return l;
 }
 
-/** Who the listener admits (D-041): `sv_maxPerIp` and the `sv_allowedOrigins` list. */
+/**
+ * Who the listener admits (D-041, D-047): `sv_maxPerIp`, the `sv_allowedOrigins` list and
+ * `sv_maxTotalClients`.
+ */
 export function admissionLimits(cvars: CvarRegistry): AdmissionLimits {
   const a = new AdmissionLimits();
   a.maxPerIp = cvars.getNumber("sv_maxPerIp", a.maxPerIp);
   a.allowedOrigins = parseOrigins(String(cvars.get("sv_allowedOrigins") ?? ""));
+  a.maxTotal = cvars.getNumber("sv_maxTotalClients", a.maxTotal);
   return a;
 }
