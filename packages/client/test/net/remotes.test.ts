@@ -135,8 +135,16 @@ class Rig {
     return this.interp.clock.t[RC_RENDER] as number;
   }
 
-  /** Runs `ms` at 144 Hz with a snapshot of `fill(tick)` arriving on every server tick. */
-  stream(fromTick: number, ms: number, fill: (f: WorldFrame, tick: number) => void): number {
+  /**
+   * Runs `ms` at 144 Hz with a snapshot of `fill(tick)` arriving on every server tick, calling
+   * `onFrame` after each frame.
+   */
+  stream(
+    fromTick: number,
+    ms: number,
+    fill: (f: WorldFrame, tick: number) => void,
+    onFrame?: () => void,
+  ): number {
     let tick = fromTick;
     let nextSnap = this.now[0] as number;
     const end = (this.now[0] as number) + ms;
@@ -148,6 +156,7 @@ class Rig {
         nextSnap += TICK_MS;
       }
       this.frame(1000 / 144);
+      onFrame?.();
     }
     return tick;
   }
@@ -564,17 +573,31 @@ describe("RemoteInterpolator (M3 design §2.8, D-037)", () => {
     const r = new Rig();
     r.settings.interpDelay = 2;
     // Slot 3 moves +x 10 u per tick, its yaw crossing 0 (65000 → 535: +1071 units per tick).
-    r.stream(100, 500, (f, t) =>
-      put(f, t, 3, {
-        x: (t - 100) * 10,
-        vx: 600,
-        yaw: (65000 + (t - 100) * 1071) & 0xffff,
-        pitch: -200 + (t - 100) * 4,
-        team: TEAM_2,
-      }),
-    );
     const i = r.interp;
     const v = i.view;
+    // The frames whose bracket is ticks 100–101, the one that straddles 0/65535: the short arc
+    // (+1071 units), never the long way round.
+    let wrapFrames = 0;
+    r.stream(
+      100,
+      500,
+      (f, t) =>
+        put(f, t, 3, {
+          x: (t - 100) * 10,
+          vx: 600,
+          yaw: (65000 + (t - 100) * 1071) & 0xffff,
+          pitch: -200 + (t - 100) * 4,
+          team: TEAM_2,
+        }),
+      () => {
+        const at = r.render;
+        if (!(at > 100 && at < 101) || v.visible[3] !== 1) return;
+        wrapFrames++;
+        const units = (65000 + (at - 100) * 1071) % 65536;
+        expect(v.yaw[3]).toBeCloseTo((units * 360) / 65536, 6);
+      },
+    );
+    expect(wrapFrames).toBeGreaterThan(0);
     expect(v.visible[3]).toBe(1);
     expect(v.count).toBe(1);
     expect(i.mode[3]).toBe(REMOTE_INTERPOLATED);

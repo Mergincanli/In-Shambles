@@ -588,6 +588,32 @@ describe("client timeouts and keepalive (D-041)", () => {
     expect(client.connection.closeReason).toBe("timed out");
   });
 
+  it("times out after 5 s of silence from WELCOME on: a server gone quiet mid clock handshake", () => {
+    const { client, serverEnd, now } = bareClient();
+    const match = new Match({
+      cmap: course.cmap,
+      world: course.world,
+      buildHash: HARNESS_BUILD,
+      primer: false,
+    });
+    match.connect(serverEnd);
+    client.connect();
+    let frames = 0;
+    while (client.state !== CONN_SYNCING && now.t < 1000) {
+      now.t += 1000 / 144;
+      if (frames++ % 2 === 0) match.tick();
+      client.frame();
+    }
+    // WELCOME just arrived; the server never ticks again.
+    expect(client.state).toBe(CONN_SYNCING);
+    const welcomed = now.t;
+    for (; now.t < welcomed + 4900; now.t += 1000 / 144) client.frame();
+    expect(client.closed).toBe(false);
+    for (; now.t < welcomed + 5100; now.t += 1000 / 144) client.frame();
+    // The 5 s silence rule, not the 10 s handshake one.
+    expect(client.connection.closeReason).toBe("timed out");
+  });
+
   it("times out a handshake that gets no WELCOME within 10 s", () => {
     const { client, now } = bareClient();
     client.connect();
