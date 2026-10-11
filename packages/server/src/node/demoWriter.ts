@@ -7,6 +7,12 @@ import type { JsonLog } from "./log";
 
 /** The writer's buffer (design): one file write per 64 KiB of demo. */
 export const DEMO_WRITE_BUFFER = 64 * 1024;
+/**
+ * Most full buffers that may wait for the disk at once (design value, 2 MiB): past it the disk is
+ * slower than the recording (or hung, a write that never calls back), and the demo is dropped as
+ * on a write error, so a stalled volume can't grow the server's memory without bound.
+ */
+export const DEMO_MAX_QUEUED_CHUNKS = 32;
 /** `-2` … `-999`: suffixes tried for a name whose file exists (never overwritten). */
 const MAX_SUFFIX = 999;
 
@@ -50,7 +56,8 @@ const EMPTY = Buffer.alloc(0);
  * is written to the file asynchronously, in order (a fresh buffer takes its place, so a tick never
  * waits on the disk; a short write is continued until the chunk is on disk). `close` writes the
  * rest and closes the file, keeping no buffer; `done` settles then. A write error is logged once
- * and the rest of the demo is dropped.
+ * and the rest of the demo is dropped, and so is a buffer that would make more than
+ * DEMO_MAX_QUEUED_CHUNKS wait for the disk ("too slow").
  */
 export class FileDemoSink implements DemoSink {
   /** Bytes handed to the sink, and those on disk. */
@@ -58,6 +65,8 @@ export class FileDemoSink implements DemoSink {
   flushed = 0;
   /** The first write error, or null. */
   error: Error | null = null;
+  /** Full buffers handed to the disk and not yet written (at most DEMO_MAX_QUEUED_CHUNKS). */
+  queued = 0;
   /** Settles when the file is closed (after `close`). */
   readonly done: Promise<void>;
   private buf: Buffer = Buffer.allocUnsafe(DEMO_WRITE_BUFFER);
@@ -116,11 +125,17 @@ export class FileDemoSink implements DemoSink {
     // The last flush (from close) needs no buffer after it.
     this.buf = this.closed ? EMPTY : Buffer.allocUnsafe(DEMO_WRITE_BUFFER);
     this.used = 0;
+    if (this.queued >= DEMO_MAX_QUEUED_CHUNKS) {
+      this.fail(new Error(`the demo disk is too slow: ${this.queued} buffers wait for it`));
+      return;
+    }
+    this.queued++;
     this.chain = this.chain.then(
       () =>
         new Promise<void>((ok) => {
           const from = (at: number): void => {
             if (this.error !== null || at >= n) {
+              this.queued--;
               ok();
               return;
             }

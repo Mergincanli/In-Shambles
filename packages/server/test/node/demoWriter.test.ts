@@ -1,4 +1,5 @@
 import {
+  closeSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -22,6 +23,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { Match } from "../../src/match/match";
 import { runConsoleLine } from "../../src/node/console";
 import {
+  DEMO_MAX_QUEUED_CHUNKS,
   DEMO_WRITE_BUFFER,
   type DemoWriteFn,
   DemoWriter,
@@ -205,6 +207,38 @@ describe("demo writer (D-044)", () => {
     expect(sink.flushed).toBe(total);
     const back = readFileSync(join(root, "short.demo"));
     expect(back.equals(Buffer.from(chunk))).toBe(true);
+  });
+
+  it("drops the demo once more than 32 buffers wait for a disk that never answers", async () => {
+    const root = tempDir();
+    // A hung volume: the write is taken and its callback never runs (an NFS hang, a frozen disk).
+    let calls = 0;
+    const hung: DemoWriteFn = () => {
+      calls++;
+    };
+    const before = lines.length;
+    const writer = new DemoWriter(root, log, "main", undefined, hung);
+    const opened = writer.open("hung", "movement_lab");
+    if (typeof opened === "string") throw new Error(opened);
+    const sink = opened.sink as FileDemoSink;
+    const record = new Uint8Array(1000);
+    // The first full buffer goes to the disk (on a microtask) and its write never returns.
+    for (let i = 0; i < 100; i++) sink.write(record, record.length);
+    await new Promise((r) => setImmediate(r));
+    expect(calls).toBe(1);
+    expect(sink.error).toBeNull();
+    // 36 MB in all: about ten minutes of a busy match's demo, far past the cap.
+    for (let i = 100; i < 36_000; i++) sink.write(record, record.length);
+    expect(sink.error?.message).toMatch(/too slow/);
+    expect(sink.queued).toBe(DEMO_MAX_QUEUED_CHUNKS);
+    await new Promise((r) => setImmediate(r));
+    expect(calls).toBe(1);
+    expect(sink.flushed).toBe(0);
+    const errors = lines.slice(before).filter((l) => l.ev === "demo_error");
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ match: "main", msg: expect.stringMatching(/too slow/) });
+    // The hung chain never reaches the file's close: the test closes it.
+    closeSync((sink as unknown as { fd: number }).fd);
   });
 
   it("logs a write error once and drops the rest", async () => {
