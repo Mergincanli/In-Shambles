@@ -110,6 +110,7 @@
 - Remote entity interpolation; simple capsule player models in team colors.
 - Full netgraph.
 - Headless bots (`pnpm bots`), demo recording (server snapshot stream) and playback (basic).
+- Also in the approved M3 plan (its binding answers 2 and 4 for the cap and the extras): up to 64 players per match with a snapshot byte-budget scheduler (D-034, D-046); session security: per-session rate limits, strikes, handshake and idle timeouts, `sv_maxPerIp` and `sv_allowedOrigins` (D-041; M9 hardens them); rcon with its lockout, `sv_cheats` and CHEAT client cvars (D-042); demo playback with `[`/`]` player cycling and `pnpm demo-info` (D-044); several matches per server process (D-047).
 - Deterministic pmove primer at match and prediction start, guarded by a late-branch native-ESM allocation workload (the M2 warm-up transient, `docs/10` §4). Done in increment 12 (D-040): a no-retry multi-process guard with a primer-off control and a block-coverage guard, in `pnpm test:long`.
 - Load check (D-045): `pnpm test:load` runs NET-09 on the built server with 16 bots and the 16 bots + 1 human acceptance run with a headless Chromium stand-in, gated (host gate, nice 10 generators, 10 s metrics discard), and reports a 63-bot match and 4 matches × 16 bots; CI runs it in a `load` job that reports without blocking. Done in increment 18: all legs pass on the 4-vCPU VM, the 16 + 1 run's server GC (7.83 ms of 8) with the least margin (`docs/10` §4.1).
 

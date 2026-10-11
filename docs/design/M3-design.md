@@ -475,7 +475,7 @@ Every value the M3 doc edits touch gets a label. Every ESTIMATE a person might t
 | `sv_port` | 28700 | design |
 | `sv_host` | 0.0.0.0 | design |
 | `sv_map` | arena_greybox | design |
-| `sv_hostname` | "In Shambles" | content |
+| ~~`sv_hostname`~~ | ~~"In Shambles"~~ | not built (D-029, M3 review): nothing in M3 shows a host name and the plan leaves it out |
 | `sv_maxClients` | 32 (1–64; clamped to 37 until inc. 10) | design (Mustafa's decision, D-034); hard cap `MATCH_MAX_CLIENTS` 64 |
 | `sv_maxMatches` | 4 (1–16) | ESTIMATE (inc. 17) |
 | `sv_maxTotalClients` | 64 (one full match) | ESTIMATE (inc. 17) |

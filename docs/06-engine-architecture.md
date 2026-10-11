@@ -263,6 +263,9 @@ packages/client/scripts/  Node, driving the built client in headless Chromium (P
 packages/client/e2e/   pnpm test:browser (docs/10 §2): smoke.e2e.ts (the e2e smoke test on the Worker),
                        connect.e2e.ts (the built client at ?connect= on the built server, D-031),
                        demo.e2e.ts (a recorded demo at ?demo=, ] switching players, D-044),
+                       multiplayer.e2e.ts (the built page at ?connect= with 4 Node bots, remotes drawn
+                       interpolated, D-037), serverBundle.ts (builds and starts the server bundle
+                       for the e2e cases on a Node server),
                        health.ts (the prediction-health rule both judge by), vectors-page.e2e.ts (the
                        one-file vectors page passes from a file URL)
 
@@ -278,7 +281,10 @@ packages/tools/src/
   bots/                pnpm bots (M3, D-036): cli.ts and command.ts (flags, exit codes), runner.ts
                        (N ClientSims on Node's WebSocket, each behind its own NetSim, one 60 Hz
                        timer chain, the count check against /status), routes.ts (the yard ring,
-                       60/40 route/walk), serverChild.ts, tap.ts (socket traffic), summary.ts
+                       60/40 route/walk), serverChild.ts, tap.ts (socket traffic), summary.ts,
+                       builds.ts (the production builds and whether one is stale), host.ts (the host
+                       gate and the generators' niceness), human.ts
+                       (`--human`: the headless Chromium player; D-045)
   reports/             feel-report (M2, feelReport.ts; cli.ts is pnpm feel-report), balance-report
   replay/              validateDemo.ts (shared's validateDemo, and reading a file), demoInfo.ts
                        (what pnpm demo-info prints, text or JSON; D-044), cli.ts (its entry)
@@ -289,7 +295,8 @@ packages/tools/src/
 
 packages/tools/bench/  pnpm bench (docs/10 §4.4): run.ts (entry), trace.bench.ts (traceBox on
                        movement_lab), pmove.bench.ts (player-ticks), codec.bench.ts (snapshot
-                       encode + decode)
+                       encode + decode), interp.bench.ts (the interp frame, D-037),
+                       snapshotBuild.bench.ts (per-client snapshot build, D-038, D-046)
 ```
 
 ## 4. Runtime topology
@@ -489,5 +496,5 @@ These are SERVER cvars, read at startup and never replicated. The server also ow
 
 ## 11. Scripts and CI (created in M0, extended later)
 
-- `pnpm dev`, `pnpm dev:server`, `pnpm build`, `pnpm test`, `pnpm test:long` (M3, D-032), `pnpm test:movement`, `pnpm test:net` (each the fast tier, then the long tier with the same `-t` filter, D-032), `pnpm test:balance`, `pnpm test:browser` (M2), `pnpm typecheck`, `pnpm lint`, `pnpm format`, `pnpm greybox` (M1), `pnpm bench`, `pnpm bots`, `pnpm demo-info` (M3, D-044), `pnpm feel-report`, `pnpm balance-report`, `pnpm mapc` (M5).
-- **CI** (GitHub Actions, `.github/workflows/ci.yml`): typecheck, lint, unit tests and build since M0. Since M2, a `browsers` job replays the determinism vectors in Chromium, Firefox and WebKit (D-022) and runs the client e2e smoke test in Chromium (M2 increment 11). Since M3 the `check` job runs `pnpm test:long` right after `pnpm test`, blocking (D-032). Added in M9 (bots exist from M3): a short bot soak (2 min, 8 bots, `wan-100-loss1`) and bundle-size/perf budget checks.
+- `pnpm dev`, `pnpm dev:server`, `pnpm build`, `pnpm test`, `pnpm test:long` (M3, D-032), `pnpm test:load` (M3, D-045; after `pnpm build`), `pnpm test:movement`, `pnpm test:net` (each the fast tier, then the long tier with the same `-t` filter, D-032), `pnpm test:balance`, `pnpm test:browser` (M2), `pnpm typecheck`, `pnpm lint`, `pnpm format`, `pnpm greybox` (M1), `pnpm bench`, `pnpm bots`, `pnpm demo-info` (M3, D-044), `pnpm feel-report`, `pnpm balance-report`, `pnpm mapc` (M5).
+- **CI** (GitHub Actions, `.github/workflows/ci.yml`): typecheck, lint, unit tests and build since M0. Since M2, a `browsers` job replays the determinism vectors in Chromium, Firefox and WebKit (D-022) and runs the client e2e smoke test in Chromium (M2 increment 11). Since M3 the `check` job runs `pnpm test:long` right after `pnpm test`, blocking (D-032), and a `load` job runs `pnpm build`, then `pnpm test:load` (NET-09 and the 16 bots + 1 headless human run gated, the 63-bot and 4 × 16 legs reported) and uploads `reports/`; it reports and never blocks (`continue-on-error`, D-045). Added in M9: a blocking short bot soak (2 min, 8 bots, `wan-100-loss1`) and bundle-size/perf budget checks.
