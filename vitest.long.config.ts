@@ -15,7 +15,10 @@ import { TestCostReporter } from "./scripts/test-cost-reporter.mjs";
  * host with a test that judges frame timing on the wall clock.
  */
 export const LONG_GLOB = "packages/*/long/**/*.long.ts";
-export const REALTIME_LONG: readonly string[] = ["packages/tools/long/server-stall.long.ts"];
+export const REALTIME_LONG: readonly string[] = [
+  "packages/tools/long/server-stall.long.ts",
+  "packages/tools/long/net-10-floods.long.ts",
+];
 
 export default defineConfig({
   test: {

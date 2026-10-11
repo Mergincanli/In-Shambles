@@ -84,7 +84,9 @@ const MILESTONES: Readonly<Record<string, Milestone>> = {
     // placement rule). NET-10 landed in increment 13: the fake-clock attackers (a), the hidden-tab
     // cases and a real-socket smoke fast, the real-socket legs (b) long; its rcon lockout leg
     // joined the long file with rcon in increment 14, and its 404/503/1001 legs come with several
-    // matches (increment 17).
+    // matches (increment 17). The M3 review added its flood legs (D-048): refused half-open
+    // upgrades, a frame flood and descriptor exhaustion, `net-10-floods.long.ts` (its own top-level
+    // NET-10 describe, so the guard holds both long files).
     pending: {},
   },
 };
@@ -192,6 +194,17 @@ describe.each(Object.entries(MILESTONES))("acceptance tests of %s", (milestone, 
 
   it("leave nothing pending once docs/09 marks the milestone done", () => {
     expect(isDone(milestone) && Object.keys(m.pending).length > 0).toBe(false);
+  });
+});
+
+describe("acceptance legs that live in more than one file", () => {
+  // NET-10 (b)'s abuse legs and its flood legs (D-048; real time, so a file of their own in the
+  // long tier's real-time group): losing either file must fail here, not pass on the other.
+  it("keeps both of NET-10's long files", () => {
+    expect(filesFor("NET-10", "long").sort()).toEqual([
+      join("tools", "long", "net-10-abuse.long.ts"),
+      join("tools", "long", "net-10-floods.long.ts"),
+    ]);
   });
 });
 
