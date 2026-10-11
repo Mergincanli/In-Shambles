@@ -10,8 +10,10 @@ import type { WorldHistory } from "./history";
  * reaches past the 64-frame history) or pending (stamp 0). The ring's tick marks tell the two
  * kinds apart: a sent tick it holds was mirrored, any other sent tick was plain.
  *
- * About 225 KB each (64 frames of 64 slots). Only sessions of a match that admits more than 37
- * players get one (below that every frame is plain by construction), from the match's pool.
+ * About 530 KB each (64 frames of 64 slots: 225 KB of elements plus each frame's 25 typed arrays'
+ * object overhead, measured; KB = 1000 B), so about 34 MB at 64 players. Only sessions of a match
+ * that admits more than 37 players get one (below that every frame is plain by construction),
+ * from the match's pool.
  */
 export class ClientMirror {
   readonly ring = new FrameRing();
