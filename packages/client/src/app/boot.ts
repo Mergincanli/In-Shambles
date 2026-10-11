@@ -25,6 +25,7 @@ import {
   ClientSim,
   type CmdSampler,
   createScriptedInput,
+  DeferredSocket,
   DemoPlayer,
   KEEPALIVE_INTERVAL_MS,
   NeutralInput,
@@ -82,11 +83,14 @@ export async function boot(
   let worker: Worker | null = null;
   let cmap: Cmap | null = null;
   let server: string;
+  let socket: DeferredSocket | null = null;
   if (params.connect !== null) {
     const target = parseServerUrl(params.connect);
     if (!target.ok) throw new Error(`?connect=${params.connect}: ${target.error}`);
     server = target.url;
-    base = new WebSocketTransport(new WebSocket(target.url));
+    // Made at `connect()` below, after the startup work (DeferredSocket).
+    socket = new DeferredSocket(() => new WebSocket(target.url));
+    base = new WebSocketTransport(socket);
   } else {
     server = "the local server (Worker)";
     const file = await fetchMap(WORKER_MAP);
@@ -258,6 +262,9 @@ export async function boot(
       notices.length = 0;
     },
   });
+  // The socket opens only now, so the server's HELLO timeout (sv_helloTimeout, D-041) times the
+  // link and not this page's startup above (two WebGL contexts, the pmove primer).
+  socket?.open();
   client.connect();
   game.start();
   keepAliveWhileHidden(client);

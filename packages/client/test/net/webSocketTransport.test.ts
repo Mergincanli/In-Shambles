@@ -12,6 +12,7 @@ import {
 import { describe, expect, it } from "vitest";
 import {
   clientCloseReason,
+  DeferredSocket,
   peerCloseReason,
   type SocketLike,
   WebSocketTransport,
@@ -301,5 +302,54 @@ describe("WebSocketTransport (fake socket)", () => {
       t.poll();
     }
     expect(t.poolSize()).toBe(pooled);
+  });
+});
+
+describe("DeferredSocket (the page's ?connect= socket, D-031)", () => {
+  it("makes no socket until open(), then forwards both ways and sends HELLO on open", () => {
+    const made: FakeSocket[] = [];
+    const deferred = new DeferredSocket(() => {
+      const s = new FakeSocket();
+      made.push(s);
+      return s;
+    });
+    const t = new WebSocketTransport(deferred);
+    const got: number[] = [];
+    const closed: string[] = [];
+    t.onMessage((d) => got.push(d[0] as number));
+    t.onClose((reason) => closed.push(reason));
+    // HELLO before the socket exists: held, as for any socket still connecting.
+    t.sendReliable(new Uint8Array([7, 1, 2]), 3);
+    expect([made.length, deferred.readyState]).toEqual([0, WS_CONNECTING]);
+    deferred.open();
+    deferred.open();
+    expect(made).toHaveLength(1);
+    const socket = made[0] as FakeSocket;
+    expect(socket.binaryType).toBe("arraybuffer");
+    expect(socket.sent).toEqual([]);
+    socket.open();
+    expect(deferred.readyState).toBe(WS_OPEN);
+    expect(socket.sent).toEqual([[7, 1, 2]]);
+    t.sendUnreliable(new Uint8Array([9, 9]), 2);
+    expect(socket.sent).toHaveLength(2);
+    socket.message(msg(MSG_WELCOME));
+    t.poll();
+    expect(got).toEqual([MSG_WELCOME]);
+    socket.peerClose(4000, "kicked: bye");
+    t.poll();
+    expect(closed).toEqual(["kicked: bye"]);
+  });
+
+  it("never opens once closed before open()", () => {
+    let made = 0;
+    const deferred = new DeferredSocket(() => {
+      made++;
+      return new FakeSocket();
+    });
+    const t = new WebSocketTransport(deferred);
+    t.close("left the server");
+    deferred.open();
+    expect(made).toBe(0);
+    expect(t.isOpen()).toBe(false);
   });
 });

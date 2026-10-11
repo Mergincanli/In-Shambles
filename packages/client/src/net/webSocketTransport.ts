@@ -55,6 +55,54 @@ export interface SocketLike {
   onerror: Handler<unknown> | null;
 }
 
+/**
+ * A socket made on demand (the page's `?connect=`, D-031): the transport wires its handlers at
+ * boot, but the real socket exists only from `open()`, which boot calls right before
+ * `client.connect()` once the renderer, the HUD and the prediction (its pmove primer included)
+ * exist. The server times HELLO from the upgrade (`sv_helloTimeout`, D-041), and a page that
+ * opened its socket first spent that window on its own startup: two tabs on one software-GL
+ * browser took over 2 s and were kicked before HELLO. Until `open()` it reads as connecting;
+ * a `close()` before it means it never opens.
+ */
+export class DeferredSocket implements SocketLike {
+  binaryType = "blob";
+  onopen: SocketLike["onopen"] = null;
+  onmessage: SocketLike["onmessage"] = null;
+  onclose: SocketLike["onclose"] = null;
+  onerror: SocketLike["onerror"] = null;
+  private socket: SocketLike | null = null;
+  private cancelled = false;
+
+  constructor(private readonly create: () => SocketLike) {}
+
+  get readyState(): number {
+    return this.socket === null ? WS_CONNECTING : this.socket.readyState;
+  }
+
+  /** Makes the real socket and forwards its events (once; never after a `close()`). */
+  open(): void {
+    if (this.socket !== null || this.cancelled) return;
+    const s = this.create();
+    s.binaryType = this.binaryType;
+    s.onopen = (event) => this.onopen?.(event);
+    s.onmessage = (event) => this.onmessage?.(event);
+    s.onclose = (event) => this.onclose?.(event);
+    s.onerror = (event) => this.onerror?.(event);
+    this.socket = s;
+  }
+
+  send(data: Uint8Array<ArrayBuffer>): void {
+    // The transport sends only once the socket opened, which needs `open()` first.
+    if (this.socket === null) throw new Error("DeferredSocket: send before open()");
+    this.socket.send(data);
+  }
+
+  close(code?: number, reason?: string): void {
+    if (this.socket === null) this.cancelled = true;
+    else this.socket.close(code, reason);
+  }
+}
+
 /** Due time of every arrival: the inbox is FIFO, both channels interleaved as on the socket. */
 const DUE = new Float64Array(1);
 const EMPTY = new Uint8Array(0) as Uint8Array<ArrayBuffer>;

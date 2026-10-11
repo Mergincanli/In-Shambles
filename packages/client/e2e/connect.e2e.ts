@@ -130,6 +130,32 @@ describe("client e2e: connect to a Node server (D-031)", () => {
     expect(errors.filter((e) => !/left the server/.test(e))).toEqual([]);
   }, 60_000);
 
+  it("joins after a startup slower than the server's HELLO timeout (sv_helloTimeout 2 s)", async () => {
+    // The page's first getContext busy-waits 2.5 s, as two tabs on one software-GL browser took
+    // for their WebGL contexts: the socket opens after the startup work, so HELLO still makes it.
+    const s0 = server as ServerChild;
+    const page = await (browser as Browser).newPage({ viewport: VIEW });
+    const errors = watchErrors(page);
+    await page.addInitScript(`{
+      const get = HTMLCanvasElement.prototype.getContext;
+      let slowed = false;
+      HTMLCanvasElement.prototype.getContext = function (...args) {
+        if (!slowed) {
+          slowed = true;
+          const end = performance.now() + 2500;
+          while (performance.now() < end) {}
+        }
+        return get.apply(this, args);
+      };
+    }`);
+    await page.goto(`${served?.url}?autotest=1&bot=circle&connect=ws://127.0.0.1:${s0.port}`);
+    await waitForRunning(page);
+    const s = await readStatus(page);
+    await page.close();
+    expect(errors).toEqual([]);
+    expect([s.state, s.error ?? "", s.map]).toEqual(["running", "", "arena_greybox"]);
+  }, 60_000);
+
   it("says why when the server is not there", async () => {
     const page = await (browser as Browser).newPage({ viewport: VIEW });
     const errors = watchErrors(page);
