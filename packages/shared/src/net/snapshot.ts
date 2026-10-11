@@ -224,6 +224,33 @@ const E_TEAM = 1 << 5;
 const E_TELEPORT = 1 << 6;
 const E_EVENTS = 1 << 7;
 
+/**
+ * The delta local block's mask bit per field, by the names docs/05 §3.6 gives them; the docs
+ * golden (`protocol-docs.test.ts`) holds the doc's "bit N name" list to it. Not read by the codec.
+ */
+export const DELTA_LOCAL_MASK_BITS: Readonly<Record<string, number>> = Object.freeze({
+  origin: L_ORIGIN,
+  velocity: L_VELOCITY,
+  viewYaw: L_YAW,
+  viewPitch: L_PITCH,
+  flags: L_FLAGS,
+  "groundEntity + 1": L_GROUND,
+  waterLevel: L_WATER,
+  stamina: L_STAMINA,
+});
+
+/** The delta entity record's mask bit per field, as `DELTA_LOCAL_MASK_BITS` is the local block's. */
+export const DELTA_ENTITY_MASK_BITS: Readonly<Record<string, number>> = Object.freeze({
+  origin: E_ORIGIN,
+  velocity: E_VELOCITY,
+  yaw: E_YAW,
+  pitch: E_PITCH,
+  flags: E_FLAGS,
+  team: E_TEAM,
+  teleportSeq: E_TELEPORT,
+  events: E_EVENTS,
+});
+
 /** A delta record before its fields: id, removed, new, mask. */
 const ENTITY_DELTA_FIXED_BITS = 26;
 const EVENTS_BITS = 8 + ENTITY_EVENT_SLOTS * (EVENT_KIND_BITS + 8);

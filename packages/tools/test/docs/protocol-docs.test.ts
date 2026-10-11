@@ -7,6 +7,8 @@ import {
   CHANNEL_UNRELIABLE,
   CmdMsg,
   CVAR_HASH_SEED,
+  DELTA_ENTITY_MASK_BITS,
+  DELTA_LOCAL_MASK_BITS,
   ENTITY_DELTA_MAX_BITS,
   ENTITY_NEW_BITS,
   ENTITY_REMOVED_BITS,
@@ -66,9 +68,9 @@ import { firstTable, mdSection } from "../../src/docs/mdTable";
 import { fromRoot } from "../../src/paths";
 
 // Doc-golden test (D-026, D-033): docs/05 §3.6 states the protocol layout the codecs implement.
-// The type ids, the player-state, snapshot-header and entity-record widths, the packet sizes
-// (exact or the largest) and the cvar hash seed must match the code, so a layout change can't land
-// without its doc (and its PROTOCOL_VERSION bump).
+// The type ids, the player-state, snapshot-header and entity-record widths, the delta masks' bit
+// assignments, the packet sizes (exact or the largest) and the cvar hash seed must match the
+// code, so a layout change can't land without its doc (and its PROTOCOL_VERSION bump).
 
 const doc = readFileSync(fromRoot("docs", "05-netcode.md"), "utf8");
 const layout = mdSection(doc, `3.6 Protocol v${PROTOCOL_VERSION} layout`);
@@ -181,6 +183,28 @@ describe("docs/05 §3.6 protocol layout", () => {
         `${bytes(31)} B at 32 players and ${bytes(SNAP_FIT_MAX_PLAYERS - 1)} B at ` +
         `${SNAP_FIT_MAX_PLAYERS},`,
     );
+  });
+
+  it("gives the delta masks' bit assignments the codec uses (D-038)", () => {
+    // "bit 0 origin, 1 velocity, …[; note]" → each field's mask value.
+    const maskBits = (after: string) => {
+      const cell = tableRow(after, "mask").split(" | ")[2] ?? "";
+      const list = (cell.split(";")[0] ?? "").replace(/^bit /, "").split(", ");
+      return Object.fromEntries(
+        list.map((item) => {
+          const m = /^(\d+) (.+)$/.exec(item);
+          if (!m) throw new Error(`unexpected mask item "${item}" after ${after}`);
+          return [m[2], 1 << Number(m[1])];
+        }),
+      );
+    };
+    expect(maskBits("**Delta local block**")).toEqual(DELTA_LOCAL_MASK_BITS);
+    expect(maskBits("**Delta entity record**")).toEqual(DELTA_ENTITY_MASK_BITS);
+    // Eight distinct bits each: the 8-bit mask, all of it in use.
+    for (const table of [DELTA_LOCAL_MASK_BITS, DELTA_ENTITY_MASK_BITS]) {
+      expect(Object.values(table).reduce((a, b) => a | b, 0)).toBe(0xff);
+      expect(new Set(Object.values(table)).size).toBe(8);
+    }
   });
 
   it("states the sizes of a full snapshot, the worst delta and a four-cmd INPUT", () => {
