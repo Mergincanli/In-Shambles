@@ -1,6 +1,7 @@
 import { parseArgs } from "node:util";
 import { fromRoot } from "../paths";
-import { type BotRunOptions, BotsRefused, runBots } from "./runner";
+import { GENERATOR_NICE } from "./host";
+import { type BotRunOptions, BotsFailed, BotsRefused, runBots } from "./runner";
 import { summaryMarkdown } from "./summary";
 
 /**
@@ -9,18 +10,22 @@ import { summaryMarkdown } from "./summary";
  * the prediction's health.
  *
  *   pnpm bots --count N --profile P --minutes M --map X [--server ws://host:port[/m/<match>]]
- *             [--seed S] [--strict] [--out dir]
+ *             [--seed S] [--human] [--strict] [--out dir]
  *
  * Without `--server` it starts the server itself; `/m/<match>` joins a named match of a server
- * that runs several (D-047), the bare address its default match. Exit codes: 0 done (FAILs only
- * reported), 1 a FAIL under `--strict`, 2 a refused run (bad flag, a count the match can't hold)
- * or an error.
+ * that runs several (D-047), the bare address its default match. `--human` adds the headless
+ * browser player (human.ts, D-045). Every run checks the host gate and, once it is going to run
+ * (its server child spawned, the count checked), lowers its own priority to nice 10 (host.ts,
+ * D-045). `--strict` refuses stale builds and a busy
+ * host before it starts. Exit codes: 0 done (FAILs only reported), 1 a FAIL under `--strict` (the
+ * host gate included), 2 a refused run (bad flag, a count the match can't hold, a stale build) or
+ * an error.
  * Ctrl+C ends the measured window early and still writes the summary.
  */
 
 export const BOTS_USAGE =
   "usage: pnpm bots --count N --profile P --minutes M --map X " +
-  "[--server ws://host:port[/m/<match>]] [--seed S] [--strict] [--out dir]";
+  "[--server ws://host:port[/m/<match>]] [--seed S] [--human] [--strict] [--out dir]";
 
 /** The options a command line asks for (defaults: 16 bots, wan-100-loss1, 2 min, arena_greybox). */
 export function parseBotArgs(
@@ -48,6 +53,8 @@ export function parseBotArgs(
     seed: num("seed", v.seed, 1),
     human: v.human ?? false,
     strict: v.strict ?? false,
+    hostGate: true,
+    nice: GENERATOR_NICE,
     outDir: v.out ?? fromRoot("reports", "bots"),
   };
 }
@@ -76,11 +83,15 @@ export function exitCode(pass: boolean, strict: boolean): number {
   return pass || !strict ? 0 : 1;
 }
 
-/** Runs the command line; resolves to the exit code. */
+/**
+ * Runs the command line; resolves to the exit code. `seams` replaces what a test must not touch
+ * (the host's load, its own priority).
+ */
 export async function botsMain(
   args: readonly string[],
   out: (text: string) => void,
   err: (text: string) => void,
+  seams: Pick<BotRunOptions, "hostLoad" | "nice"> = {},
 ): Promise<number> {
   const abort = new AbortController();
   const onSigint = () => {
@@ -90,12 +101,21 @@ export async function botsMain(
   process.on("SIGINT", onSigint);
   try {
     const options = parseBotArgs(args);
-    const { summary, files } = await runBots({ ...options, log: out, abort: abort.signal });
+    const { summary, files } = await runBots({
+      ...options,
+      ...seams,
+      log: out,
+      abort: abort.signal,
+    });
     out(summaryMarkdown(summary));
     if (files !== null) out(`bots: wrote ${files.json} and ${files.md}`);
     out(`bots: ${summary.pass ? "PASS" : "FAIL"}`);
     return exitCode(summary.pass, options.strict);
   } catch (e) {
+    if (e instanceof BotsFailed) {
+      err(`bots: FAIL: ${e.message}`);
+      return 1;
+    }
     err(
       e instanceof BotsRefused
         ? `bots: ${e.message}`

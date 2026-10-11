@@ -64,6 +64,7 @@ docs/       specs, roadmap, decisions, handoffs.
 | `pnpm build` | Production client build + server bundle (`packages/server/dist/main.js`) |
 | `pnpm test` | All fast tests (Vitest; prints wall and CPU time against the D-032 budget) |
 | `pnpm test:long` | Long tier: deterministic long runs, native-ESM allocation guards, real-process smokes (server, bots, bench CLI) and the client production build (blocking in CI; D-032) |
+| `pnpm test:load` | Load tier: real server, bots and a headless human on real time (NET-09, 16 bots + 1 human; reported 63-bot and 4 × 16 legs); `pnpm build` first (CI job, not blocking; D-045) |
 | `pnpm test:movement` | Movement tests |
 | `pnpm test:net` | Netcode tests |
 | `pnpm test:balance` | Balance tests |
@@ -73,7 +74,7 @@ docs/       specs, roadmap, decisions, handoffs.
 | `pnpm format` | Apply Biome formatting and safe fixes |
 | `pnpm greybox` | Recompile the greybox courses into `content/maps/` |
 | `pnpm bench` | Microbenchmarks (`--strict` fails on a missed budget) |
-| `pnpm bots --count 16 --profile wan-150-loss2` | Headless bot load test (JSON + markdown summary in `reports/bots/`) |
+| `pnpm bots --count 16 --profile wan-150-loss2` | Headless bot load test (JSON + markdown summary in `reports/bots/`; `--human` adds a headless browser player) |
 | `pnpm demo-info <file> [--json]` | What a server demo holds: header, duration, records, players, cvar changes (D-044) |
 | `pnpm feel-report` | Movement metrics vs. targets |
 | `pnpm balance-report` | Hits-to-kill / TTK tables |

@@ -1,10 +1,12 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { HOST_GATE_LOAD_PER_CORE, type HostGate } from "./host";
 
 /**
  * A bots run's summary (M3 design §2.15, D-036): the configuration, the server's run window, every
  * bot's numbers and their aggregate, the host, and PASS/FAIL against the budgets of docs/10 §4
- * (server §4.1, network §4.2) and the prediction's health (no strike, no misprediction). Written
+ * (server §4.1, network §4.2) and the prediction's health (no strike, no misprediction); with
+ * D-045 the host gate and, with `--human`, the human stand-in's own section and checks. Written
  * as `<stamp>.json` and `<stamp>.md`. Bandwidth is payload plus WebSocket framing as it crossed
  * each bot's socket, KB = 1000 B.
  */
@@ -149,6 +151,89 @@ export interface SummaryHost {
   readonly loadAvg1End: number;
   readonly node: string;
   readonly platform: string;
+  /** The generators' niceness the run reached (host.ts), or null when it left its own. */
+  readonly nice: number | null;
+  /**
+   * The server child's least favoured thread niceness once the generators were lowered (it keeps
+   * its own, below theirs), or null with `--server` or without `/proc`.
+   */
+  readonly serverNice: number | null;
+}
+
+/**
+ * The human stand-in (`--human`, D-045): the page's autotest status at the window's start and
+ * end (`app/game.ts`) and what the summary judges of it. Totals the page counts from its start
+ * (mispredictions, NET-05 violations) are judged whole, as the e2e judges them; rates over the
+ * window by the page's own clock (`statusAt`).
+ */
+export interface HumanNumbers {
+  /** The page ran with every bot drawn when the window began. */
+  readonly joined: boolean;
+  /** Why the page's session ended during the run, or null. */
+  readonly closed: string | null;
+  /** The server's players at the end (the bots + 1 when the human stayed). */
+  readonly players: number;
+  readonly seconds: number;
+  readonly fps: number;
+  /** Frames longer than the input buffer, of all frames in the window (D-028). */
+  readonly longShare: number;
+  readonly correctionsPerS: number;
+  readonly meanCorrection: number;
+  /** Corrections on snapshots the server did not flag starved, since the page started. */
+  readonly mispredictions: number;
+  readonly starved: number;
+  readonly hardResyncs: number;
+  /** Remotes drawn at the end. */
+  readonly remotes: number;
+  /** NET-05 violations on frames that were not long, since the page started. */
+  readonly remoteJumps: number;
+  readonly remoteJudged: number;
+  /** The interpolation delay at the end, ticks. */
+  readonly interpDelay: number;
+  readonly extrapolatedShare: number;
+  /** Console and page errors. */
+  readonly errors: readonly string[];
+  readonly start: Readonly<Record<string, string>>;
+  readonly end: Readonly<Record<string, string>>;
+}
+
+/** The human's numbers from two status readings (null when the page never reached the window). */
+export function humanNumbers(
+  start: Readonly<Record<string, string>> | null,
+  end: Readonly<Record<string, string>>,
+  players: number,
+  errors: readonly string[],
+): HumanNumbers {
+  const a = start ?? {};
+  const n = (s: Readonly<Record<string, string>>, key: string) => Number(s[key] ?? 0) || 0;
+  const grew = (key: string) => n(end, key) - n(a, key);
+  const seconds = grew("statusAt") / 1000;
+  const frames = grew("frames");
+  const corrections = grew("corrections");
+  const remoteFrames = grew("remoteFrames");
+  const closed =
+    end.state === "error" || end.state === "closed" ? (end.error ?? end.state ?? "") : null;
+  return {
+    joined: start !== null,
+    closed,
+    players,
+    seconds: r3(seconds),
+    fps: r3(seconds > 0 ? frames / seconds : 0),
+    longShare: r3(frames > 0 ? grew("longFrames") / frames : 0),
+    correctionsPerS: r3(seconds > 0 ? corrections / seconds : 0),
+    meanCorrection: r3(corrections > 0 ? grew("correctionDist") / corrections : 0),
+    mispredictions: n(end, "corrections") - n(end, "starvedCorrections"),
+    starved: grew("starved"),
+    hardResyncs: grew("hardResyncs"),
+    remotes: n(end, "remotes"),
+    remoteJumps: n(end, "remoteJumps"),
+    remoteJudged: grew("remoteJudged"),
+    interpDelay: n(end, "interpDelay"),
+    extrapolatedShare: r3(remoteFrames > 0 ? grew("extrapolations") / remoteFrames : 0),
+    errors,
+    start: a,
+    end,
+  };
 }
 
 export interface SummaryCheck {
@@ -166,6 +251,8 @@ export interface BotsSummary {
   readonly host: SummaryHost;
   readonly server: SummaryServer | null;
   readonly aggregate: SummaryAggregate;
+  /** The human stand-in, with `--human`. */
+  readonly human: HumanNumbers | null;
   readonly bots: readonly BotNumbers[];
   readonly checks: readonly SummaryCheck[];
   readonly pass: boolean;
@@ -237,10 +324,20 @@ export function evaluateChecks(
   server: SummaryServer | null,
   agg: SummaryAggregate,
   serverMissing = "none",
+  extra: { readonly gate?: HostGate | null; readonly human?: HumanNumbers | null } = {},
 ): SummaryCheck[] {
   const checks: SummaryCheck[] = [];
   const add = (name: string, target: string, value: string, pass: boolean, judged = true) =>
     checks.push({ name, target, value, pass, judged });
+  const gate = extra.gate ?? null;
+  if (gate !== null) {
+    add(
+      "host gate (1-minute load before the run)",
+      `≤ ${HOST_GATE_LOAD_PER_CORE} per core`,
+      gate.text,
+      gate.pass,
+    );
+  }
   add(
     "bots joined and stayed",
     `${config.count}`,
@@ -304,7 +401,51 @@ export function evaluateChecks(
     agg.mispredictions === 0,
   );
   add("remote jumps (NET-05 violations)", "0", `${agg.remoteJumps}`, agg.remoteJumps === 0);
+  const h = extra.human ?? null;
+  if (h !== null) humanChecks(config, h, add);
   return checks;
+}
+
+/**
+ * The human stand-in's checks (D-045, M3 design §5 "16 + 1"): it joined and stayed (the server
+ * holds the bots + 1, the page draws every bot), its prediction within NET-04's bounds (under 1
+ * correction a second, a mean under 2 u) with no misprediction, its remotes smooth (no NET-05
+ * violation) at a 2–6 tick delay, and no page error. The rest of the e2e health rule (resyncs and
+ * starves against frame timing) is the load test's, from the readings the summary keeps.
+ */
+function humanChecks(
+  config: SummaryConfig,
+  h: HumanNumbers,
+  add: (name: string, target: string, value: string, pass: boolean) => void,
+): void {
+  add(
+    "human joined and stayed",
+    `players ${config.count + 1}, remotes ${config.count}`,
+    `players ${h.players}, remotes ${h.remotes}${h.joined ? "" : ", never joined"}` +
+      (h.closed === null ? "" : `, closed: ${h.closed}`),
+    h.joined && h.closed === null && h.players === config.count + 1 && h.remotes === config.count,
+  );
+  add(
+    "human corrections per s (NET-04)",
+    "< 1",
+    h.correctionsPerS.toFixed(3),
+    h.correctionsPerS < 1,
+  );
+  add(
+    "human mean correction (NET-04)",
+    "< 2 u",
+    `${h.meanCorrection.toFixed(3)} u`,
+    h.meanCorrection < 2,
+  );
+  add("human mispredictions", "0", `${h.mispredictions}`, h.mispredictions === 0);
+  add("human remote jumps (NET-05 violations)", "0", `${h.remoteJumps}`, h.remoteJumps === 0);
+  add(
+    "human interp delay",
+    "2–6 ticks",
+    `${h.interpDelay} ticks`,
+    h.interpDelay >= 2 && h.interpDelay <= 6,
+  );
+  add("human page errors", "0", `${h.errors.length}`, h.errors.length === 0);
 }
 
 /** A run passes when every judged check does. */
@@ -330,7 +471,9 @@ export function summaryMarkdown(s: BotsSummary): string {
     `${c.count} bots${c.human ? " + 1 human" : ""} on \`${c.map}\` (match \`${c.match}\`, maxClients ` +
       `${c.maxClients}) at \`${c.profile}\` for ${c.minutes} min, seed ${c.seed}; server ${c.server}, ` +
       `build \`${c.buildHash}\`. Host: ${s.host.cpus} CPUs, load ${s.host.loadAvg1Start.toFixed(2)} → ` +
-      `${s.host.loadAvg1End.toFixed(2)} (1 min), Node ${s.host.node} on ${s.host.platform}.`,
+      `${s.host.loadAvg1End.toFixed(2)} (1 min), Node ${s.host.node} on ${s.host.platform}` +
+      `${s.host.nice === null ? "" : `, generators at nice ${s.host.nice}`}` +
+      `${s.host.serverNice === null ? "" : `, server at nice ${s.host.serverNice}`}.`,
   );
   out.push("");
   out.push("## Checks (docs/10 §4, prediction health)");
@@ -449,6 +592,40 @@ export function summaryMarkdown(s: BotsSummary): string {
     ]),
   );
   out.push("");
+  const h = s.human;
+  if (h !== null) {
+    out.push("## Human (headless Chromium)");
+    out.push("");
+    out.push(header(["Metric", "Value"]));
+    out.push(
+      row([
+        "joined / players / remotes",
+        `${h.joined ? "yes" : "no"} / ${h.players} / ${h.remotes}` +
+          (h.closed === null ? "" : `; closed: ${h.closed}`),
+      ]),
+    );
+    out.push(row(["frames", `${h.fps.toFixed(1)} fps, ${(h.longShare * 100).toFixed(1)}% long`]));
+    out.push(
+      row([
+        "corrections per s / mean",
+        `${h.correctionsPerS.toFixed(3)} / ${h.meanCorrection.toFixed(3)} u`,
+      ]),
+    );
+    out.push(
+      row([
+        "mispredictions / starved / hard resyncs",
+        `${h.mispredictions} / ${h.starved} / ${h.hardResyncs}`,
+      ]),
+    );
+    out.push(
+      row([
+        "interp delay / extrapolated or held / NET-05 violations",
+        `${h.interpDelay} ticks / ${(h.extrapolatedShare * 100).toFixed(2)}% / ${h.remoteJumps} of ${h.remoteJudged} judged`,
+      ]),
+    );
+    out.push(row(["page errors", h.errors.length === 0 ? "none" : h.errors.join("; ")]));
+    out.push("");
+  }
   out.push("## Bots");
   out.push("");
   out.push(

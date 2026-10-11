@@ -1,10 +1,13 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { type HostGate, hostGate } from "../../src/bots/host";
 import {
   aggregate,
   type BotNumbers,
   type BotsSummary,
   evaluateChecks,
+  type HumanNumbers,
+  humanNumbers,
   reportStamp,
   type SummaryConfig,
   type SummaryServer,
@@ -88,21 +91,64 @@ function bot(id: number, over: Partial<BotNumbers> = {}): BotNumbers {
   };
 }
 
-function summary(bots: BotNumbers[], srv: SummaryServer | null = server): BotsSummary {
+/** The page's status at the window's start and end: 120 s at 57 fps, 2 corrections of 0.5 u. */
+const pageStart: Record<string, string> = {
+  state: "running",
+  statusAt: "10000",
+  frames: "500",
+  longFrames: "5",
+  corrections: "1",
+  starvedCorrections: "1",
+  correctionDist: "0.400",
+  starved: "1",
+  hardResyncs: "0",
+  remotes: "2",
+  remoteJumps: "0",
+  remoteJudged: "900",
+  remoteFrames: "1000",
+  extrapolations: "0",
+  interpDelay: "4",
+};
+const pageEnd: Record<string, string> = {
+  ...pageStart,
+  statusAt: "130000",
+  frames: "7340",
+  longFrames: "77",
+  corrections: "3",
+  starvedCorrections: "3",
+  correctionDist: "1.400",
+  starved: "4",
+  remoteJudged: "13900",
+  remoteFrames: "14680",
+  extrapolations: "29",
+  interpDelay: "3",
+};
+
+const gateOk = hostGate(1.2, 4);
+
+function summary(
+  bots: BotNumbers[],
+  srv: SummaryServer | null = server,
+  extra: { gate?: HostGate | null; human?: HumanNumbers | null } = {},
+): BotsSummary {
   const agg = aggregate(bots);
-  const checks = evaluateChecks(config, srv, agg);
+  const cfg = extra.human == null ? config : { ...config, human: true };
+  const checks = evaluateChecks(cfg, srv, agg, "none", extra);
   return {
     startedAt: "2026-10-09T01:02:03.456Z",
-    config,
+    config: cfg,
     host: {
       cpus: 4,
       loadAvg1Start: 0.25,
       loadAvg1End: 1.5,
       node: "22.22.0",
       platform: "linux-x64",
+      nice: 10,
+      serverNice: 0,
     },
     server: srv,
     aggregate: agg,
+    human: extra.human ?? null,
     bots,
     checks,
     pass: summaryPasses(checks),
@@ -249,8 +295,111 @@ describe("bots summary", () => {
     });
   });
 
+  it("gates on the host's load per core before the run: a FAIL with the numbers, never a skip", () => {
+    expect(hostGate(2, 4)).toMatchObject({ pass: true, perCore: 0.5 });
+    expect(hostGate(2.01, 4).pass).toBe(false);
+    expect(hostGate(3.2, 4).text).toBe("load 3.20 on 4 CPUs = 0.80 per core > 0.5 before the run");
+    expect(hostGate(0.4, 0).pass).toBe(false);
+    // Never a rounding that reads as a pass: 0.500025 per core is over the gate.
+    expect(hostGate(2.0001, 4).text).toBe(
+      "load 2.00 on 4 CPUs = 0.500025 per core > 0.5 before the run",
+    );
+    expect(hostGate(1.9999, 4).text).toBe(
+      "load 2.00 on 4 CPUs = 0.50 per core ≤ 0.5 before the run",
+    );
+    const busy = summary([bot(0), bot(1)], server, { gate: hostGate(3.2, 4) });
+    expect(busy.pass).toBe(false);
+    expect(busy.checks[0]).toEqual({
+      name: "host gate (1-minute load before the run)",
+      target: "≤ 0.5 per core",
+      value: "load 3.20 on 4 CPUs = 0.80 per core > 0.5 before the run",
+      pass: false,
+      judged: true,
+    });
+    expect(summary([bot(0), bot(1)], server, { gate: gateOk }).pass).toBe(true);
+  });
+
+  it("reads the human's numbers from the page's two readings", () => {
+    const h = humanNumbers(pageStart, pageEnd, 3, []);
+    expect(h).toMatchObject({
+      joined: true,
+      closed: null,
+      players: 3,
+      seconds: 120,
+      fps: 57,
+      longShare: 0.011,
+      correctionsPerS: 0.017,
+      meanCorrection: 0.5,
+      mispredictions: 0,
+      starved: 3,
+      hardResyncs: 0,
+      remotes: 2,
+      remoteJumps: 0,
+      remoteJudged: 13000,
+      interpDelay: 3,
+      extrapolatedShare: 0.002,
+    });
+    const never = humanNumbers(null, { state: "error", error: "disconnected: kicked" }, 2, []);
+    expect(never).toMatchObject({ joined: false, closed: "disconnected: kicked", remotes: 0 });
+    expect(humanNumbers(pageStart, { ...pageEnd, state: "closed" }, 2, []).closed).toBe("closed");
+    expect(
+      humanNumbers(pageStart, { ...pageEnd, state: "closed", error: "server shut down" }, 2, [])
+        .closed,
+    ).toBe("server shut down");
+  });
+
+  it("counts mispredictions and NET-05 violations since the page started, the rest over the window", () => {
+    // One misprediction and one jump before the window, one hard resync in it.
+    const start = { ...pageStart, corrections: "2", remoteJumps: "1", hardResyncs: "1" };
+    const end = { ...pageEnd, corrections: "4", remoteJumps: "1", hardResyncs: "2" };
+    expect(humanNumbers(start, end, 3, [])).toMatchObject({
+      mispredictions: 1,
+      remoteJumps: 1,
+      hardResyncs: 1,
+    });
+  });
+
+  it("judges the human: joined and stayed, NET-04's bounds, no misprediction or jump, its delay", () => {
+    const human = (end: Record<string, string>, players = 3, errors: string[] = []) =>
+      summary([bot(0), bot(1)], server, { human: humanNumbers(pageStart, end, players, errors) });
+    const fails = (s: BotsSummary) => s.checks.filter((c) => !c.pass).map((c) => c.name);
+    expect(human(pageEnd).pass).toBe(true);
+    expect(fails(human(pageEnd, 2))).toEqual(["human joined and stayed"]);
+    expect(fails(human({ ...pageEnd, remotes: "1" }))).toEqual(["human joined and stayed"]);
+    expect(fails(human({ ...pageEnd, state: "error", error: "x" }))).toEqual([
+      "human joined and stayed",
+    ]);
+    // 120 corrections in 120 s is 1/s: not under it. A mean of 2 u is not under 2 either.
+    expect(fails(human({ ...pageEnd, corrections: "121", starvedCorrections: "121" }))).toEqual([
+      "human corrections per s (NET-04)",
+    ]);
+    expect(fails(human({ ...pageEnd, correctionDist: "4.400" }))).toEqual([
+      "human mean correction (NET-04)",
+    ]);
+    expect(fails(human({ ...pageEnd, starvedCorrections: "2" }))).toEqual(["human mispredictions"]);
+    expect(fails(human({ ...pageEnd, remoteJumps: "1" }))).toEqual([
+      "human remote jumps (NET-05 violations)",
+    ]);
+    expect(fails(human({ ...pageEnd, interpDelay: "1" }))).toEqual(["human interp delay"]);
+    expect(fails(human({ ...pageEnd, interpDelay: "7" }))).toEqual(["human interp delay"]);
+    expect(human({ ...pageEnd, interpDelay: "2" }).pass).toBe(true);
+    expect(human({ ...pageEnd, interpDelay: "6" }).pass).toBe(true);
+    expect(fails(human({ ...pageEnd, state: "closed" }))).toEqual(["human joined and stayed"]);
+    // A page that never reached the window: only the join fails, whatever the end reads.
+    const never = summary([bot(0), bot(1)], server, {
+      human: humanNumbers(null, pageEnd, 3, []),
+    });
+    expect(fails(never)).toEqual(["human joined and stayed"]);
+    expect(fails(human(pageEnd, 3, ["page: boom"]))).toEqual(["human page errors"]);
+  });
+
   it("renders the markdown the golden file pins", () => {
-    const md = summaryMarkdown(summary([bot(0), bot(3, { closed: "timed out" })]));
+    const md = summaryMarkdown(
+      summary([bot(0), bot(3, { closed: "timed out" })], server, {
+        gate: gateOk,
+        human: humanNumbers(pageStart, pageEnd, 3, []),
+      }),
+    );
     const golden = readFileSync(new URL("./fixtures/summary.golden.md", import.meta.url), "utf8");
     expect(md).toBe(golden);
   });

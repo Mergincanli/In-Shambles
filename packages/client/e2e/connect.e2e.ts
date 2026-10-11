@@ -61,6 +61,9 @@ describe("client e2e: connect to a Node server (D-031)", () => {
     const s = end.s;
     // The bundle is strict about builds: joining at all means the page's hash is the server's.
     expect(status).toMatchObject({ buildHash: s0.buildHash, matches: [{ players: 1 }] });
+    // …and the page says so itself (what `pnpm bots --human` compares before it plays, D-045).
+    expect(s.buildHash).toBe(s0.buildHash);
+    expect(Number(s.correctionDist), JSON.stringify(s)).toBeGreaterThanOrEqual(0);
     expect(s.map).toBe("arena_greybox");
     expect(s.state).toBe("running");
     expect(Number(s.snapshots), JSON.stringify(s)).toBeGreaterThan(120);

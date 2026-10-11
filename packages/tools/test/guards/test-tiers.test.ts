@@ -8,14 +8,16 @@ import {
   TestCostReporter,
 } from "../../../../scripts/test-cost-reporter.mjs";
 import fastConfig from "../../../../vitest.config";
+import loadConfig, { GATED_LOAD, LOAD_GLOB } from "../../../../vitest.load.config";
 import longConfig, { LONG_GLOB, REALTIME_LONG } from "../../../../vitest.long.config";
 import { fromRoot } from "../../src/paths";
 
-// The test tiers (D-032, M3 design §2.16): `pnpm test` (fast, every `*.test.ts` under a package)
-// and `pnpm test:long` (`*.long.ts` under `packages/<pkg>/long/`, blocking in CI), each with its
-// budget reported by the test-cost reporter. A file in the wrong place would run in no tier, or
-// in both: these checks keep every test in exactly one. The guard's describes must not start with
-// an ID prefix.
+// The test tiers (D-032, M3 design §2.16): `pnpm test` (fast, every `*.test.ts` under a package),
+// `pnpm test:long` (`*.long.ts` under `packages/<pkg>/long/`, blocking in CI), each with its budget
+// reported by the test-cost reporter, and `pnpm test:load` (`packages/tools/load/*.load.ts`, real
+// processes on real time; CI's own job, not blocking, D-045). A file in the wrong place would run
+// in no tier, or in both: these checks keep every test in exactly one. The guard's describes must
+// not start with an ID prefix.
 
 const rootScripts: Record<string, string> = JSON.parse(
   readFileSync(fromRoot("package.json"), "utf8"),
@@ -27,6 +29,14 @@ const packageFiles = readdirSync(fromRoot("packages"), { recursive: true, encodi
   .map((file) => file.replaceAll("\\", "/"));
 
 const longFiles = packageFiles.filter((file) => file.endsWith(".long.ts"));
+const loadFiles = packageFiles.filter((file) => file.endsWith(".load.ts"));
+const ci = readFileSync(fromRoot(".github", "workflows", "ci.yml"), "utf8");
+
+/** A CI job's text: from its key to the next job key (two-space indent). */
+function ciJob(name: string): string {
+  const job = new RegExp(`^ {2}${name}:\\n([\\s\\S]*?)(?=^ {2}[a-z][\\w-]*:\\n|(?![\\s\\S]))`, "m");
+  return job.exec(ci)?.[1] ?? "";
+}
 
 function costReporter(config: { test?: { reporters?: unknown } }): TestCostReporter | undefined {
   const reporters = config.test?.reporters;
@@ -99,10 +109,59 @@ describe("test tiers", () => {
     }
   });
 
+  it("run the load tier with its own config: the gated legs first, then the reported ones", () => {
+    expect(rootScripts["test:load"]).toBe("vitest run --config vitest.load.config.ts");
+    expect(LOAD_GLOB).toBe("packages/tools/load/*.load.ts");
+    expect(loadConfig.test?.include).toBeUndefined();
+    expect(loadConfig.test?.projects).toEqual([
+      {
+        extends: true,
+        test: {
+          name: "load",
+          include: [...GATED_LOAD],
+          fileParallelism: false,
+          sequence: { groupOrder: 1 },
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: "load-reported",
+          include: [LOAD_GLOB],
+          exclude: [...configDefaults.exclude, ...GATED_LOAD],
+          fileParallelism: false,
+          sequence: { groupOrder: 2 },
+        },
+      },
+    ]);
+    // NET-09 and the 16 + 1 check gate (M3 design §2.16); every other load file only reports.
+    expect(GATED_LOAD).toEqual([
+      "packages/tools/load/net-09-server-perf.load.ts",
+      "packages/tools/load/load-16-plus-1.load.ts",
+    ]);
+    for (const file of GATED_LOAD) expect(loadFiles).toContain(file.slice("packages/".length));
+  });
+
+  it("keep every load file directly in packages/tools/load, and no fast or long test there", () => {
+    expect(loadFiles.length).toBeGreaterThan(GATED_LOAD.length);
+    for (const file of loadFiles) expect(file).toMatch(/^tools\/load\/[^/]+\.load\.ts$/);
+    expect(packageFiles.filter((f) => /^[^/]+\/load\/.*\.(test|long)\.ts$/.test(f))).toEqual([]);
+  });
+
+  it("report the load tier in a CI job of its own that never blocks (D-045)", () => {
+    const load = ciJob("load");
+    const runs = [...load.matchAll(/^ {6}- run: (.+)$/gm)].map((m) => m[1]);
+    // The production builds first: a strict leg refuses a build older than its sources.
+    expect(runs.indexOf("pnpm build")).toBeGreaterThan(-1);
+    expect(runs.indexOf("pnpm test:load")).toBeGreaterThan(runs.indexOf("pnpm build"));
+    expect(load).toMatch(/^ {4}continue-on-error: true$/m);
+    expect(load).toMatch(/actions\/upload-artifact@/);
+    // Neither tier that blocks runs it.
+    expect(ciJob("check")).not.toMatch(/test:load/);
+  });
+
   it("block CI on the long tier, after the fast one, in the check job", () => {
-    const ci = readFileSync(fromRoot(".github", "workflows", "ci.yml"), "utf8");
-    // The check job: from its key to the next job key (two-space indent).
-    const check = /^ {2}check:\n([\s\S]*?)(?=^ {2}[a-z][\w-]*:\n|(?![\s\S]))/m.exec(ci)?.[1] ?? "";
+    const check = ciJob("check");
     const runs = [...check.matchAll(/^ {6}- run: (.+)$/gm)].map((m) => m[1]);
     expect(runs).toContain("pnpm test:long");
     expect(runs.indexOf("pnpm test:long")).toBe(runs.indexOf("pnpm test") + 1);

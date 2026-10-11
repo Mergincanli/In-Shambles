@@ -12,6 +12,8 @@ const label = document.getElementById("label");
 const errorBox = document.getElementById("error");
 const canvas = document.getElementById("view");
 if (label) label.textContent = bootLabel(__BUILD_HASH__);
+// The page's build, so a harness can refuse a stale build before it plays (`pnpm bots --human`).
+if (status !== null) status.buildHash = __BUILD_HASH__;
 
 function showError(message: string): void {
   if (status !== null) {

@@ -53,6 +53,13 @@ export function fpsBetween(a: Sample, b: Sample): number {
  */
 export interface Link {
   readonly webSocket: boolean;
+  /**
+   * The page plays over a simulated link that delays and drops packets itself (`net_profile`,
+   * e.g. wan-100-loss1, the 16 + 1 load leg, D-045): its cmds starve by the profile on frames
+   * that were on time, as the bots' do, so the starve checks say nothing; misprediction and
+   * on-time resyncs are still judged.
+   */
+  readonly lossyProfile?: boolean;
 }
 
 /**
@@ -107,7 +114,7 @@ export function expectHealthy(a: Sample, b: Sample, link: Link): void {
     1,
   );
   expect(onTime(b) - onTime(a), `hard resyncs in on-time frames: ${detail}`).toBe(0);
-  if (long > 0) return;
+  if (long > 0 || link.lossyProfile === true) return;
   const excused = (key: string) => (link.webSocket ? grew(a, b, key) : 0);
   const why = link.webSocket ? "no long frame or link gap" : "no long frame";
   expect(

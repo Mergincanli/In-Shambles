@@ -1,5 +1,5 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { cpus, loadavg, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   ClientSim,
@@ -28,6 +28,17 @@ import {
 } from "@game/client/net";
 import { findNetProfile, NET_PROFILES, type NetProfile, NetSimTransport } from "@game/shared";
 import { loadCourse } from "../scenarios/course";
+import { buildRefusal, buildWarning } from "./builds";
+import {
+  type HostGate,
+  type HostLoad,
+  holdNice,
+  hostGate,
+  hostLoad,
+  lowerPriority,
+  processNice,
+} from "./host";
+import { HumanPlayer, type PageStatus } from "./human";
 import { createBotInput } from "./routes";
 import { type ServerChild, serverChildArgs, startServerChild } from "./serverChild";
 import {
@@ -35,6 +46,8 @@ import {
   type BotNumbers,
   type BotsSummary,
   evaluateChecks,
+  type HumanNumbers,
+  humanNumbers,
   r3,
   type SummaryConfig,
   type SummaryServer,
@@ -51,12 +64,15 @@ import { BotTap, histogramMax, histogramPercentile } from "./tap";
  * map WELCOME names from disk. Before connecting, the runner reads the target match's
  * `maxClients` from `GET /status` and refuses a count that does not fit.
  *
- * Timeline: connect (100 ms apart) → every bot active (or the join timeout) → the measured window
- * of `minutes` → read the server's metrics → disconnect → the summary. Without `--server` it
- * starts the server itself (serverChild.ts) and reads the run window from its `--metrics-out`
- * file after stopping it; with `--server` it reads `GET /metrics` at the window's start and end,
- * so the counters and traffic are the bots' window's. A server that stops answering, or a child
- * that died, still leaves a summary, with the server's numbers missing and the reason.
+ * Timeline: the host gate → the server child (if any) → `/status` and the count check → this
+ * process lowers its priority → the human stand-in's page (`--human`: its build hash must be the
+ * server's) → the bots connect (100 ms apart) → every bot active and the human playing with every
+ * bot drawn (or the join timeout) → the measured window of `minutes` → read the server's metrics
+ * → disconnect → the summary. Without `--server` it starts the server itself (serverChild.ts) and
+ * reads the run window from its `--metrics-out` file after stopping it; with `--server` it reads
+ * `GET /metrics` at the window's start and end, so the counters and traffic are the bots'
+ * window's. A server that stops answering, or a child that died, still leaves a summary, with the
+ * server's numbers missing and the reason.
  */
 
 /** Frames per second each bot runs (design: 60 Hz). */
@@ -68,6 +84,8 @@ const JOIN_GAP_MS = 100;
 const JOIN_TIMEOUT_MS = 20_000;
 /** The server child's discarded start (design: 10 s; at most a quarter of a short run). */
 const DISCARD_S = 10;
+/** How often the generators' priority is re-held (host.ts holdNice), ms. */
+const NICE_HOLD_MS = 1000;
 /** Progress lines while the window runs, ms apart. */
 const PROGRESS_MS = 10_000;
 /**
@@ -86,8 +104,23 @@ export interface BotRunOptions {
   /** `ws://host:port[/path]`; null starts the server as a child. */
   readonly server: string | null;
   readonly seed: number;
-  /** A headless browser player as well (M3 increment 18; refused before). */
+  /** A headless browser player as well (human.ts, D-045). */
   readonly human: boolean;
+  /**
+   * Judges the code as it is: refuses a stale server bundle (when it starts the server) or client
+   * build (`--human`), and a host that fails the gate (default false; the CLI's `--strict`).
+   */
+  readonly strict?: boolean;
+  /**
+   * The host gate (host.ts): the 1-minute load per core before the run, a judged check (default
+   * false, as for in-process tests whose host is busy by design; the CLI always gates).
+   */
+  readonly hostGate?: boolean;
+  /**
+   * The niceness this process lowers itself to once its server child runs (bots, `vite preview`
+   * and Chromium with it); 0, the default, leaves it (the CLI: 10, D-045).
+   */
+  readonly nice?: number;
   /** Where `<stamp>.json` and `.md` go; null writes nothing. */
   readonly outDir: string | null;
   /** Progress lines; none when absent. */
@@ -101,11 +134,21 @@ export interface BotRunOptions {
    * play). In-process tests pass false to save its cost; it never changes a result.
    */
   readonly primer?: boolean;
+  /** The host's load and cores as the gate reads them (tests pass a busy host). */
+  readonly hostLoad?: () => HostLoad;
 }
 
-/** A run the runner will not start: a bad option or a count the match can't hold. */
+/**
+ * A run the runner will not start: a bad option, a count the match can't hold, a stale build
+ * (under `--strict`, or a human's page of another build).
+ */
 export class BotsRefused extends Error {
   override name = "BotsRefused";
+}
+
+/** A `--strict` run that FAILs before it starts: the host gate (exit 1, never a skip). */
+export class BotsFailed extends Error {
+  override name = "BotsFailed";
 }
 
 /** One match as `GET /status` lists it. */
@@ -124,13 +167,25 @@ export interface ServerStatus {
 
 /**
  * Why `count` bots (plus a human) don't fit `match`, or null when they do. Players already in the
- * match count against its `maxClients` too.
+ * match count against its `maxClients` too. The human needs the match to itself and the bots: its
+ * joined check is the server's players = bots + 1 and its page drawing exactly the bots.
  */
 export function checkCount(count: number, human: boolean, match: StatusMatch): string | null {
   const who = `count ${count}${human ? " + human" : ""}`;
+  if (human && match.players > 0) {
+    return (
+      `--human: match ${match.name} already holds ${match.players} players; the human's joined ` +
+      "check needs a match with only the bots"
+    );
+  }
   if (count + (human ? 1 : 0) + match.players <= match.maxClients) return null;
   const already = match.players > 0 ? ` + ${match.players} players already in` : "";
   return `${who}${already} > maxClients ${match.maxClients} on match ${match.name}`;
+}
+
+/** Why the human's page may not play against this server, or null: it must be the same build. */
+export function hashRefusal(pageHash: string, serverHash: string): string | null {
+  return pageHash === serverHash ? null : `rebuild: preview ${pageHash} ≠ server ${serverHash}`;
 }
 
 /** A named match's path (D-047): the server's own rule (`/m/<name>`, wsListener.ts). */
@@ -197,12 +252,10 @@ async function tryJson(url: string): Promise<{ json: unknown } | { error: string
 
 /** Checks the options that need no server. */
 export function validateOptions(o: BotRunOptions): NetProfile {
-  if (!Number.isInteger(o.count) || o.count < 1 || o.count > 64) {
-    throw new BotsRefused(`--count ${o.count}: expected 1–64`);
-  }
-  if (o.human) {
+  const most = o.human ? 63 : 64;
+  if (!Number.isInteger(o.count) || o.count < 1 || o.count > most) {
     throw new BotsRefused(
-      "--human: the headless browser player arrives with M3 increment 18 (D-045)",
+      `--count ${o.count}: expected 1–${most}${o.human ? " with --human" : ""}`,
     );
   }
   const profile = findNetProfile(o.profile);
@@ -407,21 +460,24 @@ class Bot {
 }
 
 /**
- * Frames every bot at 60 Hz from one `setTimeout` chain: bot i's frames are offset by i/N of a
- * frame, so the bots' sends spread over the frame like separate clients'. A bot more than a frame
- * late skips ahead instead of running a burst of frames. Once a second each bot samples its peaks.
+ * Frames every bot at 60 Hz from one `setTimeout` chain: bot i of N's frames are offset by i/N of
+ * a frame, so the bots' sends spread over the frame like separate clients'. A bot more than a
+ * frame late skips ahead instead of running a burst of frames. Once a second each bot samples its
+ * peaks. Bots join it as they are made (`add`), each just before it connects.
  */
 class FrameLoop {
   private timer: NodeJS.Timeout | null = null;
   private nextSecond = 0;
+  private readonly bots: Bot[] = [];
 
-  constructor(private readonly bots: readonly Bot[]) {
-    const now = performance.now();
-    for (let i = 0; i < bots.length; i++) {
-      (bots[i] as Bot).nextFrameAt = now + (i * FRAME_MS) / bots.length;
-    }
-    this.nextSecond = now + 1000;
+  constructor(private readonly planned: number) {
+    this.nextSecond = performance.now() + 1000;
     this.wake();
+  }
+
+  add(b: Bot): void {
+    b.nextFrameAt = performance.now() + (this.bots.length * FRAME_MS) / this.planned;
+    this.bots.push(b);
   }
 
   stop(): void {
@@ -440,6 +496,8 @@ class FrameLoop {
       }
       next = Math.min(next, b.nextFrameAt);
     }
+    // No bot yet (they join through `add`): look again a frame from now.
+    if (next === Number.POSITIVE_INFINITY) next = now + FRAME_MS;
     if (now >= this.nextSecond) {
       for (const b of this.bots) b.sampleSecond(now);
       this.nextSecond += 1000;
@@ -482,6 +540,8 @@ interface MetricsJson {
   matches: Record<
     string,
     {
+      /** The match's own run window, s: a per-match `metrics reset` restarts it alone. */
+      runS: number;
       starved: number;
       snapshots: number;
       fullSnapshots: number;
@@ -503,9 +563,17 @@ interface MetricsJson {
  * `/metrics` (or the `--metrics-out` file) as the summary's server section. With `begin` (a
  * `--server`'s `/metrics` when the bots' window opened) the counters and traffic are end minus
  * start over the time between the two readings, unless the run window restarted in between (then
- * they already lie inside the bots' window). `sinceConnectS` is the time since the first bot
- * connected, at the end reading: a longer run window began before the bots.
+ * they already lie inside the bots' window). A restart shows as a window that grew by less than
+ * the `betweenS` seconds between the readings (less a second of slack): a `--metrics-discard`
+ * ending, or a console `metrics reset`, after the start reading (the 4 × 16 load leg's servers
+ * discard their first 10 s while the bots join). The process's counters follow the process's
+ * window, the match's its own (a per-match `metrics reset <match>` restarts that one alone).
+ * `sinceConnectS` is the time since the first bot connected, at the end reading: a longer run
+ * window began before the bots.
  */
+/** How much less than the time between two readings a run window may have grown, s. */
+const RESTART_SLACK_S = 1;
+
 export function serverSection(
   metrics: unknown,
   matchName: string,
@@ -513,6 +581,7 @@ export function serverSection(
   players: number,
   begin: unknown,
   sinceConnectS: number,
+  betweenS = 0,
 ): SummaryServer {
   const m = metrics as MetricsJson;
   const p = m.process;
@@ -520,9 +589,13 @@ export function serverSection(
   if (match === undefined) throw new Error(`server metrics have no match ${matchName}`);
   const b = begin as MetricsJson | null;
   const bm = b?.matches[matchName];
-  const delta = b !== null && bm !== undefined && p.runS >= b.process.runS;
+  const kept = (end: number, start: number) => end >= start + betweenS - RESTART_SLACK_S;
+  const pDelta = b !== null && kept(p.runS, b.process.runS);
+  const delta = bm !== undefined && kept(match.runS, bm.runS);
+  const sinceP = (end: number, start: number | undefined) =>
+    pDelta ? end - (start as number) : end;
   const since = (end: number, start: number | undefined) => (delta ? end - (start as number) : end);
-  const deltaS = delta ? p.runS - (b as MetricsJson).process.runS : p.runS;
+  const deltaS = delta ? match.runS - (bm as { runS: number }).runS : match.runS;
   const kb = (bytes: number, perS: number) =>
     delta ? r3(deltaS > 0 ? bytes / deltaS / 1000 : 0) : perS;
   return {
@@ -540,7 +613,7 @@ export function serverSection(
       peakRss: p.memoryMB.peakRss,
     },
     cpuMsPerWallS: p.cpuMsPerWallS,
-    droppedTicks: since(p.droppedTicks, b?.process.droppedTicks),
+    droppedTicks: sinceP(p.droppedTicks, b?.process.droppedTicks),
     starved: since(match.starved, bm?.starved),
     fullSnapshots: since(match.fullSnapshots, bm?.fullSnapshots),
     snapshots: since(match.snapshots, bm?.snapshots),
@@ -575,9 +648,16 @@ export interface BotRunResult {
 /** Runs the bots and returns (and writes) the summary. Throws BotsRefused on a refused run. */
 export async function runBots(o: BotRunOptions): Promise<BotRunResult> {
   const profile = validateOptions(o);
+  const strict = o.strict ?? false;
+  const stale = buildRefusal({ strict, human: o.human, ownServer: o.server === null });
+  if (stale !== null) throw new BotsRefused(stale);
   const log = o.log ?? (() => {});
   const startedAt = new Date().toISOString();
-  const loadStart = loadavg()[0] as number;
+  const readHost = o.hostLoad ?? hostLoad;
+  const hostStart = readHost();
+  const loadStart = hostStart.load1;
+  const gate: HostGate | null = o.hostGate === true ? hostGate(loadStart, hostStart.cpus) : null;
+  if (gate !== null && !gate.pass && strict) throw new BotsFailed(`host gate: ${gate.text}`);
   const runS = o.minutes * 60;
 
   let child: ServerChild | null = null;
@@ -597,9 +677,12 @@ export async function runBots(o: BotRunOptions): Promise<BotRunResult> {
     url = o.server;
     serverName = o.server;
   }
-
+  const serverPid = new Set(child?.child.pid === undefined ? [] : [child.child.pid]);
+  let relowered = 0;
+  let holder: NodeJS.Timeout | null = null;
   const bots: Bot[] = [];
   let loop: FrameLoop | null = null;
+  let human: HumanPlayer | null = null;
   try {
     const status = (await getJson(statusUrl(url))) as ServerStatus;
     const match = matchOf(url, status);
@@ -610,27 +693,49 @@ export async function runBots(o: BotRunOptions): Promise<BotRunResult> {
     if (buildHash !== status.buildHash) {
       throw new Error(`build hash: listening ${buildHash} ≠ /status ${status.buildHash}`);
     }
-    log(
-      `bots: ${o.count} on ${match.map} (match ${match.name}, maxClients ${match.maxClients}) at ` +
-        `${profile.name}, server ${serverName}, build ${buildHash}`,
-    );
-
-    for (let i = 0; i < o.count; i++) {
-      bots.push(
-        new Bot(
-          i,
-          url,
-          createBotInput(match.map, i, o.seed),
-          profile,
-          o.seed + i,
-          buildHash,
-          o.primer ?? true,
-        ),
-      );
+    // The generators below the server (D-045): once the run will happen (a refused run keeps its
+    // caller's priority) and after the child is spawned, so the server keeps its own…
+    const nice = (o.nice ?? 0) > 0 ? lowerPriority(o.nice as number) : null;
+    // …and held there: Chromium raises its own threads where it may (holdNice).
+    if (nice !== null) {
+      holder = setInterval(() => {
+        relowered += holdNice(nice, serverPid);
+      }, NICE_HOLD_MS);
+      holder.unref();
     }
-    loop = new FrameLoop(bots);
+    const serverNice = child?.child.pid === undefined ? null : processNice(child.child.pid);
+    log(
+      `bots: ${o.count}${o.human ? " + human" : ""} on ${match.map} (match ${match.name}, ` +
+        `maxClients ${match.maxClients}) at ${profile.name}, server ${serverName}, build ` +
+        `${buildHash}${nice === null ? "" : `, generators at nice ${nice}`}` +
+        `${serverNice === null ? "" : `, server at nice ${serverNice}`}`,
+    );
+    if (gate !== null && !gate.pass) log(`bots: FAIL host gate: ${gate.text}`);
+    const warning = buildWarning({ strict, human: o.human });
+    if (warning !== null) log(`bots: ${warning}`);
+    if (o.human) {
+      human = await HumanPlayer.start(url, profile.name);
+      const wrongBuild = hashRefusal(await human.buildHash(), buildHash);
+      if (wrongBuild !== null) throw new BotsRefused(wrongBuild);
+      if (nice !== null) relowered += holdNice(nice, serverPid);
+    }
+
+    // Each bot's socket opens as it is made, and the server's hello timeout (`sv_helloTimeout`,
+    // 2 s, D-041) runs from the open: so each is made right before it connects, never all first.
+    loop = new FrameLoop(o.count);
     const connectStart = performance.now();
-    for (const b of bots) {
+    for (let i = 0; i < o.count; i++) {
+      const b = new Bot(
+        i,
+        url,
+        createBotInput(match.map, i, o.seed),
+        profile,
+        o.seed + i,
+        buildHash,
+        o.primer ?? true,
+      );
+      bots.push(b);
+      loop.add(b);
       b.client.connect();
       await sleep(JOIN_GAP_MS);
     }
@@ -643,10 +748,21 @@ export async function runBots(o: BotRunOptions): Promise<BotRunResult> {
       await sleep(50);
     }
     const joined = bots.filter((b) => b.joined).length;
+    // The human is in once its page plays (past its idle start) and draws every bot.
+    let humanStart: PageStatus | null = null;
+    if (human !== null) {
+      const left = Math.max(1000, JOIN_TIMEOUT_MS - (performance.now() - joinStart));
+      humanStart = await human.waitFor(
+        (s) => s.state === "running" && Number(s.remotes) === o.count && Number(s.distance) > 0,
+        left,
+      );
+      log(`bots: human ${humanStart === null ? "did not join" : "joined"}`);
+    }
     log(`bots: ${joined} of ${o.count} joined; measuring ${o.minutes} min`);
 
     // A --server's counters at the window's start, so the summary's are the bots' window's.
     const begin = child === null ? await tryJson(statusUrl(url, "metrics")) : null;
+    const beginAt = performance.now();
     for (const b of bots) b.begin();
     const windowStart = performance.now();
     while (!o.abort?.aborted) {
@@ -661,6 +777,7 @@ export async function runBots(o: BotRunOptions): Promise<BotRunResult> {
     }
     const seconds = (performance.now() - windowStart) / 1000;
     const numbers = bots.map((b) => b.numbers(seconds));
+    const humanEnd = human === null ? null : await human.status();
 
     // The server's run window: GET /metrics now, or the child's file once it stopped. A server
     // that no longer answers leaves the server section out, with the reason.
@@ -676,10 +793,25 @@ export async function runBots(o: BotRunOptions): Promise<BotRunResult> {
       const sinceConnectS = (performance.now() - connectStart) / 1000;
       if ("json" in end) {
         const start = begin !== null && "json" in begin ? begin.json : null;
-        server = serverSection(end.json, match.name, "GET /metrics", players, start, sinceConnectS);
+        const betweenS = (performance.now() - beginAt) / 1000;
+        server = serverSection(
+          end.json,
+          match.name,
+          "GET /metrics",
+          players,
+          start,
+          sinceConnectS,
+          betweenS,
+        );
       } else {
         serverMissing = end.error;
       }
+    }
+    let humanNums: HumanNumbers | null = null;
+    if (human !== null && humanEnd !== null) {
+      humanNums = humanNumbers(humanStart, humanEnd, players, human.errors.slice());
+      await human.close();
+      human = null;
     }
     for (const b of bots) b.client.disconnect("bots run over");
     await sleep(200);
@@ -707,6 +839,7 @@ export async function runBots(o: BotRunOptions): Promise<BotRunResult> {
       child = null;
     }
 
+    if (relowered > 0) log(`bots: held ${relowered} raised generator threads at nice ${nice}`);
     const config: SummaryConfig = {
       count: o.count,
       profile: profile.name,
@@ -720,19 +853,22 @@ export async function runBots(o: BotRunOptions): Promise<BotRunResult> {
       maxClients: match.maxClients,
     };
     const agg = aggregate(numbers);
-    const checks = evaluateChecks(config, server, agg, serverMissing);
+    const checks = evaluateChecks(config, server, agg, serverMissing, { gate, human: humanNums });
     const summary: BotsSummary = {
       startedAt,
       config,
       host: {
-        cpus: cpus().length,
+        cpus: hostStart.cpus,
         loadAvg1Start: r3(loadStart),
-        loadAvg1End: r3(loadavg()[0] as number),
+        loadAvg1End: r3(readHost().load1),
         node: process.versions.node,
         platform: `${process.platform}-${process.arch}`,
+        nice,
+        serverNice,
       },
       server,
       aggregate: agg,
+      human: humanNums,
       bots: numbers,
       checks,
       pass: summaryPasses(checks),
@@ -740,6 +876,8 @@ export async function runBots(o: BotRunOptions): Promise<BotRunResult> {
     const files = o.outDir === null ? null : writeSummary(o.outDir, summary);
     return { summary, files };
   } finally {
+    if (holder !== null) clearInterval(holder);
+    await human?.close();
     loop?.stop();
     for (const b of bots) if (!b.client.closed) b.client.disconnect("bots run over");
     await child?.stop();

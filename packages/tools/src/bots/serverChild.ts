@@ -1,7 +1,6 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
 import { fromRoot } from "../paths";
+import { buildState, SERVER_BUILD } from "./builds";
 
 /**
  * The server a bots run starts when no `--server` is given (M3 design §2.15, D-036): the built
@@ -20,7 +19,7 @@ const LISTEN_TIMEOUT_MS = 30_000;
 /** How long the child may take to exit after SIGTERM before it is killed. */
 const EXIT_TIMEOUT_MS = 5_000;
 
-export const SERVER_BUNDLE = fromRoot("packages", "server", "dist", "main.js");
+export const SERVER_BUNDLE = SERVER_BUILD.output;
 const SERVER_DIR = fromRoot("packages", "server");
 
 /**
@@ -64,30 +63,13 @@ export interface ServerChild {
   stop(): Promise<number | null>;
 }
 
-/** The newest modification time (ms) of any file under `dir`. */
-function newestMtime(dir: string): number {
-  let newest = 0;
-  for (const entry of readdirSync(dir, { recursive: true, encoding: "utf8" })) {
-    const st = statSync(join(dir, entry));
-    if (st.isFile()) newest = Math.max(newest, st.mtimeMs);
-  }
-  return newest;
-}
-
 /**
  * Whether the bundle is there and newer than the code it is built from (the server's and the
- * shared package's sources and the build script): a stale bundle would run yesterday's server
- * without flags this run needs, so the source runs instead.
+ * shared package's sources and the build script, builds.ts): a stale bundle would run yesterday's
+ * server without flags this run needs, so the source runs instead (a `--strict` run refuses it).
  */
 export function bundleIsFresh(): boolean {
-  if (!existsSync(SERVER_BUNDLE)) return false;
-  const built = statSync(SERVER_BUNDLE).mtimeMs;
-  const sources = Math.max(
-    newestMtime(join(SERVER_DIR, "src")),
-    newestMtime(fromRoot("packages", "shared", "src")),
-    statSync(join(SERVER_DIR, "build.mjs")).mtimeMs,
-  );
-  return built >= sources;
+  return buildState(SERVER_BUILD) === "fresh";
 }
 
 /**

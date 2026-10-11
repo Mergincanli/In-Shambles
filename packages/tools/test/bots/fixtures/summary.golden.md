@@ -1,11 +1,12 @@
 # Bots run 2026-10-09T01:02:03.456Z: FAIL
 
-2 bots on `arena_greybox` (match `main`, maxClients 32) at `wan-100-loss1` for 2 min, seed 1; server child (dist), build `abc1234`. Host: 4 CPUs, load 0.25 → 1.50 (1 min), Node 22.22.0 on linux-x64.
+2 bots + 1 human on `arena_greybox` (match `main`, maxClients 32) at `wan-100-loss1` for 2 min, seed 1; server child (dist), build `abc1234`. Host: 4 CPUs, load 0.25 → 1.50 (1 min), Node 22.22.0 on linux-x64, generators at nice 10, server at nice 0.
 
 ## Checks (docs/10 §4, prediction health)
 
 | Check | Target | Measured | Result |
 | --- | --- | --- | --- |
+| host gate (1-minute load before the run) | ≤ 0.5 per core | load 1.20 on 4 CPUs = 0.30 per core ≤ 0.5 before the run | PASS |
 | bots joined and stayed | 2 | 2 joined, 1 closed | FAIL |
 | server tick p50 | ≤ 1.5 ms | 0.410 ms | PASS |
 | server tick p99 | ≤ 4 ms | 1.210 ms | PASS |
@@ -19,6 +20,13 @@
 | bot strikes | 0 | 0 | PASS |
 | mispredictions (corrections not on a starved snapshot) | 0 | 0 | PASS |
 | remote jumps (NET-05 violations) | 0 | 0 | PASS |
+| human joined and stayed | players 3, remotes 2 | players 3, remotes 2 | PASS |
+| human corrections per s (NET-04) | < 1 | 0.017 | PASS |
+| human mean correction (NET-04) | < 2 u | 0.500 u | PASS |
+| human mispredictions | 0 | 0 | PASS |
+| human remote jumps (NET-05 violations) | 0 | 0 | PASS |
+| human interp delay | 2–6 ticks | 3 ticks | PASS |
+| human page errors | 0 | 0 | PASS |
 
 ## Server (run window)
 
@@ -49,6 +57,17 @@
 | delta share | 0.0% |
 | interp delay (mean / max) | 3.50 / 4 ticks |
 | remotes extrapolated or held (worst) / NET-05 violations | 0.25% / 0 of 14000 judged |
+
+## Human (headless Chromium)
+
+| Metric | Value |
+| --- | --- |
+| joined / players / remotes | yes / 3 / 2 |
+| frames | 57.0 fps, 1.1% long |
+| corrections per s / mean | 0.017 / 0.500 u |
+| mispredictions / starved / hard resyncs | 0 / 3 / 0 |
+| interp delay / extrapolated or held / NET-05 violations | 3 ticks / 0.20% / 0 of 13000 judged |
+| page errors | none |
 
 ## Bots
 

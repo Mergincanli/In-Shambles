@@ -259,6 +259,8 @@ describe("game frame loop (M2 design §2)", () => {
     expect(Number(status.snapshots)).toBeGreaterThan(150);
     expect(Number(status.ticks)).toBeGreaterThan(150);
     expect(Number(status.corrections)).toBe(0);
+    // The corrections' summed distance (NET-04's mean for `pnpm bots --human`, D-045).
+    expect(status.correctionDist).toBe("0.000");
     expect(Number(status.frames)).toBeGreaterThan(game.frames - 40);
     expect(Number(status.frames)).toBeLessThanOrEqual(game.frames);
     // The page clock at the report, at most one status interval old.

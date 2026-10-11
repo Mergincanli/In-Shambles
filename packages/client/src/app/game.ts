@@ -29,6 +29,7 @@ import {
   RC_DT_MS,
   RemoteJumpMeter,
   type RemoteView,
+  STAT_CORRECTION_DIST,
   STAT_CORRECTIONS,
   STAT_HARD_RESYNCS,
   STAT_REMOTE_EXTRAPOLATED,
@@ -588,6 +589,8 @@ export class Game {
     s.ticks = String(this.firstTick < 0 ? 0 : Math.max(0, c.predictor.latestTick - this.firstTick));
     s.snapshots = String(t[STAT_SNAPSHOTS]);
     s.corrections = String(t[STAT_CORRECTIONS]);
+    // Their summed distance (u), so a reader can judge NET-04's mean (the 16 + 1 load leg, D-045).
+    s.correctionDist = (t[STAT_CORRECTION_DIST] as number).toFixed(3);
     s.hardResyncs = String(t[STAT_HARD_RESYNCS]);
     s.starved = String(t[STAT_STARVED]);
     s.starvedCorrections = String(t[STAT_STARVED_CORRECTIONS]);
