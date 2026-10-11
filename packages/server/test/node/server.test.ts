@@ -579,6 +579,36 @@ describe("Node server (in process, real WebSocket)", () => {
       startServer({ args: ["--port", "0", "--set", "sv_sendBufferClose=2048"], cwd: serverDir }),
     ).rejects.toThrow(/sv_sendBufferClose \(2048\) must be above sv_sendBufferDrop \(32768\)/);
   });
+
+  it("resolves the flags' relative paths against argsCwd, the default server.cfg against cwd", async () => {
+    // main.ts passes INIT_CWD: `pnpm dev:server --cfg x.cfg` typed at the repo root, run by pnpm
+    // from packages/server, reads the root's x.cfg and writes --metrics-out there too.
+    const typedIn = mkdtempSync(join(tmpdir(), "server-args-cwd-"));
+    onTestFinished(() => rmSync(typedIn, { recursive: true, force: true }));
+    writeFileSync(join(typedIn, "x.cfg"), "set pm_gravity 450\n");
+    const server = await startServer({
+      args: ["--port", "0", "--cfg", "x.cfg", "--metrics-out", "out/m.json"],
+      cwd: serverDir,
+      argsCwd: typedIn,
+      primer: false,
+      rconPassword: "",
+    });
+    expect(server.matches.main?.match.cvars.get("pm_gravity")).toBe(450);
+    await server.stop();
+    expect(existsSync(join(typedIn, "out", "m.json"))).toBe(true);
+    expect(existsSync(join(serverDir, "out"))).toBe(false);
+    // No --cfg: packages/server/server.cfg (cwd), not one in the typed-in directory.
+    writeFileSync(join(typedIn, "server.cfg"), "set pm_gravity 1\n");
+    const plain = await startServer({
+      args: ["--port", "0"],
+      cwd: serverDir,
+      argsCwd: typedIn,
+      primer: false,
+      rconPassword: "",
+    });
+    expect(plain.matches.main?.match.cvars.get("pm_gravity")).not.toBe(1);
+    await plain.stop();
+  });
 });
 
 describe("sv_autoRecord (D-044)", () => {

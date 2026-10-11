@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { fromRoot } from "../paths";
 import { GENERATOR_NICE } from "./host";
@@ -27,9 +28,14 @@ export const BOTS_USAGE =
   "usage: pnpm bots --count N --profile P --minutes M --map X " +
   "[--server ws://host:port[/m/<match>]] [--seed S] [--human] [--strict] [--out dir]";
 
-/** The options a command line asks for (defaults: 16 bots, wan-100-loss1, 2 min, arena_greybox). */
+/**
+ * The options a command line asks for (defaults: 16 bots, wan-100-loss1, 2 min, arena_greybox).
+ * A relative `--out` resolves against `cwd`: the directory the command was typed in (INIT_CWD,
+ * which pnpm sets; pnpm runs the script from packages/tools), as `pnpm demo-info` does.
+ */
 export function parseBotArgs(
   args: readonly string[],
+  cwd: string = process.env.INIT_CWD ?? process.cwd(),
 ): BotRunOptions & { readonly strict: boolean } {
   let v: ReturnType<typeof parse>["values"];
   try {
@@ -55,7 +61,7 @@ export function parseBotArgs(
     strict: v.strict ?? false,
     hostGate: true,
     nice: GENERATOR_NICE,
-    outDir: v.out ?? fromRoot("reports", "bots"),
+    outDir: v.out === undefined ? fromRoot("reports", "bots") : resolve(cwd, v.out),
   };
 }
 

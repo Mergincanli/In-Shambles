@@ -39,7 +39,15 @@ process.on("SIGTERM", () => stop("SIGTERM"));
 process.on("uncaughtException", fatal);
 
 try {
-  server = await startServer({ args: process.argv.slice(2), write, console: process.stdin });
+  // `pnpm dev:server` runs this from packages/server: the flags' relative paths resolve against
+  // the directory the command was typed in (INIT_CWD, which pnpm sets), server.cfg's default
+  // against packages/server.
+  server = await startServer({
+    args: process.argv.slice(2),
+    write,
+    console: process.stdin,
+    argsCwd: process.env.INIT_CWD ?? process.cwd(),
+  });
   if (stopSignal !== null) await server.stop(stopSignal).then(() => process.exit(0));
 } catch (e) {
   fatal(e);

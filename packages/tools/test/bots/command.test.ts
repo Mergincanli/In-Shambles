@@ -1,6 +1,6 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { MATCH_NAME, startServer } from "@game/server/node";
 import { describe, expect, it } from "vitest";
 import {
@@ -53,22 +53,25 @@ describe("pnpm bots flags", () => {
       outDir: fromRoot("reports", "bots"),
     });
     expect(
-      parseBotArgs([
-        "--count",
-        "8",
-        "--profile",
-        "lan",
-        "--minutes",
-        "0.5",
-        "--server",
-        "ws://localhost:28700",
-        "--seed",
-        "7",
-        "--strict",
-        "--human",
-        "--out",
-        "x",
-      ]),
+      parseBotArgs(
+        [
+          "--count",
+          "8",
+          "--profile",
+          "lan",
+          "--minutes",
+          "0.5",
+          "--server",
+          "ws://localhost:28700",
+          "--seed",
+          "7",
+          "--strict",
+          "--human",
+          "--out",
+          "x",
+        ],
+        "/typed/here",
+      ),
     ).toMatchObject({
       human: true,
       count: 8,
@@ -77,8 +80,23 @@ describe("pnpm bots flags", () => {
       server: "ws://localhost:28700",
       seed: 7,
       strict: true,
-      outDir: "x",
+      outDir: "/typed/here/x",
     });
+  });
+
+  it("resolves a relative --out against the directory the command was typed in (INIT_CWD)", () => {
+    // pnpm runs the script from packages/tools; INIT_CWD is where `pnpm bots` was typed.
+    const typedIn = join(tmpdir(), "typed-here");
+    const saved = process.env.INIT_CWD;
+    process.env.INIT_CWD = typedIn;
+    try {
+      expect(parseBotArgs(["--out", "../bots"]).outDir).toBe(resolve(typedIn, "../bots"));
+      expect(parseBotArgs(["--out", "/abs/dir"]).outDir).toBe("/abs/dir");
+      expect(parseBotArgs([]).outDir).toBe(fromRoot("reports", "bots"));
+    } finally {
+      if (saved === undefined) delete process.env.INIT_CWD;
+      else process.env.INIT_CWD = saved;
+    }
   });
 
   it.each([[["--bogus"]], [["--count"]], [["--count", "many"]], [["stray"]]])(

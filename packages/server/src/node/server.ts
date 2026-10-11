@@ -63,6 +63,12 @@ export interface StartOptions {
   readonly write?: (line: string) => void;
   /** Where `server.cfg` and relative paths resolve; the process's working directory by default. */
   readonly cwd?: string;
+  /**
+   * Where the command line's relative paths (`--cfg`, `--maps`, `--metrics-out`) resolve; `cwd`
+   * by default. The process passes the directory the command was typed in (INIT_CWD under pnpm,
+   * which runs `pnpm dev:server` from packages/server), as `pnpm demo-info` does.
+   */
+  readonly argsCwd?: string;
   /** Read admin console lines from this stream (stdin in the process); none when absent. */
   readonly console?: NodeJS.ReadableStream;
   /**
@@ -167,6 +173,7 @@ function copyTemplate(template: CvarRegistry): CvarRegistry {
  */
 export async function startServer(options: StartOptions = {}): Promise<RunningServer> {
   const cwd = options.cwd ?? process.cwd();
+  const argsCwd = options.argsCwd ?? cwd;
   const write = options.write ?? (() => {});
   const log = createJsonLog(write);
 
@@ -179,7 +186,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   const template = new CvarRegistry();
   registerPmoveCvars(template);
   registerServerReplicatedCvars(template);
-  const cfgPath = cli.cfg === null ? resolve(cwd, "server.cfg") : resolve(cwd, cli.cfg);
+  const cfgPath = cli.cfg === null ? resolve(cwd, "server.cfg") : resolve(argsCwd, cli.cfg);
   let cfg: CfgEntry[] = [];
   if (existsSync(cfgPath)) cfg = parseServerCfg(readFileSync(cfgPath, "utf8"), cfgPath);
   else if (cli.cfg !== null) throw new ConfigError(`--cfg ${cli.cfg}: no such file`);
@@ -196,7 +203,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   }
   applyAssignments(cli.sets, [cvars, template]);
 
-  const mapsDir = cli.mapsDir === null ? defaultMapsDir(cwd) : resolve(cwd, cli.mapsDir);
+  const mapsDir = cli.mapsDir === null ? defaultMapsDir(cwd) : resolve(argsCwd, cli.mapsDir);
   if (mapsDir === null) throw new ConfigError("no content/maps found; pass --maps <dir>");
   const specs: MatchSpec[] = [];
   for (const e of cfg) if (e.kind === "match_add") specs.push(e.spec);
@@ -492,7 +499,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     options.console === undefined
       ? () => {}
       : startConsole(options.console, (line) => runConsoleLine(line, consoleHost, log));
-  const metricsOut = cli.metricsOut === null ? null : resolve(cwd, cli.metricsOut);
+  const metricsOut = cli.metricsOut === null ? null : resolve(argsCwd, cli.metricsOut);
 
   let stopping: Promise<void> | null = null;
   const stop = (signal?: string): Promise<void> => {
