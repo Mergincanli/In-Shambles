@@ -33,6 +33,15 @@ export const WS_CLOSE_REASON_MAX = 123;
 export const WS_MAX_QUEUED_RELIABLE = 64;
 
 /**
+ * Messages a socket may deliver between two polls before its reads pause until the next poll
+ * (design value): what the inbox can hold, so an honest client, even one releasing seconds of
+ * backlog, never reaches it. A flood of tiny frames then costs the shared event loop at most one
+ * socket read (`ws` parses a whole chunk at once) per tick, the rest left to TCP backpressure;
+ * a transport that is no longer polled (kicked or closed) stays paused once it reaches it again.
+ */
+export const WS_PAUSE_AFTER_MESSAGES = MAX_QUEUED_UNRELIABLE + WS_MAX_QUEUED_RELIABLE;
+
+/**
  * Send-buffer limits (`sv_sendBufferDrop`, `sv_sendBufferClose`; ESTIMATEs, docs/06 §8). One
  * object shared by every transport of a listener, so a changed value applies to all.
  */
@@ -64,6 +73,9 @@ export interface WsSocket {
   readonly bufferedAmount: number;
   send(data: Uint8Array): void;
   close(code?: number, reason?: string): void;
+  /** Stops reading from the socket (`ws`: pauses the TCP socket) until `resume`. */
+  pause(): void;
+  resume(): void;
 }
 
 /** Due time of every arrival: the inbox is FIFO, both channels interleaved as on the socket. */
@@ -93,6 +105,8 @@ export function closeReason(reason: string): string {
  * unreliable messages (the oldest dropped as lost) and WS_MAX_QUEUED_RELIABLE reliable ones (past
  * that the socket closes 1008). An unreliable message over MAX_UNRELIABLE_BYTES is queued as a
  * zero-length message, which no decoder accepts, so the match strikes it without parsing it.
+ * After WS_PAUSE_AFTER_MESSAGES arrivals since the last poll the socket's reads pause, and the
+ * next poll (or `close`) resumes them.
  *
  * A send copies the packet into one fresh Buffer that `ws` keeps until it is flushed: with the
  * received Buffers, the one allocation per packet at this boundary (D-030 extends D-026's
@@ -118,6 +132,9 @@ export class WsTransport implements Transport {
   /** A close is queued behind the arrivals: accept nothing more, deliver it from `poll()`. */
   private closing = false;
   private closingReason = "";
+  /** Messages that arrived since the last poll (or `close`), and whether reads are paused. */
+  private sincePoll = 0;
+  private paused = false;
 
   constructor(
     private readonly socket: WsSocket,
@@ -146,6 +163,7 @@ export class WsTransport implements Transport {
    * session state, also before the match sends a session anything.
    */
   poll(): void {
+    if (this.open) this.resumeReads();
     if (this.open && !this.closing && this.socket.bufferedAmount > this.limits.sendBufferClose) {
       this.fail(WS_CLOSE_POLICY, "too slow");
     }
@@ -177,6 +195,9 @@ export class WsTransport implements Transport {
     this.shut();
     // A forced close already closed the socket with its own code.
     if (!wasClosing) this.closeSocket(this.closeCode, reason);
+    // The peer's closing handshake must still be read; a peer that floods on is paused again for
+    // good, since nothing polls a closed transport (ws gives up on the close after 30 s).
+    this.resumeReads();
   }
 
   isOpen(): boolean {
@@ -198,6 +219,11 @@ export class WsTransport implements Transport {
    * type, an ArrayBuffer or fragments otherwise.
    */
   receive(data: Uint8Array | ArrayBuffer | readonly Uint8Array[], isBinary: boolean): void {
+    // Counted before anything else: also what arrives once the transport is closed or closing.
+    if (++this.sincePoll >= WS_PAUSE_AFTER_MESSAGES && !this.paused) {
+      this.paused = true;
+      this.socket.pause();
+    }
     if (!this.open || this.closing) return;
     if (!isBinary) {
       this.fail(WS_CLOSE_UNSUPPORTED, "binary messages only");
@@ -261,6 +287,14 @@ export class WsTransport implements Transport {
       traffic.bytesOut += wsWireBytes(len, false);
       traffic.messagesOut++;
     }
+  }
+
+  /** Starts a new count of arrivals and lets the socket be read again if it was paused. */
+  private resumeReads(): void {
+    this.sincePoll = 0;
+    if (!this.paused) return;
+    this.paused = false;
+    this.socket.resume();
   }
 
   /** Closes the socket with `code` now and tells the user from its next poll. */

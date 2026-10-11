@@ -24,6 +24,8 @@ interface FakeMatch {
 function setup() {
   const clock = { ms: 0, cpuUs: 0 };
   const mem = { heapUsed: 10 * MB, external: 1 * MB, rss: 50 * MB };
+  // Set to make the memory read throw, as process.memoryUsage does with every descriptor taken.
+  const memFail = { on: false };
   const passClock: PassClock = { now: () => clock.ms, cpuMicros: () => clock.ms * 500 };
   const fake: FakeMatch = {
     metrics: new MatchMetrics(),
@@ -53,12 +55,15 @@ function setup() {
       loop: () => loop,
       connections: () => 3,
       now: () => clock.ms,
-      memory: () => ({ ...mem }),
+      memory: () => {
+        if (memFail.on) throw new Error("EMFILE: too many open files, uv_resident_set_memory");
+        return { ...mem };
+      },
       cpuMicros: () => clock.cpuUs,
     },
     log,
   );
-  return { clock, mem, fake, m, pass, loop, lines, metrics };
+  return { clock, mem, memFail, fake, m, pass, loop, lines, metrics };
 }
 
 const MB = 1024 * 1024;
@@ -219,6 +224,21 @@ describe("ServerMetrics", () => {
     });
     metrics.resetRun();
     expect(metrics.json().process.memoryMB).toMatchObject({ peakHeapExternal: 21, peakRss: 60 });
+  });
+
+  it("keeps the last memory sample when the read throws (EMFILE), so no timer or page throws", () => {
+    const { mem, memFail, lines, metrics } = setup();
+    mem.heapUsed = 30 * MB;
+    metrics.sampleMemory();
+    memFail.on = true;
+    mem.heapUsed = 90 * MB;
+    expect(metrics.sampleMemory()).toMatchObject({ heapUsed: 30 * MB, rss: 50 * MB });
+    expect(metrics.json().process.memoryMB).toMatchObject({ heapUsed: 30, peakHeapExternal: 31 });
+    metrics.logInterval();
+    expect(lines.at(-1)?.[1]).toMatchObject({ memoryMB: { heapUsed: 30 } });
+    expect(metrics.memoryErrors).toBe(3);
+    memFail.on = false;
+    expect(metrics.json().process.memoryMB).toMatchObject({ heapUsed: 90, peakHeapExternal: 91 });
   });
 
   it("starts the run window again on resetRun, for the process and every match", () => {

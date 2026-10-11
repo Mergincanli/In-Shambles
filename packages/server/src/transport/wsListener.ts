@@ -58,6 +58,12 @@ export interface ListenOptions {
    * a client could forge it.
    */
   readonly peerAddress?: (req: IncomingMessage, socket: Duplex) => string;
+  /**
+   * An error of the listening socket once it is bound (an `accept` that fails with EMFILE when a
+   * flood holds every file descriptor): reported here, never thrown, so the process keeps
+   * serving the connections it has.
+   */
+  readonly onError?: (e: Error) => void;
 }
 
 /** Whether `ip` is a loopback address (127.0.0.0/8, ::1, IPv4-mapped 127.x), exempt per address. */
@@ -96,9 +102,25 @@ export function matchNameForPath(url: string | undefined): string | null {
   return MATCH_PATH.exec(url)?.[1] ?? null;
 }
 
-/** Writes a bare HTTP refusal on a socket that asked to upgrade, and drops it. */
+/**
+ * How long a refused upgrade's answer may take to flush before its socket is destroyed anyway
+ * (design value): a peer that never reads can't hold the descriptor.
+ */
+const REFUSE_FLUSH_MS = 1000;
+
+/**
+ * Writes a bare HTTP refusal on a socket that asked to upgrade, and drops it: destroyed once the
+ * answer is flushed (or after REFUSE_FLUSH_MS), as `ws` does. The HTTP server's sockets allow
+ * half-open connections and nothing watches one handed to `upgrade`, so a bare `end()` would leave
+ * the socket open, counted nowhere, for as long as the peer keeps its side open.
+ */
 function refuseUpgrade(socket: Duplex, status: number, text: string): void {
-  socket.end(`HTTP/1.1 ${status} ${text}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+  const timer = setTimeout(() => socket.destroy(), REFUSE_FLUSH_MS);
+  timer.unref();
+  socket.end(`HTTP/1.1 ${status} ${text}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`, () => {
+    clearTimeout(timer);
+    socket.destroy();
+  });
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
@@ -190,6 +212,9 @@ export class WsListener {
       this.http.once("error", onError);
       this.http.listen(this.options.port, this.options.host, () => {
         this.http.off("error", onError);
+        // From here an error (EMFILE on accept) is reported, not thrown: an "error" event
+        // without a listener would end the process and every match in it.
+        this.http.on("error", (e: Error) => this.options.onError?.(e));
         resolve(this);
       });
     });
@@ -306,7 +331,16 @@ export class WsListener {
       sendJson(res, 405, { error: "method not allowed" });
       return;
     }
-    sendJson(res, 200, path === "/status" ? target.status() : target.metrics());
+    let body: unknown;
+    try {
+      body = path === "/status" ? target.status() : target.metrics();
+    } catch {
+      // A page that can't be built (the process out of descriptors) answers 500 and the server
+      // goes on.
+      sendJson(res, 500, { error: "internal error" });
+      return;
+    }
+    sendJson(res, 200, body);
   }
 }
 

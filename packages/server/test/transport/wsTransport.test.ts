@@ -21,6 +21,7 @@ import {
   WS_CLOSE_TOO_BIG,
   WS_CLOSE_UNSUPPORTED,
   WS_MAX_QUEUED_RELIABLE,
+  WS_PAUSE_AFTER_MESSAGES,
   WsLimits,
   type WsSocket,
   WsTransport,
@@ -36,6 +37,17 @@ class FakeSocket implements WsSocket {
   }
   close(code?: number, reason?: string): void {
     this.closes.push([code, reason]);
+  }
+  /** Pause and resume calls, in order ("p", "r"), and whether reads are paused now. */
+  readonly flow: string[] = [];
+  paused = false;
+  pause(): void {
+    this.flow.push("p");
+    this.paused = true;
+  }
+  resume(): void {
+    this.flow.push("r");
+    this.paused = false;
   }
 }
 
@@ -114,6 +126,44 @@ describe("WsTransport (fake ws)", () => {
       [MSG_PING, 1, 2],
       [MSG_HELLO, 9, 8, 7],
     ]);
+  });
+
+  it("pauses a socket's reads after WS_PAUSE_AFTER_MESSAGES arrivals until the next poll", () => {
+    const { t, socket, got } = rig();
+    const input = msg(MSG_INPUT);
+    for (let i = 1; i < WS_PAUSE_AFTER_MESSAGES; i++) t.receive(input, true);
+    expect(socket.flow).toEqual([]);
+    // The cap: reads pause once; what ws already parsed from that chunk still arrives and queues.
+    for (let i = 0; i < 100; i++) t.receive(input, true);
+    expect(socket.flow).toEqual(["p"]);
+    expect(socket.paused).toBe(true);
+    t.poll();
+    expect(socket.flow).toEqual(["p", "r"]);
+    expect(got).toHaveLength(MAX_QUEUED_UNRELIABLE);
+    // A new count starts at the poll: an honest client's few messages a tick never pause it.
+    for (let tick = 0; tick < 600; tick++) {
+      t.receive(input, true);
+      t.receive(msg(MSG_PING), true);
+      t.poll();
+    }
+    expect(socket.flow).toEqual(["p", "r"]);
+    expect(t.isOpen()).toBe(true);
+  });
+
+  it("resumes reads on close for the peer's handshake, and stays paused once a closed one floods", () => {
+    const { t, socket } = rig();
+    const input = msg(MSG_INPUT);
+    for (let i = 0; i < WS_PAUSE_AFTER_MESSAGES; i++) t.receive(input, true);
+    expect(socket.paused).toBe(true);
+    // The match KICKs it: the close resumes, so an honest peer's close frame is read.
+    t.close("too many bad packets");
+    expect(socket.paused).toBe(false);
+    expect(socket.closes).toEqual([[WS_CLOSE_NORMAL, "too many bad packets"]]);
+    // Nothing polls a closed transport: a peer that floods on is paused for good.
+    for (let i = 0; i < 5 * WS_PAUSE_AFTER_MESSAGES; i++) t.receive(input, true);
+    t.poll();
+    expect(socket.flow).toEqual(["p", "r", "p"]);
+    expect(socket.paused).toBe(true);
   });
 
   it("copies arrivals: the socket may reuse its buffer before the poll", () => {

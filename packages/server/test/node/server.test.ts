@@ -202,6 +202,19 @@ describe("Node server (in process, real WebSocket)", () => {
     expect(server.matches.main?.match.sessionCount).toBe(0);
   });
 
+  it("logs a listening-socket error (EMFILE on accept) and keeps ticking (D-048)", async () => {
+    const { server, lines, port } = await start();
+    const emfile = Object.assign(new Error("accept EMFILE"), { code: "EMFILE" });
+    for (let i = 0; i < 5; i++) server.listener.http.emit("error", emfile);
+    // At most one line a second, with the count since the last.
+    expect(lines.filter((l) => l.ev === "listener_error")).toEqual([
+      expect.objectContaining({ lvl: "error", msg: "accept EMFILE", count: 1 }),
+    ]);
+    const tick = server.matches.main?.match.serverTick ?? 0;
+    await until(() => (server.matches.main?.match.serverTick ?? 0) > tick + 5, "more ticks");
+    expect((await httpJson(port, "/status")).status).toBe(200);
+  });
+
   it("frees the match slot when a client closes its socket", async () => {
     const { server, port } = await start();
     const c = await client(port);

@@ -2080,7 +2080,13 @@ function runTimedPass(n: number): void {
 // channels, the zero-length marker for an oversized unreliable message, drop-oldest past 256),
 // then a poll per 320 arrivals, which also reads the socket's buffered amount. Sends allocate one
 // Buffer each by design (D-030's boundary allocation) and are left out.
-const wsSocket: WsSocket = { bufferedAmount: 0, send: () => {}, close: () => {} };
+const wsSocket: WsSocket = {
+  bufferedAmount: 0,
+  send: () => {},
+  close: () => {},
+  pause: () => {},
+  resume: () => {},
+};
 const wsTransport = new WsTransport(wsSocket, new WsLimits());
 // Counted as the server counts a match's sockets (D-036): payload plus framing per arrival.
 wsTransport.traffic = new WireTraffic();

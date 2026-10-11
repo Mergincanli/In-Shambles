@@ -233,6 +233,13 @@ export class ServerMetrics {
   private readonly retired = new Float64Array(4);
   /** Loop counters at the run window's and the interval's start: dropped, yields. */
   private readonly loopBase = new Float64Array(4);
+  /**
+   * The last memory sample that could be read: `process.memoryUsage` throws when the process is
+   * out of file descriptors (EMFILE, a connection flood), and a report then repeats it.
+   */
+  private lastMemory: MemorySample = { heapUsed: 0, external: 0, rss: 0 };
+  /** Memory reads that threw (EMFILE), since start. */
+  memoryErrors = 0;
 
   constructor(
     private readonly src: MetricsSources,
@@ -330,10 +337,19 @@ export class ServerMetrics {
 
   /**
    * Reads the memory and raises both windows' peaks; the server calls it once a second (and each
-   * report reads it too), so a window's peak is its largest 1 s sample.
+   * report reads it too), so a window's peak is its largest 1 s sample. Never throws: a read that
+   * fails (EMFILE when a flood holds every file descriptor) counts in `memoryErrors` and returns
+   * the last sample, so a timer or `/metrics` can't end the process.
    */
   sampleMemory(): MemorySample {
-    const m = this.memory();
+    let m: MemorySample;
+    try {
+      m = this.memory();
+    } catch {
+      this.memoryErrors++;
+      return this.lastMemory;
+    }
+    this.lastMemory = m;
     const heapExt = m.heapUsed + m.external;
     const p = this.peaks;
     for (let at = 0; at < 4; at += 2) {

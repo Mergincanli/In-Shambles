@@ -388,11 +388,24 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     return { ok: true, text: `match ${name} removed (${kicked} kicked)` };
   };
 
+  // A listening-socket error after the bind (EMFILE on accept in a connection flood) is logged at
+  // most once a second, with how many came since the last line, and the server goes on.
+  let listenerErrors = 0;
+  let listenerErrorAt = Number.NEGATIVE_INFINITY;
+  const onListenerError = (e: Error) => {
+    listenerErrors++;
+    const now = performance.now();
+    if (now - listenerErrorAt < 1000) return;
+    listenerErrorAt = now;
+    log("error", "listener_error", { msg: e.message, count: listenerErrors });
+    listenerErrors = 0;
+  };
   const listener = new WsListener({
     host: String(cvars.get("sv_host")),
     port: cvars.getNumber("sv_port", 0),
     limits,
     admission,
+    onError: onListenerError,
     ...(options.peerAddress === undefined ? {} : { peerAddress: options.peerAddress }),
     target: {
       matchFor: (name) => (name === "" ? (set.default?.name ?? null) : set.has(name) ? name : null),

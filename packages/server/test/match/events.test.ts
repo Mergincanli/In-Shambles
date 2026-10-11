@@ -231,6 +231,8 @@ class FakeSocket implements WsSocket {
     this.sent.push(data);
   }
   close(): void {}
+  pause(): void {}
+  resume(): void {}
 }
 
 /** The client's end of a WsTransport on a FakeSocket: sends go into it, poll reads what it sent. */
