@@ -20,7 +20,18 @@ import {
   decodeReady,
   ENTITY_EVENT_SLOTS,
   ENTITY_NONE,
+  EV_LEAVE_KICKED,
+  EV_LEAVE_LEFT,
+  EV_LEAVE_TIMED_OUT,
+  EVENT_TICK_US_MAX,
+  EVENTS_MAX_PER_MSG,
+  EVK_PLAYER_JOIN,
+  EVK_PLAYER_LEAVE,
+  EVK_SERVER_STATS,
+  type EventRecord,
+  EventsMsg,
   encodeCvars,
+  encodeEvents,
   encodeKick,
   encodePong,
   encodePrint,
@@ -93,6 +104,7 @@ import {
 import { MirrorPool } from "./mirror";
 import { buildSnapshot, SnapshotScheduler } from "./scheduler";
 import {
+  EventOutbox,
   SESSION_ACTIVE,
   SESSION_CLOSED,
   SESSION_CONNECTING,
@@ -117,6 +129,15 @@ export function effectiveMaxClients(requested: number): number {
   const n = Number.isFinite(requested) ? Math.floor(requested) : MATCH_DEFAULT_MAX_CLIENTS;
   return Math.max(1, Math.min(MATCH_MAX_CLIENTS, n));
 }
+
+/**
+ * Ticks between SERVER_STATS events (D-043; design: once a second at 60 Hz): sent on every tick
+ * that is a multiple of it, with the tick times the host last reported.
+ */
+export const SERVER_STATS_INTERVAL_TICKS = TICK_RATE;
+
+/** What sending EVENTS needs from a target: a session's transport, later a demo sink (D-044). */
+export type EventsTarget = Pick<Transport, "sendReliable">;
 
 /** Stamina at spawn, in hundredths: staminaMax = health 100 with no vest (docs/03 §5.2, FACT). */
 export const SPAWN_STAMINA = 100 * 100;
@@ -218,6 +239,8 @@ export class MatchMetrics {
   neutralTicks = 0;
   /** CVARS messages sent (broadcasts and resends). */
   cvarsSent = 0;
+  /** EVENTS messages sent (D-043), all clients. */
+  eventsSent = 0;
   /** rcon commands run, and refused for a wrong password or a locked address (D-042). */
   rconOk = 0;
   rconFailed = 0;
@@ -225,6 +248,12 @@ export class MatchMetrics {
 }
 
 function ignoreLog(): void {}
+
+/** A host-reported time in whole µs, saturated to SERVER_STATS' 16 bits; NaN and ±∞ read 0. */
+function saturateUs(us: number): number {
+  if (!Number.isFinite(us)) return 0;
+  return Math.max(0, Math.min(EVENT_TICK_US_MAX, Math.floor(us)));
+}
 
 /** The PRINT a session gets when its strike score first reaches `sv_strikeWarn` (D-041). */
 function strikeWarning(score: number, kick: number): string {
@@ -275,6 +304,10 @@ function freeClientId(sessions: readonly Session[], cap: number): number {
  *    record, inputBufferHealth = newest cmd tick received − T (clamped to i8), flagged STARVED.
  *    When its worst case is past 1100 B the byte-budget scheduler (D-046, `scheduler.ts`) leaves
  *    some players out, never one two ticks in a row; the tick counts as sent only once it encoded.
+ *    Then its EVENTS (D-043): the roster changes since its last flush (its JOIN burst when it has
+ *    just joined: every player present, then itself; then each JOIN and LEAVE), and on every 60th
+ *    tick SERVER_STATS with the tick times the host last reported (`reportTickStats`; the match
+ *    never reads a clock) and the players in the match, at most 63 events a message.
  * 8. Metrics.
  *
  * After warm-up a tick allocates nothing: messages decode into and encode from preallocated
@@ -358,6 +391,20 @@ export class Match implements MatchAdmin {
   private readonly cmdMsg = new CmdMsg();
   private readonly printMsg = new PrintMsg();
   private readonly kickMsg = new KickMsg();
+  private readonly eventsMsg = new EventsMsg();
+  /**
+   * The JOINs and LEAVEs broadcast since the last tick ended (D-043), kept through the tick for
+   * the demo sink (D-044) and emptied when it ends.
+   */
+  readonly tickEvents = new EventOutbox();
+  /** This tick sends SERVER_STATS (every SERVER_STATS_INTERVAL_TICKS), and its player count. */
+  private statsDue = false;
+  private statsPlayers = 0;
+  /**
+   * p50, p99 and max tick time (µs, saturated at 65535) of the host's last report (0 before it),
+   * which SERVER_STATS carries. Read-only outside the match.
+   */
+  readonly tickTimes = new Int32Array(3);
   /** The cmd simulated for the client in hand. */
   private readonly cmd = new UserCmd();
 
@@ -475,8 +522,10 @@ export class Match implements MatchAdmin {
     transport.onMessage((d, len, reliable) => this.receive(s, d, len, reliable));
     transport.onClose((reason) => {
       if (s.state === SESSION_CLOSED) return;
+      const joined = s.state === SESSION_ACTIVE;
       s.state = SESSION_CLOSED;
       this.anyClosed = true;
+      if (joined) this.announceLeave(s, EV_LEAVE_LEFT);
       if (this.sessionEvents !== null)
         this.sessionEvents("info", "leave", { client: s.clientId, reason });
       else
@@ -486,12 +535,18 @@ export class Match implements MatchAdmin {
     return s;
   }
 
-  /** Sends KICK with `reason`, closes the transport and drops the session after this poll. */
-  kick(s: Session, reason: string): void {
+  /**
+   * Sends KICK with `reason`, closes the transport and drops the session after this poll. A player
+   * who had joined leaves the others' rosters with `leave` (an EV_LEAVE_* reason; kicked unless
+   * said otherwise).
+   */
+  kick(s: Session, reason: string, leave = EV_LEAVE_KICKED): void {
     if (s.state === SESSION_CLOSED) return;
+    const joined = s.state === SESSION_ACTIVE;
     this.sendKickTo(s.transport, reason);
     s.state = SESSION_CLOSED;
     this.anyClosed = true;
+    if (joined) this.announceLeave(s, leave);
     this.metrics.kicks++;
     const strikes = s.strikeScore.score;
     if (this.sessionEvents !== null) {
@@ -540,12 +595,84 @@ export class Match implements MatchAdmin {
       else s.queue.skip(t);
     }
     this.capture(t);
+    this.statsDue = t % SERVER_STATS_INTERVAL_TICKS === 0;
+    if (this.statsDue) {
+      let players = 0;
+      for (let i = 0; i < sessions.length; i++) {
+        if ((sessions[i] as Session).state === SESSION_ACTIVE) players++;
+      }
+      this.statsPlayers = players;
+    }
     for (let i = 0; i < sessions.length; i++) {
       const s = sessions[i] as Session;
-      if (s.state === SESSION_ACTIVE) this.sendSnapshot(s, t);
+      if (s.state !== SESSION_ACTIVE) continue;
+      this.sendSnapshot(s, t);
+      // Still ACTIVE: transports deliver a close only from poll(), so a backpressure close during
+      // the send arrives with the next tick's poll (its LEAVE then), and a closing transport drops
+      // what is sent to it meanwhile.
+      const box = s.events;
+      if (box.count > 0 || this.statsDue) {
+        const before = this.metrics.eventsSent;
+        this.sendEvents(s.transport, box, this.statsDue);
+        s.stats.eventsMessages += this.metrics.eventsSent - before;
+        box.clear();
+      }
     }
     this.currentTick = t;
     this.metrics.ticks++;
+    this.tickEvents.clear();
+  }
+
+  /**
+   * The host's tick times (D-043; µs, from its `TickHistogram`'s last 1 s window), which the next
+   * SERVER_STATS events carry: each saturated to 0…65535 (a value that is not finite reads 0).
+   * Called about once a second; the match itself never reads a clock.
+   */
+  reportTickStats(p50Us: number, p99Us: number, maxUs: number): void {
+    const t = this.tickTimes;
+    t[0] = saturateUs(p50Us);
+    t[1] = saturateUs(p99Us);
+    t[2] = saturateUs(maxUs);
+  }
+
+  /**
+   * Sends the events of `box`, then SERVER_STATS when `stats`, to `target` as EVENTS messages of
+   * at most 63 events each (D-043), in order. Allocates nothing.
+   */
+  sendEvents(target: EventsTarget, box: EventOutbox, stats: boolean): void {
+    const m = this.eventsMsg;
+    m.count = 0;
+    const n = box.count;
+    for (let i = 0; i < n; i++) {
+      if (m.count === EVENTS_MAX_PER_MSG) this.sendEventsMsg(target);
+      const kind = box.kind(i);
+      const e = m.add(kind) as EventRecord;
+      e.clientId = box.clientId(i);
+      if (kind === EVK_PLAYER_JOIN) e.team = box.value(i);
+      else e.reason = box.value(i);
+    }
+    if (stats) {
+      if (m.count === EVENTS_MAX_PER_MSG) this.sendEventsMsg(target);
+      const e = m.add(EVK_SERVER_STATS) as EventRecord;
+      const t = this.tickTimes;
+      e.tickP50Us = t[0] as number;
+      e.tickP99Us = t[1] as number;
+      e.tickMaxUs = t[2] as number;
+      e.players = this.statsPlayers;
+    }
+    if (m.count > 0) this.sendEventsMsg(target);
+  }
+
+  private sendEventsMsg(target: EventsTarget): void {
+    const w = this.writer;
+    w.reset();
+    if (encodeEvents(w, this.eventsMsg)) {
+      target.sendReliable(w.bytes, w.byteLength);
+      this.metrics.eventsSent++;
+    } else {
+      DEV_ASSERT(false, "EVENTS did not encode");
+    }
+    this.eventsMsg.count = 0;
   }
 
   // -------------------------------------------------------------------------------------------
@@ -585,7 +712,7 @@ export class Match implements MatchAdmin {
       if (state === SESSION_CONNECTING) {
         if (age >= limits.helloTimeout) this.kick(s, "handshake timed out");
       } else if (t - s.lastPacketTick >= limits.timeout) {
-        this.kick(s, "timed out");
+        this.kick(s, "timed out", EV_LEAVE_TIMED_OUT);
       } else if (state === SESSION_WELCOMED && age >= limits.handshakeTimeout) {
         this.kick(s, "handshake timed out");
       }
@@ -852,11 +979,41 @@ export class Match implements MatchAdmin {
     s.queue.reset(t + 1);
     this.spawn(s, t);
     s.state = SESSION_ACTIVE;
+    this.announceJoin(s);
     if (this.sessionEvents !== null) {
       this.sessionEvents("info", "ready", { client: s.clientId, tick: t, team: s.team });
     } else {
       this.log("info", `client ${s.clientId} spawned at tick ${t} on team ${s.team}`);
     }
+  }
+
+  /**
+   * The roster for a player who just joined (D-043, M3 design §2.4): it gets a JOIN for every
+   * player present, in id order, then its own, which tells its client the burst is over; every
+   * other player gets its JOIN, as does the tick's broadcast record.
+   */
+  private announceJoin(s: Session): void {
+    const sessions = this.sessions;
+    const own = s.events;
+    for (let i = 0; i < sessions.length; i++) {
+      const o = sessions[i] as Session;
+      if (o === s || o.state !== SESSION_ACTIVE) continue;
+      own.push(EVK_PLAYER_JOIN, o.clientId, o.team);
+      o.events.push(EVK_PLAYER_JOIN, s.clientId, s.team);
+    }
+    own.push(EVK_PLAYER_JOIN, s.clientId, s.team);
+    this.tickEvents.push(EVK_PLAYER_JOIN, s.clientId, s.team);
+  }
+
+  /** A player who had joined left (`reason`: EV_LEAVE_*): every player still in it hears so. */
+  private announceLeave(s: Session, reason: number): void {
+    const sessions = this.sessions;
+    for (let i = 0; i < sessions.length; i++) {
+      const o = sessions[i] as Session;
+      if (o !== s && o.state === SESSION_ACTIVE)
+        o.events.push(EVK_PLAYER_LEAVE, s.clientId, reason);
+    }
+    this.tickEvents.push(EVK_PLAYER_LEAVE, s.clientId, reason);
   }
 
   /**

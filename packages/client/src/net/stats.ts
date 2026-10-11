@@ -64,13 +64,22 @@ export const STAT_DEFERRED_SNAPSHOTS = 24;
  * mean δ, which the netgraph can show as a percentage.
  */
 export const STAT_DILATION = 25;
-export const STAT_COUNT = 26;
+/** Bytes of the snapshots stored (their sum, and the largest: a max stat), for the netgraph. */
+export const STAT_SNAPSHOT_BYTES = 26;
+export const STAT_SNAPSHOT_BYTES_MAX = 27;
+/**
+ * WebSocket framing on top of the payload in `STAT_BYTES_IN`/`STAT_BYTES_OUT` (RFC 6455 headers,
+ * the client's 4 B mask; D-036's accounting): 0 on the Worker's ports, which have none.
+ */
+export const STAT_FRAMING_IN = 28;
+export const STAT_FRAMING_OUT = 29;
+export const STAT_COUNT = 30;
 
 const BUCKETS = 10;
 const BUCKET_MS = 100;
 
 function isMaxStat(stat: number): boolean {
-  return stat === STAT_CORRECTION_MAX;
+  return stat === STAT_CORRECTION_MAX || stat === STAT_SNAPSHOT_BYTES_MAX;
 }
 
 export class NetStats {

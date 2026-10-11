@@ -81,10 +81,11 @@ describe("NET-04 (M2 basic): reconciliation on every profile", () => {
   );
 
   it("bad-250-loss5: converges and logs its corrections", () => {
-    // Seed 10: the adaptive buffer and dilation cover nearly all of this link's jitter (0 or 1
-    // correction a minute over seeds 1–12; before dilation 0 to 3), and this seed has one, so the
-    // correction path runs.
-    const h = run(profile("bad-250-loss5"), 10);
+    // Seed 16: the adaptive buffer and dilation cover nearly all of this link's jitter (since the
+    // server's EVENTS, D-043, whose reliable messages take jitter draws of the link's generator
+    // too: 0 corrections a minute on seeds 1–15 and 17–20, 2 on this one; before EVENTS 0 or 1
+    // over seeds 1–12, before dilation 0 to 3), so the correction path runs.
+    const h = run(profile("bad-250-loss5"), 16);
     expectCircuit(h);
     expectConverged(h);
     const t = h.totals();

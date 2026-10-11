@@ -472,8 +472,12 @@ describe("ClientSim recovery paths", () => {
     }
     // The loopback end under it drops the older ~1500 snapshots before they reach the simulator;
     // on top of those, the client's INPUTs on the way out (since MAX_TICKS_PER_FRAME 8, D-039, up
-    // to 10 around the frame that ends the stall).
-    expect(maxInFlight).toBeLessThanOrEqual(MAX_QUEUED_UNRELIABLE + MAX_TICKS_PER_FRAME + 8);
+    // to 10 around the frame that ends the stall) and the reliable EVENTS the server sent
+    // meanwhile, never dropped: a SERVER_STATS a second (D-043).
+    const statsHeld = Math.ceil(31_000 / 1000);
+    expect(maxInFlight).toBeLessThanOrEqual(
+      MAX_QUEUED_UNRELIABLE + MAX_TICKS_PER_FRAME + 8 + statsHeld,
+    );
     expect(h.totals().hardResyncs).toBe(1);
     const before = h.totals();
     h.run(2000);

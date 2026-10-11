@@ -43,6 +43,7 @@ import {
   SNAPSHOT_STALE,
 } from "./predictor";
 import { RemoteInterpolator } from "./remotes";
+import { Roster } from "./roster";
 import { RenderOffset } from "./smoothing";
 import type { SnapshotStore } from "./snapshotStore";
 import {
@@ -207,6 +208,11 @@ export interface ClientSimOptions {
   /** The session ended (kicked, refused or closed); the page shows `reason` to the player. */
   readonly onClosed?: (reason: string) => void;
   /**
+   * The transport is a WebSocket (a dedicated server): the stats count its framing too, so the
+   * netgraph's traffic is what the wire carries (D-036). False for the Worker's ports.
+   */
+  readonly webSocket?: boolean;
+  /**
    * False keeps the clock's dilation at 0 (its steps stay): NET-07's control. Tests only; true by
    * default.
    */
@@ -275,6 +281,12 @@ export class ClientSim {
   frames = 0;
   /** Messages from PRINT, oldest first; the caller drains it (the console, a test). */
   readonly prints: string[] = [];
+  /**
+   * Who is in the match and the server's tick times, from EVENTS (D-043); its join and leave
+   * notices go to `notices` (oldest first, at most NOTICES_MAX kept), which the page drains.
+   */
+  readonly roster = new Roster();
+  readonly notices: string[] = [];
   /** Movement events of this frame's first predictions (cleared at the start of each frame). */
   readonly events = new TickEvents();
   /**
@@ -367,6 +379,7 @@ export class ClientSim {
       mapReady: () => this.cmap !== null,
       onSnapshot: (h, f) => this.onSnapshot(h, f),
       onCvars: (m) => this.onCvars(m),
+      onEvents: (m) => this.roster.apply(m, this.connection.clientId, this.notices),
       onPrint: (_level, text) => {
         this.prints.push(text);
       },
@@ -383,6 +396,7 @@ export class ClientSim {
       options.buildHash,
       options.nonce ?? 0,
       this.now,
+      options.webSocket ?? false,
     );
     this.remotes = new RemoteInterpolator(
       this.connection.store,

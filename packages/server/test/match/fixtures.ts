@@ -9,12 +9,15 @@ import {
   copyUserCmd,
   decodeCmap,
   decodeCvars,
+  decodeEvents,
   decodeKick,
   decodePong,
   decodePrint,
   decodeSnapshotBody,
   decodeSnapshotHeader,
   decodeWelcome,
+  EventRecord,
+  EventsMsg,
   encodeCmd,
   encodeHello,
   encodeInput,
@@ -25,6 +28,7 @@ import {
   KickMsg,
   MAX_RELIABLE_BYTES,
   MSG_CVARS,
+  MSG_EVENTS,
   MSG_KICK,
   MSG_PONG,
   MSG_PRINT,
@@ -101,6 +105,11 @@ export class TestClient {
   readonly cvars: CvarsMsg[] = [];
   readonly prints: PrintMsg[] = [];
   readonly kicks: KickMsg[] = [];
+  /** Every EVENTS record received, in order (copies), and the EVENTS messages' counts (D-043). */
+  readonly events: EventRecord[] = [];
+  readonly eventMessages: number[] = [];
+  /** When set, every message's type byte in arrival order (opt-in: long runs would grow it). */
+  typeLog: number[] | null = null;
   /** Packets that did not decode (the match must never send one). */
   bad = 0;
   /** Deltas whose baseline this client never decoded (the match must never send one). */
@@ -108,6 +117,7 @@ export class TestClient {
   closed: string | null = null;
   private readonly w = new BitWriter(MAX_RELIABLE_BYTES);
   private readonly r = new BitReader();
+  private readonly eventsIn = new EventsMsg();
   private packetSeq = 0;
 
   constructor(readonly transport: Transport) {
@@ -180,6 +190,7 @@ export class TestClient {
     const r = this.r;
     r.reset(d, len);
     const type = peekMessageType(d, len);
+    this.typeLog?.push(type);
     let ok = false;
     if (type === MSG_WELCOME) {
       const m = new WelcomeMsg();
@@ -221,6 +232,14 @@ export class TestClient {
       const m = new KickMsg();
       ok = decodeKick(r, m);
       if (ok) this.kicks.push(m);
+    } else if (type === MSG_EVENTS) {
+      const m = this.eventsIn;
+      ok = decodeEvents(r, m);
+      if (ok) {
+        this.eventMessages.push(m.count);
+        for (let i = 0; i < m.count; i++)
+          this.events.push(Object.assign(new EventRecord(), m.events[i]));
+      }
     }
     if (!ok) this.bad++;
   }

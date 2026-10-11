@@ -25,7 +25,10 @@ describe.concurrent("a bots run", () => {
     const { summary, files } = await runBots({
       count: 2,
       profile: "lan",
-      minutes: 0.04,
+      // 4.8 s, so the child discards its first 1.2 s (a quarter): on a loaded host making the bots
+      // (ClientSims with their primer) took past the 0.6 s a 0.04-minute run gives, and the window
+      // then began before them (beforeBotsS 0.08–0.11 s, M3 increment 15's runs).
+      minutes: 0.08,
       map: "arena_greybox",
       server: null,
       seed: 1,

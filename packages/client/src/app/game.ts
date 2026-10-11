@@ -38,6 +38,11 @@ import {
   STAT_STARVED,
   STAT_STARVED_CORRECTIONS,
   StepSmoother,
+  SV_PLAYERS,
+  SV_REPORTS,
+  SV_TICK_MAX_US,
+  SV_TICK_P50_US,
+  SV_TICK_P99_US,
   TICK_MS,
   ViewHeight,
 } from "../net";
@@ -137,7 +142,7 @@ export interface GameOptions {
   readonly look?: MouseLook | null;
   /** The DOM overlay; null in tests and headless runs. */
   readonly hud?: GameHud | null;
-  /** Runs at the end of every frame (the page drains the server's PRINTs into the console). */
+  /** Runs at the end of every frame: the page drains PRINTs and join notices into the console. */
   readonly onFrame?: (() => void) | null;
 }
 
@@ -627,5 +632,14 @@ export class Game {
     s.renderSnaps = String(t[STAT_RENDER_SNAPS]);
     s.interpDelay = String(remotes.delayTicks);
     s.interpP95 = (remotes.delay.t[ID_P95] as number).toFixed(3);
+    // The server's EVENTS (D-043): its SERVER_STATS (tick times in µs, its players; how many
+    // came) and the players the roster holds.
+    const sv = c.roster.server;
+    s.serverStats = String(sv[SV_REPORTS]);
+    s.serverTickP50Us = String(sv[SV_TICK_P50_US]);
+    s.serverTickP99Us = String(sv[SV_TICK_P99_US]);
+    s.serverTickMaxUs = String(sv[SV_TICK_MAX_US]);
+    s.serverPlayers = String(sv[SV_PLAYERS]);
+    s.roster = String(c.roster.count);
   }
 }

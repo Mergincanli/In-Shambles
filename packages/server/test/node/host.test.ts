@@ -10,11 +10,20 @@ import type { JsonLog } from "../../src/node/log";
 import { WireTraffic } from "../../src/transport/wsTransport";
 import { until } from "./wsClient";
 
-function fakeMatch(name: string, order: string[], tick: () => void = () => {}): ServerMatch {
+/** A match stand-in: its tick runs `tick`; `reported` holds each `reportTickStats` call. */
+function fakeMatch(
+  name: string,
+  order: string[],
+  tick: () => void = () => {},
+  reported: number[][] = [],
+): ServerMatch {
   const match = {
     tick: () => {
       order.push(name);
       tick();
+    },
+    reportTickStats: (p50: number, p99: number, max: number) => {
+      reported.push([p50, p99, max]);
     },
   } as unknown as Match;
   return { name, match, ticks: new TickHistogram(), traffic: new WireTraffic() };
@@ -66,6 +75,39 @@ describe("TimedPass", () => {
     ]);
     expect([b.ticks.run.maxUs, b.ticks.run.percentileUs(50)]).toEqual([2500, 2500]);
     expect([pass.ticks.run.maxUs, pass.ticks.run.percentileUs(50)]).toEqual([3750, 3750]);
+  });
+
+  it("hands each match its own second's tick times once a second (D-043)", () => {
+    const clock = new FakeClock();
+    const reportedA: number[][] = [];
+    const reportedB: number[][] = [];
+    let n = 0;
+    // Match a takes 1 ms on every tick but every 10th, which takes 3 ms; b always 0.5 ms.
+    const a = fakeMatch(
+      "a",
+      [],
+      () => {
+        clock.ms += ++n % 10 === 0 ? 3 : 1;
+      },
+      reportedA,
+    );
+    const b = fakeMatch(
+      "b",
+      [],
+      () => {
+        clock.ms += 0.5;
+      },
+      reportedB,
+    );
+    const pass = new TimedPass([a, b], () => {}, clock);
+    for (let i = 0; i < TICK_RATE - 1; i++) pass.tick();
+    expect(reportedA).toEqual([]);
+    pass.tick();
+    // p50 is its 10 µs bucket's upper edge (tickStats.ts); p99 and max are the 3 ms ticks.
+    expect(reportedA).toEqual([[1010, 3000, 3000]]);
+    expect(reportedB).toEqual([[500, 500, 500]]);
+    for (let i = 0; i < TICK_RATE; i++) pass.tick();
+    expect(reportedA).toHaveLength(2);
   });
 
   it("reports CPU milliseconds per wall second over each closed second", () => {

@@ -10,7 +10,13 @@ import {
   ENTITY_DELTA_MAX_BITS,
   ENTITY_NEW_BITS,
   ENTITY_REMOVED_BITS,
+  EVENTS_MAX_PER_MSG,
+  EVK_PLAYER_JOIN,
+  EVK_PLAYER_LEAVE,
+  EVK_SERVER_STATS,
+  EventsMsg,
   encodeCmd,
+  encodeEvents,
   encodeHello,
   encodeInput,
   encodeKick,
@@ -19,6 +25,7 @@ import {
   encodePrint,
   encodeReady,
   encodeSnapshot,
+  eventBits,
   HelloMsg,
   InputMsg,
   KickMsg,
@@ -220,6 +227,32 @@ describe("docs/05 §3.6 protocol layout", () => {
     w.reset();
     encodeInput(w, input);
     expect(size("INPUT")).toBe(`${w.byteLength} B for 4 cmds`);
+  });
+
+  it("gives each EVENTS kind its number and width, and the largest EVENTS (D-043)", () => {
+    const table = firstTable(layout.slice(layout.indexOf("**Events**")));
+    const kinds: [string, number][] = [
+      ["`PLAYER_JOIN`", EVK_PLAYER_JOIN],
+      ["`PLAYER_LEAVE`", EVK_PLAYER_LEAVE],
+      ["`SERVER_STATS`", EVK_SERVER_STATS],
+    ];
+    expect(table.rows.map((r) => r[1])).toEqual(kinds.map(([name]) => name));
+    for (const [name, kind] of kinds) {
+      const row = table.rows.find((r) => r[1] === name) as string[];
+      expect(row[0], name).toBe(String(kind));
+      expect(row[3], name).toBe(String(eventBits(kind)));
+      // The payload's widths add up to the record's, with the kind's 4.
+      const widths = [...(row[2] ?? "").matchAll(/[a-zA-Z0-9]+ (\d+)(?= |,|$|\()/g)];
+      expect(4 + widths.reduce((a, m) => a + Number(m[1]), 0), name).toBe(eventBits(kind));
+    }
+    const m = new EventsMsg();
+    for (let i = 0; i < EVENTS_MAX_PER_MSG; i++) m.add(EVK_SERVER_STATS);
+    const w = new BitWriter(MAX_RELIABLE_BYTES);
+    expect(encodeEvents(w, m)).toBe(true);
+    const rows = firstTable(layout).rows;
+    expect(rows.find((r) => r[0]?.startsWith("`EVENTS`"))?.[3]).toBe(
+      `≤ ${w.byteLength} B (${EVENTS_MAX_PER_MSG} SERVER_STATS)`,
+    );
   });
 
   it("states the largest HELLO, READY, PING, PONG, CMD, PRINT and KICK exactly", () => {

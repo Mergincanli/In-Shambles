@@ -33,6 +33,11 @@ interface ChildResult {
    * (B); interp64: [0] NET-05 jumps.
    */
   extra: number[];
+  /**
+   * EVENTS (D-043). codec: [0] messages that came back equal, [1] hostile ones refused;
+   * matchMulti: [0] JOINs, [1] LEAVEs, [2] SERVER_STATS received, [3] messages that did not decode.
+   */
+  events: number[];
   /** codec and deltaCodec: hostile packets the decoders refused. */
   rejected: number;
 }
@@ -120,7 +125,7 @@ describe.concurrent("per-tick paths under native ES modules", () => {
     expect(r.clean, r.attempts.join("; ")).toBe(true);
   }, 30_000);
 
-  it("the INPUT, SNAPSHOT (full v2, 16 players), PING and PONG codecs allocate nothing, refusals included (D-026, D-033)", async ({
+  it("the INPUT, SNAPSHOT (full v2, 16 players), PING, PONG and EVENTS codecs allocate nothing, refusals included (D-026, D-033, D-043)", async ({
     expect,
   }) => {
     const r = await runChild("codec");
@@ -131,6 +136,9 @@ describe.concurrent("per-tick paths under native ES modules", () => {
     // And every hostile packet, one per message, was refused, in each run of 200000 calls.
     expect(r.rejected).toBeGreaterThan(0);
     expect(r.rejected % 200_000).toBe(0);
+    // EVENTS every fourth call, as often as snapshots: each came back, each hostile one refused.
+    expect(r.events[0]).toBe(r.outcomes[0]);
+    expect(r.events[1]).toBe(r.outcomes[0]);
     expect(r.clean, r.attempts.join("; ")).toBe(true);
   }, 30_000);
 
@@ -204,7 +212,7 @@ describe.concurrent("per-tick paths under native ES modules", () => {
     expect(r.clean, r.attempts.join("; ")).toBe(true);
   }, 30_000);
 
-  it("a match tick with several sessions allocates nothing: delta snapshots against rotating acks, lost inputs, rate limits, strikes, neutral cmds; a reconnect costs only its session (D-038, D-041)", async ({
+  it("a match tick with several sessions allocates nothing: delta snapshots against rotating acks, lost inputs, rate limits, strikes, neutral cmds, EVENTS; a reconnect costs only its session (D-038, D-041, D-043)", async ({
     expect,
   }) => {
     const r = await runChild("matchMulti");
@@ -218,6 +226,12 @@ describe.concurrent("per-tick paths under native ES modules", () => {
     expect(r.extra[1]).toBeGreaterThan(0);
     expect(r.extra[2]).toBeGreaterThan(0);
     expect(r.extra[3]).toBeGreaterThan(0);
+    // The EVENTS outbox (D-043): every reconnect's LEAVE and JOIN (and the joiner's burst) to the
+    // others, SERVER_STATS once a second to each of the 5 sessions' clients; all decoded.
+    expect(r.events[0]).toBeGreaterThan(r.outcomes[2] as number);
+    expect(r.events[1]).toBeGreaterThan(2 * (r.outcomes[2] as number));
+    expect(r.events[2]).toBeGreaterThan(0);
+    expect(r.events[3]).toBe(0);
     expect(r.clean, r.attempts.join("; ")).toBe(true);
   }, 30_000);
 

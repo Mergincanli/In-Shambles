@@ -67,6 +67,14 @@ describe("client e2e: connect to a Node server (D-031)", () => {
     expect(Number(s.distance), JSON.stringify(s)).toBeGreaterThan(200);
     expectHealthy(moving, end, { webSocket: true });
     if (s.webgl === "1") expect(Number(s.drawCalls)).toBeGreaterThan(0);
+    // The server's EVENTS (D-043): its JOIN for this player, and once a second SERVER_STATS with
+    // the Node server's own tick times (reportTickStats) and the one player.
+    expect(s.roster).toBe("1");
+    expect(Number(s.serverStats), JSON.stringify(s)).toBeGreaterThanOrEqual(1);
+    expect(s.serverPlayers).toBe("1");
+    expect(Number(s.serverTickMaxUs), JSON.stringify(s)).toBeGreaterThan(0);
+    expect(Number(s.serverTickP50Us)).toBeLessThanOrEqual(Number(s.serverTickP99Us));
+    expect(Number(s.serverTickP99Us)).toBeLessThanOrEqual(Number(s.serverTickMaxUs));
   }, 60_000);
 
   it("starts at ?net_profile=, stays healthy on it, and leaves with the console's disconnect", async () => {

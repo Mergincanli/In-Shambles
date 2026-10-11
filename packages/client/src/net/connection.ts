@@ -5,11 +5,13 @@ import {
   CvarsMsg,
   copyUserCmd,
   decodeCvars,
+  decodeEvents,
   decodeKick,
   decodePong,
   decodePrint,
   decodeSnapshotHeader,
   decodeWelcome,
+  EventsMsg,
   encodeCmd,
   encodeHello,
   encodeInput,
@@ -22,6 +24,7 @@ import {
   MATCH_MAX_CLIENTS,
   MAX_RELIABLE_BYTES,
   MSG_CVARS,
+  MSG_EVENTS,
   MSG_KICK,
   MSG_PONG,
   MSG_PRINT,
@@ -38,6 +41,7 @@ import {
   type UserCmd,
   WelcomeMsg,
   type WorldFrame,
+  wsWireBytes,
 } from "@game/shared";
 import type { ClientClock } from "./clock";
 import type { CmdRing } from "./predictor";
@@ -49,8 +53,12 @@ import {
   STAT_BYTES_OUT,
   STAT_DEFERRED,
   STAT_DEFERRED_SNAPSHOTS,
+  STAT_FRAMING_IN,
+  STAT_FRAMING_OUT,
   STAT_FULL_SNAPSHOTS,
   STAT_PACKETS_OUT,
+  STAT_SNAPSHOT_BYTES,
+  STAT_SNAPSHOT_BYTES_MAX,
   STAT_STRIKES,
 } from "./stats";
 
@@ -104,6 +112,8 @@ export interface ConnectionHandler {
   onSnapshot(h: SnapshotHeader, frame: WorldFrame): void;
   /** A CVARS that decoded, from WELCOME on. `m` is reused. */
   onCvars(m: CvarsMsg): void;
+  /** An EVENTS that decoded, from READY on (D-043): roster changes, server stats. `m` is reused. */
+  onEvents(m: EventsMsg): void;
   onPrint(level: number, text: string): void;
   /** The connection ended (kick, refusal or transport close). */
   onClosed(reason: string): void;
@@ -115,7 +125,8 @@ export interface ConnectionHandler {
  * of everything the server sends, and the encoding of what the client sends. Like the server, it
  * drops a packet that doesn't decode, arrives on the wrong channel or doesn't fit the state, and
  * counts a strike. Snapshots go into the `SnapshotStore` (protocol v2, D-033); a spectator one is
- * struck and dropped (demo files only, D-044). INPUT, SNAPSHOT, PING and PONG allocate nothing.
+ * struck and dropped (demo files only, D-044). EVENTS (D-043) go to the handler from READY on.
+ * INPUT, SNAPSHOT, PING, PONG and EVENTS allocate nothing.
  *
  * Timeouts (D-041), on the frame time in `now`: no WELCOME or clock handshake within 10 s of HELLO
  * is "handshake timed out"; from WELCOME on, nothing at all from the server for 5 s of listening
@@ -141,6 +152,7 @@ export class Connection {
   private readonly cmd = new CmdMsg();
   private readonly print = new PrintMsg();
   private readonly kick = new KickMsg();
+  private readonly events = new EventsMsg();
   private readonly input = new InputMsg();
   private packetSeq = 0;
   /** [HELLO sent at, silence, last poll at] (ms, the `now` clock). */
@@ -157,6 +169,11 @@ export class Connection {
     private readonly nonce: number,
     /** [0] the time now (ms): the frame's, or the keepalive's. */
     private readonly now: Float64Array,
+    /**
+     * The transport is a WebSocket: count its framing beside the payload (`STAT_FRAMING_*`, so
+     * the netgraph's traffic is what the wire carries, D-036).
+     */
+    private readonly wsFraming = false,
   ) {
     transport.onMessage((d, len, reliable) => this.receive(d, len, reliable));
     transport.onClose((reason) => this.closed(reason === "" ? "connection closed" : reason));
@@ -320,15 +337,21 @@ export class Connection {
   private sendReliable(): void {
     const w = this.writer;
     this.transport.sendReliable(w.bytes, w.byteLength);
-    this.stats.add(STAT_BYTES_OUT, w.byteLength);
-    this.stats.add(STAT_PACKETS_OUT, 1);
+    this.countOut(w.byteLength);
   }
 
   private sendUnreliable(): void {
     const w = this.writer;
     this.transport.sendUnreliable(w.bytes, w.byteLength);
-    this.stats.add(STAT_BYTES_OUT, w.byteLength);
-    this.stats.add(STAT_PACKETS_OUT, 1);
+    this.countOut(w.byteLength);
+  }
+
+  private countOut(len: number): void {
+    const stats = this.stats;
+    stats.add(STAT_BYTES_OUT, len);
+    stats.add(STAT_PACKETS_OUT, 1);
+    // A client's frames are masked (RFC 6455 §5.3).
+    if (this.wsFraming) stats.add(STAT_FRAMING_OUT, wsWireBytes(len, true) - len);
   }
 
   private strike(): void {
@@ -339,6 +362,7 @@ export class Connection {
     const state = this.state;
     if (state === CONN_CLOSED) return;
     this.stats.add(STAT_BYTES_IN, len);
+    if (this.wsFraming) this.stats.add(STAT_FRAMING_IN, wsWireBytes(len, false) - len);
     this.t[HEARD_AT] = this.now[0] as number;
     const type = peekMessageType(d, len);
     // A hidden page's keepalive (D-041): a second late, neither is worth using.
@@ -353,6 +377,8 @@ export class Connection {
         const store = this.store;
         const result = store.receive(r, this.clientId);
         if (result === STORE_STORED) {
+          this.stats.add(STAT_SNAPSHOT_BYTES, len);
+          this.stats.add(STAT_SNAPSHOT_BYTES_MAX, len);
           if (store.header.baseBack === 0) this.stats.add(STAT_FULL_SNAPSHOTS, 1);
           const deferred = store.header.deferred;
           if (deferred > 0) {
@@ -383,6 +409,10 @@ export class Connection {
     } else if (type === MSG_CVARS) {
       if (state < CONN_SYNCING || !decodeCvars(r, this.cvars)) this.strike();
       else this.handler.onCvars(this.cvars);
+    } else if (type === MSG_EVENTS) {
+      // Sent from the tick that took READY on (D-043): in CONN_SPAWNING the burst may come first.
+      if (state < CONN_SPAWNING || !decodeEvents(r, this.events)) this.strike();
+      else this.handler.onEvents(this.events);
     } else if (type === MSG_PRINT) {
       if (!decodePrint(r, this.print)) this.strike();
       else this.handler.onPrint(this.print.level, this.print.text);

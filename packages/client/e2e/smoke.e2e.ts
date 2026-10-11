@@ -252,6 +252,13 @@ describe("client e2e smoke (M2 design §5)", () => {
     const speed = page.locator("#hud-speed");
     await expect.poll(() => net.isVisible()).toBe(true);
     await expect.poll(() => net.textContent(), { timeout: 5000 }).toMatch(/rtt \d+ ms/);
+    // The Worker times its ticks too (reportTickStats, D-043): the netgraph's server line.
+    await expect
+      .poll(() => net.textContent(), { timeout: 5000 })
+      .toMatch(/server tick p50 \d+\.\d\d p99 \d+\.\d\d max \d+\.\d\d ms {2}players 1/);
+    await expect
+      .poll(async () => Number((await readStatus(page)).serverTickMaxUs), { timeout: 5000 })
+      .toBeGreaterThan(0);
     await expect.poll(() => speed.isVisible()).toBe(true);
     await expect.poll(() => speed.textContent(), { timeout: 5000 }).toMatch(/\d+ u\/s {2}vz/);
     // The renderer panel (r_stats) shows renderer.info whenever there is a picture.

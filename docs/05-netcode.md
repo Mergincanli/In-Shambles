@@ -130,7 +130,7 @@ Every transport can be wrapped by `NetSimTransport` (`shared/src/net/netsim.ts`:
 | S→C | `SNAPSHOT` | unreliable | world state for a tick: the local player and, since v2, every other player (D-033) | v1 (M2) |
 | S→C | `PONG` | unreliable | clock/RTT reply | v1 (M2) |
 | S→C | `PRINT`, `KICK` | reliable | console output; disconnect with a reason | v1 (M2) |
-| S→C | `EVENTS` | reliable | kill feed, hit confirms, damage taken, round state, chat | later |
+| S→C | `EVENTS` | reliable | the roster (join, leave with a reason) and the server's tick times (D-043); later kill feed, hit confirms, damage taken, round state, chat | v2 (M3) |
 
 The exact layouts are in §3.6.
 
@@ -174,7 +174,7 @@ The `INPUT` packet carries:
 
 ### 3.6 Protocol v2 layout (`PROTOCOL_VERSION` = 2, D-026, D-033)
 
-Every message starts with the `u8` type: 1 `HELLO`, 2 `WELCOME`, 3 `READY`, 4 `INPUT`, 5 `SNAPSHOT`, 6 `PING`, 7 `PONG`, 8 `CVARS`, 9 `CMD`, 10 `PRINT`, 11 `KICK` (0 is never a message). Fields follow in this order, LSB-first, and the last byte is zero-padded. Ticks are written in 32 bits but must be ≤ `TICK_MAX` (2^30 − 1). "short ASCII" is a u6 length + 7 bits per printable char (0x20–0x7e, at most 63); "text" is a u10 length + 8 bits per Latin-1 char (printable, plus tab and newline; at most 1023). v2 changed only `SNAPSHOT` (D-033): v1's carried the local player alone (335 bits, 42 B), with `baselineTick`, `lastProcessedCmdTick` and a teleport flag; every other layout is v1's.
+Every message starts with the `u8` type: 1 `HELLO`, 2 `WELCOME`, 3 `READY`, 4 `INPUT`, 5 `SNAPSHOT`, 6 `PING`, 7 `PONG`, 8 `CVARS`, 9 `CMD`, 10 `PRINT`, 11 `KICK`, 12 `EVENTS` (0 is never a message). Fields follow in this order, LSB-first, and the last byte is zero-padded. Ticks are written in 32 bits but must be ≤ `TICK_MAX` (2^30 − 1). "short ASCII" is a u6 length + 7 bits per printable char (0x20–0x7e, at most 63); "text" is a u10 length + 8 bits per Latin-1 char (printable, plus tab and newline; at most 1023). v2 changed `SNAPSHOT` (D-033): v1's carried the local player alone (335 bits, 42 B), with `baselineTick`, `lastProcessedCmdTick` and a teleport flag; it added `EVENTS` (D-043); every other layout is v1's.
 
 | Msg | Channel | Fields after the type byte (bits) | Size |
 |---|---|---|---|
@@ -189,6 +189,7 @@ Every message starts with the `u8` type: 1 `HELLO`, 2 `WELCOME`, 3 `READY`, 4 `I
 | `CMD` C→S | reliable | text | ≤ 1026 B |
 | `PRINT` S→C | reliable | level 2 (0 info, 1 warn, 2 error; 3 is refused), text | ≤ 1026 B |
 | `KICK` S→C | reliable | reason (text) | ≤ 1026 B |
+| `EVENTS` S→C | reliable | count 6 (1–63; 0 is refused), then each event: kind 4 and its payload (the events table below) | ≤ 467 B (63 SERVER_STATS) |
 
 **Player state** (`shared/src/net/playerStateCodec.ts`, 199 bits), in the units of end-of-tick quantization (§4.1), so a quantized state encodes exactly and decodes to the same bits:
 
@@ -276,7 +277,17 @@ Every message starts with the `u8` type: 1 `HELLO`, 2 `WELCOME`, 3 `READY`, 4 `I
 - **Size:** a live snapshot is at most `MAX_SNAPSHOT_BYTES` (1100 B, §4.3); the encoder refuses more and so does the decoder. Full snapshots of a 37-player match take 995 B; at most 39 other players fit. The worst delta (every local and entity field changed, origins and velocities absolute: 312 bits + 233 per other player) takes 942 B at 32 players and 1088 B at 37, so every snapshot fits by construction while the baseline and the current frame together hold at most 37 players (`SNAP_FIT_MAX_PLAYERS`). Past that (36 others and 6 removals would take 1101 B, 63 others 1874 B as a delta and 1714 B full) the byte-budget scheduler (§4.3) keeps it within 1100 B: its worst, 34 records and 29 deferred ids at 64 players, is 312 + 6 + 34 × 233 + 29 × 16 = 8704 bits, 1088 B. A spectator snapshot (demo files only, never deferred) is at most 2048 B: all 64 players take 1714 B full and at worst 1874 B as a delta.
 - **Canonical:** a packet the decoder accepts re-encodes to the same bytes against the same baseline, and decodes to the frame it was encoded from, as its receiver holds it: its own slot from the local block (with the header's teleportSeq), each full or delta record's slot and each unlisted slot the baseline holds with the snapshot's tick as its stamp, each deferred slot as above, every other slot absent (M3 design §2.2). The decoder refuses a non-minimal class, a set group whose classes are all 0, a set field or group equal to the baseline, a mask of 0, a delta record or a removal for a slot the baseline lacks (and a delta record for one it holds as pending), an unlisted slot the baseline holds as pending, and a deferred list that is empty, unsorted, names the receiver, an id ≥ 64 or one that has a record. The encoder writes a slot as deferred only as the receiver would rebuild it: a copy of the baseline's state, stamp and incarnation, or pending where the receiver holds no state for it.
 
-INPUT, SNAPSHOT, PING and PONG encode and decode without allocating, refused packets included: decoders read a tick as two u16 halves and reject it past `TICK_MAX` before it becomes a number V8 would box. The text and cvar-block fields of the reliable messages allocate (rare). A decoder that accepts a packet re-encodes it to the same bytes (NET-01).
+**Events** (`shared/src/net/events.ts`, D-043; after `EVENTS`' count, each event is its kind, 4 bits, and the payload of that kind):
+
+| Kind | Event | Payload (bits) | Bits with the kind |
+|---|---|---|---|
+| 1 | `PLAYER_JOIN` | clientId 6, team 2 (0 none, 1, 2; 3 is refused) | 12 |
+| 2 | `PLAYER_LEAVE` | clientId 6, reason 2 (0 left, 1 timed out, 2 kicked; 3 is refused) | 12 |
+| 3 | `SERVER_STATS` | tickP50Us 16, tickP99Us 16, tickMaxUs 16 (µs; the server saturates each at 65535), players 7 (0–64; more is refused) | 59 |
+
+Kinds 0 and 4–15 are refused: they are reserved for later events (M6's combat feed, M7's round state). A 6-bit client id names every slot (0–63, `MATCH_MAX_CLIENTS`). More events than 63 for one client in a tick go out as several messages, in order (§10).
+
+INPUT, SNAPSHOT, PING, PONG and EVENTS encode and decode without allocating, refused packets included: decoders read a tick as two u16 halves and reject it past `TICK_MAX` before it becomes a number V8 would box; EVENTS decode into pooled records. The text and cvar-block fields of the reliable messages allocate (rare). A decoder that accepts a packet re-encodes it to the same bytes (NET-01).
 
 ## 4. State encoding and quantization
 
@@ -410,7 +421,7 @@ The client predicts with, stores and sends the sanitized cmd. The server sanitiz
 3. Run `pmove` for each player.
 4. Weapons/fire (with lag comp), then projectiles, then triggers, then game rules (bleeding, healing, rounds, scoring).
 5. Record the lag-comp history.
-6. Build and send snapshots (relevance, delta, priority).
+6. Build and send snapshots (relevance, delta, priority), each client's followed by its `EVENTS` (roster changes; `SERVER_STATS` every 60 ticks; §10, D-043).
 7. Record metrics (tick time, bytes, starvation).
 
 The loop is driven by a monotonic clock with an accumulator. **Never `setInterval`.** Catch-up is capped at 5 ticks; beyond that, log and skip.
@@ -474,6 +485,12 @@ Bandwidth counts what crosses the link: payload plus WebSocket framing (RFC 6455
 
 **Reliable events** go in `EVENTS`: kill feed, hit confirmations (attacker), damage taken with zone and source direction (victim), bleeding start/stop, round/match state, chat, loadout applied.
 
+**M3's EVENTS** (D-043; layout in §3.6): the roster and the server's tick times, sent only to joined players (from the tick that handles their `READY`), after the tick's snapshot (§8.1 step 6):
+- **Roster burst:** a player who joins gets a `PLAYER_JOIN` for every player already in the match, in id order, and then its own, which tells its client the burst is over (the client learns its team from it). Everyone already in gets the joiner's `PLAYER_JOIN`.
+- **Leave:** when a joined player goes, everyone still in gets `PLAYER_LEAVE` with the reason: 0 its connection closed, 1 it timed out (`sv_timeout`, §2), 2 it was kicked (by an admin or for too many strike points, §12). Reason 0 covers every transport close the match did not start with a `KICK`: the player closing the page, a dropped socket, and the server transport's own policy closes (a reader too slow to drain, a reliable flood, an oversized or text frame; §3.1), which the match sees only as a close (D-043). A connection that never joined (refused, a handshake that timed out) has no roster entry and sends nothing.
+- **Server stats:** on every tick that is a multiple of 60 (once a second; design), `SERVER_STATS` with the tick time p50/p99/max of the host's last closed second (the match never reads a clock: the Node server's `TimedPass` and the Worker time each `match.tick()` and hand the match the figures once a second, `Match.reportTickStats`; all three are 0 before the first report, so a client that joins in the match's first second may read zeros once) and the match's joined players. The Worker's figures are only as fine as the browser's `performance.now`: 100 µs steps in Chromium on a page that is not cross-origin isolated (this one is not), coarser in browsers that clamp harder, so offline a short tick often reads 0.00 ms. With several matches per process (D-047) each match reports its own ticks and players.
+- **Order and size:** the events of a client's tick go out in the order they happened (its burst before anything later), at most 63 a message; the client hands each decoded message to its roster (`client/src/net/roster.ts`), which prints the join and leave notices after the burst to the console and keeps the stats for the netgraph (§13). The match keeps each tick's broadcast `PLAYER_JOIN`s and `PLAYER_LEAVE`s (`Match.tickEvents`) for the demo recorder (D-044).
+
 **Hit confirmations**
 - Server-authoritative. The attacker gets the hit sound and hit message ~RTT after firing.
 - The client may show **predicted** tracers, muzzle flash and world impacts immediately, but never predicted player hits.
@@ -530,7 +547,14 @@ Bandwidth counts what crosses the link: payload plus WebSocket framing (RFC 6455
 - The draws come from a seeded Mulberry32 and the time from an injected monotonic clock, so a seed and a send/poll schedule give one delivery schedule. `net_profile <name>` calls `setProfile`: packets in flight keep their due times.
 - **`wake(at)`** reports each new earliest outbound due time once; `pump()` is the host's answer and re-reports a front still pending, so a timer that fires early (browsers truncate fractional delays) re-arms instead of stranding the packet.
 
-**Netgraph overlay** (toggle `cl_netgraph 1`): RTT, jitter, loss %, snapshots/s, interp delay, input buffer health, corrections/s and average size, bytes in/out per second, server tick time (from server stats), starved cmds. M2's netgraph shows all but interp delay and server tick time; M3 increment 7 adds the interp delay with the remote players (and the share of remote-frames extrapolated or held, D-037), server tick time arrives with server stats (`docs/06` §7).
+**Netgraph overlay** (toggle `cl_netgraph 1`; seven lines since D-043, `client/src/hud/netgraph.ts`, `docs/06` §7):
+1. **link:** RTT, jitter, snapshot loss %, snapshots/s (and the simulated profile);
+2. **snapshots:** mean and largest size, full snapshots/s, baseline drops/s (D-038), the players in the newest one, players left out per snapshot (D-046);
+3. **remote:** the interpolation delay in ticks and ms, its defer lag, the share of remote-frames extrapolated or held (D-037);
+4. **corrections:** /s, mean and largest size, the render offset left; teleports (D-035) and hard and pending-parameter resyncs;
+5. **input:** buffer health mean and low edge, starved cmds/s, the clock's mean dilation % (D-039), its coarse steps;
+6. **traffic:** bytes in and out per second, payload plus WebSocket framing on a dedicated server (D-036's accounting; none on the Worker's ports);
+7. **server:** tick time p50/p99/max (ms) over the server's last second and the players of this match, from `SERVER_STATS` (§10; `-` until the first arrives).
 
 **Headless bots** (`packages/tools/src/bots`, `pnpm bots`; D-036): Node clients over the real transport, each a `ClientSim` behind its own net simulator (the run's profile, seeded per bot) over a `WebSocketTransport` on Node's built-in WebSocket, all in one process on one 60 Hz timer chain, each at its own phase. Behaviours: 3 in 5 strafe-jump a route (on `arena_greybox` the yard ring), the rest random-walk; a route bot with under 32 u of progress in 2 s random-walks for 1 s, then heads for the next waypoint. Without `--server` the run starts the server itself; before connecting it reads the match's `maxClients` from `GET /status` and refuses a count that does not fit; the bots send the server's build hash. Each run writes a JSON + markdown summary with PASS/FAIL against `docs/10` §4, the prediction's health (no strike, no misprediction) and smooth remotes: each bot interpolates the others every frame and counts NET-05 violations (§6, D-037). Later: wall-jump routes (M4), firing at visible targets (M6). They are used for load tests and NET tests.
 

@@ -55,10 +55,12 @@ export const NODE_PASS_CLOCK: PassClock = {
  * What the loop ticks (D-029): every match once per pass, each `match.tick()` timed into its
  * match's histogram and the whole pass into the process histogram (the NET-09 judge). One clock
  * read per match boundary (N + 1 per pass): a match's end is the next one's start. Once a second
- * it closes the histograms' 1 s windows and samples the process CPU time. A drop of ticks after a
- * stall is logged once as `tick_drop`, naming every match (a drop hits them all). Times live in a
- * Float64Array and reach the histograms as whole microseconds, so the pass's own code allocates
- * nothing; Node's `performance.now` boxes each double it returns (the host clock, as loop.ts notes).
+ * it closes the histograms' 1 s windows, hands each match its second's p50/p99/max for its
+ * SERVER_STATS (`Match.reportTickStats`, D-043) and samples the process CPU time. A drop of ticks
+ * after a stall is logged once as `tick_drop`, naming every match (a drop hits them all). Times
+ * live in a Float64Array and reach the histograms as whole microseconds, so the pass's own code
+ * allocates nothing; Node's `performance.now` boxes each double it returns (the host clock, as
+ * loop.ts notes).
  */
 export class TimedPass implements Tickable {
   readonly ticks = new TickHistogram();
@@ -113,7 +115,13 @@ export class TimedPass implements Tickable {
   private endSecond(): void {
     this.ticks.endSecond();
     const matches = this.matches;
-    for (let i = 0; i < matches.length; i++) (matches[i] as ServerMatch).ticks.endSecond();
+    for (let i = 0; i < matches.length; i++) {
+      // Each match's SERVER_STATS carry its own second (D-043, D-047), not the whole pass's.
+      const m = matches[i] as ServerMatch;
+      const h = m.ticks;
+      h.endSecond();
+      m.match.reportTickStats(h.lastP50Us, h.lastP99Us, h.lastMaxUs);
+    }
     const t = this.time;
     t[2] = this.clock.now();
     const cpu = this.clock.cpuMicros();

@@ -20,6 +20,44 @@ export const SESSION_ACTIVE = 2;
 /** Kicked or disconnected: dropped from the match after this tick's poll. */
 export const SESSION_CLOSED = 3;
 
+/**
+ * Roster events waiting to go out (D-043, M3 design §2.4): PLAYER_JOIN and PLAYER_LEAVE, one
+ * packed word each (kind 4 bits, client id 6, team or reason 2), in the order they happened. A
+ * session's outbox fills during a tick and is flushed after its snapshot (§2.5 step 7); the
+ * match's broadcast outbox keeps the tick's broadcast ones for a demo (D-044). Starts with room for
+ * a full roster burst and the tick's other changes; grows (rarely) on demand.
+ */
+export class EventOutbox {
+  private words = new Int32Array(256);
+  count = 0;
+
+  push(kind: number, clientId: number, value: number): void {
+    if (this.count === this.words.length) {
+      const grown = new Int32Array(this.words.length * 2);
+      grown.set(this.words);
+      this.words = grown;
+    }
+    this.words[this.count++] = kind | (clientId << 4) | (value << 10);
+  }
+
+  kind(i: number): number {
+    return (this.words[i] as number) & 0xf;
+  }
+
+  clientId(i: number): number {
+    return ((this.words[i] as number) >> 4) & 0x3f;
+  }
+
+  /** The JOIN's team or the LEAVE's reason. */
+  value(i: number): number {
+    return ((this.words[i] as number) >> 10) & 0x3;
+  }
+
+  clear(): void {
+    this.count = 0;
+  }
+}
+
 /** Per-client counters (live). */
 export class SessionStats {
   /** Ticks simulated with a repeated cmd because none had arrived (docs/05 §8.1 step 2). */
@@ -45,6 +83,8 @@ export class SessionStats {
   deferredSnapshots = 0;
   /** The largest staleness of a remote at send (2 at most by D-046's bound; 1 without deferral). */
   maxStaleness = 0;
+  /** EVENTS messages sent (D-043). */
+  eventsMessages = 0;
 }
 
 /**
@@ -103,6 +143,11 @@ export class Session implements SnapshotClient {
    * is a neutral one. A cmd that arrives in time, or a spawn, resets it.
    */
   starvedRun = 0;
+  /**
+   * Roster events for this client (D-043): its JOIN burst when it joins, then every JOIN and LEAVE
+   * while it plays; sent as EVENTS after its snapshot each tick.
+   */
+  readonly events = new EventOutbox();
   /** The client's nonce from HELLO. */
   nonce = 0;
   buildHash = "";

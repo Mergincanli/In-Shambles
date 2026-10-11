@@ -2,6 +2,14 @@ import { describe, expect, it } from "vitest";
 import { PITCH_LIMIT_U16 } from "../../src/math/angles";
 import type { BitWriter } from "../../src/net/bitstream";
 import {
+  decodeEvents,
+  EVENTS_MAX_PER_MSG,
+  type EventRecord,
+  EventsMsg,
+  encodeEvents,
+  eventBits,
+} from "../../src/net/events";
+import {
   CvarsMsg,
   decodeCvars,
   decodeHello,
@@ -29,10 +37,17 @@ import {
 } from "../../src/net/messages";
 import { PLAYER_STATE_BITS } from "../../src/net/playerStateCodec";
 import {
+  EV_LEAVE_KICKED,
+  EV_LEAVE_TIMED_OUT,
+  EVK_PLAYER_JOIN,
+  EVK_PLAYER_LEAVE,
+  EVK_SERVER_STATS,
   INPUT_MAX_CMDS,
+  MAX_RELIABLE_BYTES,
   MAX_SNAPSHOT_BYTES,
   MAX_SPECTATOR_SNAPSHOT_BYTES,
   MAX_UNRELIABLE_BYTES,
+  MSG_EVENTS,
   MSG_INPUT,
   MSG_SNAPSHOT,
   MSG_TYPE_MAX,
@@ -789,6 +804,156 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
     it.each(kinds)("%s: every truncation, an extra byte and dirty padding are refused", (_, k) =>
       expectTruncationsRefused(k, FAST_FUZZ.truncations),
     );
+  });
+
+  describe("EVENTS (D-043)", () => {
+    /** One JOIN of client 5 on team 2: the message the patches below start from. */
+    function oneJoin(): Uint8Array {
+      const m = new EventsMsg();
+      const e = m.add(EVK_PLAYER_JOIN);
+      if (e === null) throw new Error("full");
+      e.clientId = 5;
+      e.team = 2;
+      return encodedBy((w) => encodeEvents(w, m));
+    }
+
+    function oneStats(players: number): Uint8Array {
+      const m = new EventsMsg();
+      const e = m.add(EVK_SERVER_STATS);
+      if (e === null) throw new Error("full");
+      e.tickP50Us = 41;
+      e.tickP99Us = 115;
+      e.tickMaxUs = 0xffff;
+      e.players = players;
+      return encodedBy((w) => encodeEvents(w, m));
+    }
+
+    it("round-trips each kind field for field, in the documented widths", () => {
+      const m = new EventsMsg();
+      const join = m.add(EVK_PLAYER_JOIN);
+      const leave = m.add(EVK_PLAYER_LEAVE);
+      const stats = m.add(EVK_SERVER_STATS);
+      if (join === null || leave === null || stats === null) throw new Error("full");
+      join.clientId = 63;
+      join.team = TEAM_1;
+      leave.clientId = 0;
+      leave.reason = EV_LEAVE_TIMED_OUT;
+      stats.tickP50Us = 42;
+      stats.tickP99Us = 4000;
+      stats.tickMaxUs = 0xffff;
+      stats.players = 64;
+      const w = newWriter();
+      expect(encodeEvents(w, m)).toBe(true);
+      expect(eventBits(EVK_PLAYER_JOIN)).toBe(12);
+      expect(eventBits(EVK_PLAYER_LEAVE)).toBe(12);
+      expect(eventBits(EVK_SERVER_STATS)).toBe(59);
+      expect(eventBits(0)).toBe(0);
+      expect(w.bitLength).toBe(8 + 6 + 12 + 12 + 59);
+      const bytes = w.bytes.slice(0, w.byteLength);
+      expect(peekMessageType(bytes, bytes.length)).toBe(MSG_EVENTS);
+      const out = new EventsMsg();
+      expect(decodeEvents(readerOver(bytes), out)).toBe(true);
+      expect(out.count).toBe(3);
+      expect({ ...out.events[0] }).toEqual({ ...join });
+      expect({ ...out.events[1] }).toEqual({ ...leave });
+      expect({ ...out.events[2] }).toEqual({ ...stats });
+      // A decoded record carries only its kind's fields: the pooled record is cleared first.
+      out.events[1]?.clear();
+      (out.events[1] as { team: number }).team = 2;
+      expect(decodeEvents(readerOver(bytes), out)).toBe(true);
+      expect(out.events[1]?.team).toBe(0);
+    });
+
+    it("carries at most 63 events: the largest message is 63 SERVER_STATS, well under 16384 B", () => {
+      const m = new EventsMsg();
+      for (let i = 0; i < EVENTS_MAX_PER_MSG; i++) expect(m.add(EVK_SERVER_STATS)).not.toBeNull();
+      expect(m.add(EVK_PLAYER_JOIN)).toBeNull();
+      const w = newWriter();
+      expect(encodeEvents(w, m)).toBe(true);
+      expect(w.byteLength).toBe((8 + 6 + 63 * 59 + 7) >> 3);
+      expect(w.byteLength).toBeLessThanOrEqual(MAX_RELIABLE_BYTES);
+    });
+
+    it("the encoder refuses what the layout can't carry", () => {
+      /** One event of `kind` with `fields` set (a count of `count`), encoded. */
+      const encodes = (kind: number, fields: Partial<EventRecord>, count = 1) => {
+        const m = new EventsMsg();
+        const e = m.add(EVK_PLAYER_JOIN);
+        if (e === null) throw new Error("full");
+        Object.assign(e, { kind }, fields);
+        m.count = count;
+        return encodeEvents(newWriter(), m);
+      };
+      expect(encodes(EVK_PLAYER_JOIN, {})).toBe(true);
+      expect(encodes(EVK_PLAYER_JOIN, {}, 0)).toBe(false);
+      expect(encodes(EVK_PLAYER_JOIN, {}, 64)).toBe(false);
+      for (const kind of [0, 4, 15]) expect(encodes(kind, {})).toBe(false);
+      expect(encodes(EVK_PLAYER_JOIN, { clientId: 64 })).toBe(false);
+      expect(encodes(EVK_PLAYER_JOIN, { team: 3 })).toBe(false);
+      expect(encodes(EVK_PLAYER_LEAVE, { reason: EV_LEAVE_KICKED })).toBe(true);
+      expect(encodes(EVK_PLAYER_LEAVE, { reason: 3 })).toBe(false);
+      expect(encodes(EVK_SERVER_STATS, { players: 64 })).toBe(true);
+      expect(encodes(EVK_SERVER_STATS, { players: 65 })).toBe(false);
+      expect(encodes(EVK_SERVER_STATS, { tickMaxUs: 0x10000 })).toBe(false);
+      expect(encodes(EVK_SERVER_STATS, { tickP50Us: -1 })).toBe(false);
+    });
+
+    it("the decoder refuses a count of 0, kinds 0 and 4–15, team 3, reason 3 and players past 64", () => {
+      // type 0–7, count 8–13, then the first event: kind 14–17, JOIN id 18–23 and team 24–25;
+      // SERVER_STATS p50 18–33, p99 34–49, max 50–65, players 66–72.
+      const out = new EventsMsg();
+      const join = oneJoin();
+      expect(decodeEvents(readerOver(join), out)).toBe(true);
+      expect(decodeEvents(readerOver(patchBits(join, 8, 6, 0)), out)).toBe(false);
+      for (let kind = 0; kind < 16; kind++) {
+        const ok = decodeEvents(readerOver(patchBits(join, 14, 4, kind)), out);
+        // JOIN and LEAVE share a layout; SERVER_STATS is longer, so the JOIN's bits run short.
+        expect(ok, `kind ${kind}`).toBe(kind === EVK_PLAYER_JOIN || kind === EVK_PLAYER_LEAVE);
+      }
+      expect(decodeEvents(readerOver(patchBits(join, 24, 2, 3)), out)).toBe(false);
+      const leave = patchBits(join, 14, 4, EVK_PLAYER_LEAVE);
+      expect(decodeEvents(readerOver(leave), out)).toBe(true);
+      expect(out.events[0]?.reason).toBe(2);
+      expect(decodeEvents(readerOver(patchBits(leave, 24, 2, 3)), out)).toBe(false);
+      // A 6-bit id can't name a slot past 63: the field's every value is a slot.
+      expect(decodeEvents(readerOver(patchBits(join, 18, 6, 63)), out)).toBe(true);
+      expect(out.events[0]?.clientId).toBe(63);
+      const stats = oneStats(64);
+      expect(decodeEvents(readerOver(stats), out)).toBe(true);
+      expect(out.events[0]?.tickMaxUs).toBe(0xffff);
+      for (const players of [65, 100, 127]) {
+        expect(decodeEvents(readerOver(patchBits(stats, 66, 7, players)), out)).toBe(false);
+      }
+      expect(decodeEvents(readerOver(patchBits(stats, 66, 7, 0)), out)).toBe(true);
+      // The kind check itself: in a SERVER_STATS-sized message only kind 3 fits, so a refused kind
+      // read with that layout would be accepted without it (JOIN and LEAVE leave bits over).
+      for (let kind = 0; kind < 16; kind++) {
+        const ok = decodeEvents(readerOver(patchBits(stats, 14, 4, kind)), out);
+        expect(ok, `kind ${kind} in a stats message`).toBe(kind === EVK_SERVER_STATS);
+      }
+      // The smallest count-0 message has no bits left over: only the count check refuses it.
+      expect(decodeEvents(readerOver(new Uint8Array([MSG_EVENTS, 0])), out)).toBe(false);
+    });
+
+    it("a tick's 64 roster events need two messages (63 + 1)", () => {
+      const m = new EventsMsg();
+      let sent = 0;
+      const messages: number[] = [];
+      for (let id = 0; id < 64; id++) {
+        let e = m.add(EVK_PLAYER_JOIN);
+        if (e === null) {
+          messages.push(m.count);
+          sent += m.count;
+          m.count = 0;
+          e = m.add(EVK_PLAYER_JOIN);
+        }
+        if (e === null) throw new Error("full");
+        e.clientId = id;
+      }
+      messages.push(m.count);
+      expect(messages).toEqual([63, 1]);
+      expect(sent + m.count).toBe(64);
+    });
   });
 
   describe("fuzz: decoders never throw, and accept only what an encoder writes", () => {

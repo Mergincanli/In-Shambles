@@ -4,9 +4,9 @@
  */
 
 /**
- * u16 on the wire, in HELLO and WELCOME. v2 (D-033) changed only SNAPSHOT: the player list and the
- * teleport counter. Its delta forms (D-038) and deferred list (D-046) join within v2: nothing ships
- * between those increments.
+ * u16 on the wire, in HELLO and WELCOME. v2 (D-033) changed SNAPSHOT: the player list and the
+ * teleport counter. Its delta forms (D-038), deferred list (D-046) and the EVENTS message (D-043)
+ * join within v2: nothing ships between those increments.
  */
 export const PROTOCOL_VERSION = 2;
 
@@ -22,7 +22,9 @@ export const MSG_CVARS = 8;
 export const MSG_CMD = 9;
 export const MSG_PRINT = 10;
 export const MSG_KICK = 11;
-export const MSG_TYPE_MAX = MSG_KICK;
+/** S→C reliable: roster changes and server tick times (D-043; `events.ts`). */
+export const MSG_EVENTS = 12;
+export const MSG_TYPE_MAX = MSG_EVENTS;
 
 /** `MSG_CHANNEL` values: which channel a message type travels on (docs/05 §3.3). */
 export const CHANNEL_UNKNOWN = -1;
@@ -36,7 +38,16 @@ export const CHANNEL_RELIABLE = 1;
  * channel, so this table only labels what arrived. Read-only by convention.
  */
 export const MSG_CHANNEL: Int8Array = new Int8Array(256).fill(CHANNEL_UNKNOWN);
-for (const type of [MSG_HELLO, MSG_WELCOME, MSG_READY, MSG_CVARS, MSG_CMD, MSG_PRINT, MSG_KICK]) {
+for (const type of [
+  MSG_HELLO,
+  MSG_WELCOME,
+  MSG_READY,
+  MSG_CVARS,
+  MSG_CMD,
+  MSG_PRINT,
+  MSG_KICK,
+  MSG_EVENTS,
+]) {
   MSG_CHANNEL[type] = CHANNEL_RELIABLE;
 }
 for (const type of [MSG_INPUT, MSG_SNAPSHOT, MSG_PING, MSG_PONG]) {
@@ -126,3 +137,16 @@ export const SNAP_ENTITY_VELOCITY_D2 = 11;
 export const PRINT_INFO = 0;
 export const PRINT_WARN = 1;
 export const PRINT_ERROR = 2;
+
+/** EVENTS kinds (4 bits; D-043, `events.ts`): 0 and 4–15 are refused, reserved for M6/M7. */
+export const EVK_PLAYER_JOIN = 1;
+export const EVK_PLAYER_LEAVE = 2;
+export const EVK_SERVER_STATS = 3;
+/** The highest kind this protocol carries. */
+export const EVK_MAX = EVK_SERVER_STATS;
+
+/** PLAYER_LEAVE reasons (2 bits; 3 is refused). */
+export const EV_LEAVE_LEFT = 0;
+export const EV_LEAVE_TIMED_OUT = 1;
+export const EV_LEAVE_KICKED = 2;
+export const EV_LEAVE_REASON_MAX = EV_LEAVE_KICKED;

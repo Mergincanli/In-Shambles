@@ -141,6 +141,7 @@ export async function boot(
     clock: () => performance.now(),
     cvars,
     input,
+    webSocket: params.connect !== null,
     onCheatsChanged: (allowed) => {
       if (allowed) saver.restoreCheats();
     },
@@ -239,11 +240,15 @@ export async function boot(
     camera: params.camera,
     look: playerLook,
     hud,
+    // The server's PRINTs, then the join and leave notices from its EVENTS (D-043).
     onFrame: () => {
       const prints = client.prints;
-      if (prints.length === 0) return;
+      const notices = client.notices;
+      if (prints.length === 0 && notices.length === 0) return;
       for (const text of prints) gameConsole.print(text);
       prints.length = 0;
+      for (const text of notices) gameConsole.print(text);
+      notices.length = 0;
     },
   });
   client.connect();

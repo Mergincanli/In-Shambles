@@ -265,6 +265,7 @@ class Bot {
       clock: () => performance.now(),
       input,
       primer,
+      webSocket: true,
       onMapRequest: (name) => {
         // Thrown here, ClientSim ends the session with the reason.
         if (!MAP_NAME.test(name)) throw new Error(`refused map name ${JSON.stringify(name)}`);

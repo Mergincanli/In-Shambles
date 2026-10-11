@@ -132,7 +132,13 @@ describe("client e2e: other players on a Node server (D-037)", () => {
     const net = page.locator("#hud-net");
     await expect
       .poll(() => net.textContent(), { timeout: 5000 })
-      .toMatch(/remote interp [2-6] ticks \(\d+ ms\) {2}extrap \d+\.\d% {2}held \d+\.\d%/);
+      .toMatch(
+        /remote interp [2-6] ticks \(\d+ ms\) {2}defer lag 0 {2}extrap \d+\.\d% {2}held \d+\.\d%/,
+      );
+    // The server line (D-043): the Node server's tick times and the 5 players, from SERVER_STATS.
+    await expect
+      .poll(() => net.textContent(), { timeout: 5000 })
+      .toMatch(/server tick p50 \d+\.\d\d p99 \d+\.\d\d max \d+\.\d\d ms {2}players 5/);
     await page.waitForTimeout(RUN_MS);
     const end = await sample(page);
     const status = (await (await fetch(`http://127.0.0.1:${s0.port}/status`)).json()) as {
@@ -153,6 +159,10 @@ describe("client e2e: other players on a Node server (D-037)", () => {
     expect(s.renderSnaps, JSON.stringify(s)).toBe("0");
     expect(Number(s.interpDelay)).toBeGreaterThanOrEqual(2);
     expect(Number(s.interpDelay)).toBeLessThanOrEqual(6);
+    // The roster from EVENTS (D-043): the 4 bots and the page's player, and the server's stats.
+    expect(s.roster).toBe(String(BOTS + 1));
+    expect(s.serverPlayers).toBe(String(BOTS + 1));
+    expect(Number(s.serverTickMaxUs)).toBeGreaterThan(0);
     expectHealthy(moving, end, { webSocket: true });
     // The bots see each other and the page's player too, smoothly by the same criterion.
     for (let i = 0; i < BOTS; i++) {

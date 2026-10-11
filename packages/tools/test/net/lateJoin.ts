@@ -1,4 +1,6 @@
-import { findNetProfile, type NetProfile } from "@game/shared";
+import { STAT_STRIKES } from "@game/client/net";
+import { SESSION_ACTIVE } from "@game/server";
+import { findNetProfile, MATCH_MAX_CLIENTS, type NetProfile } from "@game/shared";
 import { expect } from "vitest";
 import { createBotInput } from "../../src/bots/routes";
 import { DeltaWatch, ticksIn } from "./deltaWatch";
@@ -170,5 +172,26 @@ export function expectLateJoin(run: LateJoinRun): string {
     }
   }
   expectNoStrikes(h.match, []);
+
+  // EVENTS (D-043): every client still in holds the match's roster, teams included, and struck
+  // nothing; each observer heard the slot's player leave and the new one join.
+  const want: string[] = [];
+  for (let id = 0; id < MATCH_MAX_CLIENTS; id++) {
+    const s = h.match.session(id);
+    if (s !== undefined && s.state === SESSION_ACTIVE) want.push(`${id}/${s.team}`);
+  }
+  for (const c of h.clients) {
+    if (c === left) continue;
+    const r = c.client.roster;
+    const got: string[] = [];
+    for (let id = 0; id < MATCH_MAX_CLIENTS; id++)
+      if (r.joined[id] === 1) got.push(`${id}/${r.team[id]}`);
+    expect(got, `client ${c.index} roster`).toEqual(want);
+    expect(c.client.stats.totals[STAT_STRIKES], `client ${c.index}`).toBe(0);
+    if (c === rejoined || c === late) continue;
+    const notices = c.client.notices.join("; ");
+    expect(notices, `client ${c.index}`).toContain(`player ${REJOIN_SLOT} left`);
+    expect(notices, `client ${c.index}`).toContain(`player ${REJOIN_SLOT} joined team`);
+  }
   return account;
 }

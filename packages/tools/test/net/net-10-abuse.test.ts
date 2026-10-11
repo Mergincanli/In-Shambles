@@ -539,8 +539,11 @@ describe("hidden tab (D-041, M3 design §2.13): keepalive and the neutral cmd", 
     for (const c of [kept, bare]) {
       expect(c.client.active).toBe(true);
       expect(c.session?.state).toBe(SESSION_ACTIVE);
+      // One hard resync per poll that the return's backlog reaches (docs/05 §8): one to three,
+      // as the link's jitter draws spread it (seeds 1–8 give 1–3 since EVENTS, D-043, whose
+      // reliable messages draw from the same generator; this seed's kept client 3).
       expect(c.totals().hardResyncs).toBeGreaterThanOrEqual(1);
-      expect(c.totals().hardResyncs).toBeLessThanOrEqual(2);
+      expect(c.totals().hardResyncs).toBeLessThanOrEqual(3);
       expect(c.session?.stats.strikes).toBe(0);
     }
   });

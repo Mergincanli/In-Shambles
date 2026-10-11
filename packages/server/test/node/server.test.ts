@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
-import { PROTOCOL_VERSION } from "@game/shared";
+import { EVK_PLAYER_JOIN, EVK_SERVER_STATS, PROTOCOL_VERSION } from "@game/shared";
 import { afterEach, describe, expect, it, onTestFinished } from "vitest";
 import { type RunningServer, startServer } from "../../src/node/server";
 import { TestClient } from "../match/fixtures";
@@ -350,6 +350,13 @@ describe("Node server (in process, real WebSocket)", () => {
     expect(matchLine).toMatchObject({ match: "main", players: 1, tickUs: expect.any(Object) });
     expect(processLine).toMatchObject({ gc: expect.any(Object), memoryMB: expect.any(Object) });
     expect(processLine?.match).toBeUndefined();
+    // The pass hands the match its tick times once a second (D-043), on its own 60-pass count, not
+    // the metrics timer's: wait for the first report. The client hears the tick-60 SERVER_STATS
+    // (zeros when it beats the first report) with itself in it.
+    await until(() => (server.matches.main?.match.tickTimes[2] ?? 0) > 0, "reportTickStats");
+    await poll(c, () => c.events.some((e) => e.kind === EVK_SERVER_STATS), "SERVER_STATS");
+    expect(c.events.find((e) => e.kind === EVK_SERVER_STATS)?.players).toBe(1);
+    expect(c.events[0]).toMatchObject({ kind: EVK_PLAYER_JOIN, clientId: 0 });
 
     type Traffic = { bytesIn: number; bytesOut: number };
     type Metrics = {

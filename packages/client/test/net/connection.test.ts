@@ -3,6 +3,10 @@ import {
   BitWriter,
   copySlot,
   decodeInput,
+  EVK_PLAYER_JOIN,
+  EVK_SERVER_STATS,
+  EventsMsg,
+  encodeEvents,
   encodeSnapshot,
   InputMsg,
   MAX_UNRELIABLE_BYTES,
@@ -17,15 +21,27 @@ import {
 } from "@game/shared";
 import { describe, expect, it } from "vitest";
 import type { ClientClock } from "../../src/net/clock";
-import { CONN_ACTIVE, Connection, type ConnectionHandler } from "../../src/net/connection";
+import {
+  CONN_ACTIVE,
+  CONN_SPAWNING,
+  CONN_SYNCING,
+  Connection,
+  type ConnectionHandler,
+} from "../../src/net/connection";
 import { CmdRing } from "../../src/net/predictor";
 import { BASELINE_MISSES_BEFORE_FULL } from "../../src/net/snapshotStore";
 import {
   NetStats,
   STAT_BASELINE_DROPS,
+  STAT_BYTES_IN,
+  STAT_BYTES_OUT,
   STAT_DEFERRED,
   STAT_DEFERRED_SNAPSHOTS,
+  STAT_FRAMING_IN,
+  STAT_FRAMING_OUT,
   STAT_FULL_SNAPSHOTS,
+  STAT_SNAPSHOT_BYTES,
+  STAT_SNAPSHOT_BYTES_MAX,
   STAT_STRIKES,
 } from "../../src/net/stats";
 
@@ -54,8 +70,8 @@ class FakeTransport implements Transport {
   stats(): TransportStats {
     throw new Error("not used");
   }
-  inject(bytes: Uint8Array): void {
-    this.handler?.(bytes, bytes.length, false);
+  inject(bytes: Uint8Array, reliable = false): void {
+    this.handler?.(bytes, bytes.length, reliable);
   }
 }
 
@@ -90,6 +106,7 @@ function setup() {
     mapReady: () => true,
     onSnapshot: () => {},
     onCvars: () => {},
+    onEvents: () => {},
     onPrint: () => {},
     onClosed: () => {},
   };
@@ -173,3 +190,147 @@ describe("Connection: snapshot acks and counts (M3 design §2.3, D-038)", () => 
     expect([stats.totals[STAT_DEFERRED], stats.totals[STAT_DEFERRED_SNAPSHOTS]]).toEqual([2, 1]);
   });
 });
+
+/** A FakeTransport that holds what the test queues until the connection polls. */
+class QueuedTransport extends FakeTransport {
+  private readonly pending: [Uint8Array, boolean][] = [];
+  queue(bytes: Uint8Array, reliable: boolean): void {
+    this.pending.push([bytes, reliable]);
+  }
+  override poll(): void {
+    for (const [bytes, reliable] of this.pending.splice(0)) this.inject(bytes, reliable);
+  }
+}
+
+/** An EVENTS message: a JOIN of client 2 on team 1 and a SERVER_STATS. */
+function eventsBytes(): Uint8Array {
+  const m = new EventsMsg();
+  const join = m.add(EVK_PLAYER_JOIN);
+  const stats = m.add(EVK_SERVER_STATS);
+  if (join === null || stats === null) throw new Error("full");
+  join.clientId = 2;
+  join.team = 1;
+  stats.tickP99Us = 300;
+  stats.players = 3;
+  const w = new BitWriter(MAX_UNRELIABLE_BYTES);
+  if (!encodeEvents(w, m)) throw new Error("did not encode");
+  return w.bytes.slice(0, w.byteLength);
+}
+
+describe("Connection: EVENTS, snapshot sizes and WebSocket framing (D-043)", () => {
+  function eventsSetup(wsFraming: boolean) {
+    const transport = new FakeTransport();
+    const stats = new NetStats(new Float64Array(1));
+    const got: string[] = [];
+    const handler: ConnectionHandler = {
+      onWelcome: () => null,
+      mapReady: () => true,
+      onSnapshot: () => {},
+      onCvars: () => {},
+      onEvents: (m) => {
+        for (let i = 0; i < m.count; i++) {
+          const e = m.events[i];
+          got.push(`${e?.kind}:${e?.clientId}:${e?.team}:${e?.tickP99Us}:${e?.players}`);
+        }
+      },
+      onPrint: () => {},
+      onClosed: () => {},
+    };
+    const conn = new Connection(
+      transport,
+      {} as ClientClock,
+      stats,
+      handler,
+      "test",
+      1,
+      new Float64Array(1),
+      wsFraming,
+    );
+    conn.clientId = SELF;
+    return { transport, stats, conn, got };
+  }
+
+  it("hands EVENTS on from READY on, and strikes them earlier or on the unreliable channel", () => {
+    const { transport, stats, conn, got } = eventsSetup(false);
+    const bytes = eventsBytes();
+    conn.state = CONN_SYNCING;
+    transport.inject(bytes, true);
+    expect(got).toEqual([]);
+    expect(stats.totals[STAT_STRIKES]).toBe(1);
+    conn.state = CONN_SPAWNING;
+    transport.inject(bytes, true);
+    expect(got).toEqual([`${EVK_PLAYER_JOIN}:2:1:0:0`, `${EVK_SERVER_STATS}:0:0:300:3`]);
+    conn.state = CONN_ACTIVE;
+    transport.inject(bytes, false);
+    // A kind the protocol reserves (4) is struck too.
+    // The first kind is stream bits 14–17 (LSB-first): bits 6–7 of byte 1, 0–1 of byte 2.
+    const reserved = bytes.slice();
+    reserved[1] = (reserved[1] as number) & 0x3f;
+    reserved[2] = ((reserved[2] as number) & ~0x3) | 0x1;
+    transport.inject(reserved, true);
+    expect(stats.totals[STAT_STRIKES]).toBe(3);
+    expect(got).toHaveLength(2);
+  });
+
+  it("handles EVENTS during keepalive(), dropping only the snapshots (D-041, D-043)", () => {
+    const transport = new QueuedTransport();
+    const stats = new NetStats(new Float64Array(1));
+    let events = 0;
+    let snapshots = 0;
+    const handler: ConnectionHandler = {
+      onWelcome: () => null,
+      mapReady: () => true,
+      onSnapshot: () => {
+        snapshots++;
+      },
+      onCvars: () => {},
+      onEvents: (m) => {
+        events += m.count;
+      },
+      onPrint: () => {},
+      onClosed: () => {},
+    };
+    const clock = { keepalivePing: () => 1 } as unknown as ClientClock;
+    const conn = new Connection(transport, clock, stats, handler, "test", 1, new Float64Array(1));
+    conn.state = CONN_ACTIVE;
+    conn.clientId = SELF;
+    transport.queue(eventsBytes(), true);
+    transport.queue(snapshot(10), false);
+    conn.keepalive();
+    expect([events, snapshots, stats.totals[STAT_STRIKES]]).toEqual([2, 0, 0]);
+    // The keepalive's PING went out.
+    expect(transport.sent).toHaveLength(1);
+  });
+
+  it("counts stored snapshots' bytes (sum and largest), and WebSocket framing only on a WebSocket", () => {
+    const plain = eventsSetup(false);
+    plain.conn.state = CONN_ACTIVE;
+    const a = snapshot(10);
+    const b = snapshot(11, 10);
+    plain.transport.inject(a);
+    plain.transport.inject(b);
+    const t = plain.stats.totals;
+    expect(t[STAT_SNAPSHOT_BYTES]).toBe(a.length + b.length);
+    expect(t[STAT_SNAPSHOT_BYTES_MAX]).toBe(Math.max(a.length, b.length));
+    expect(t[STAT_FRAMING_IN]).toBe(0);
+    const ws = eventsSetup(true);
+    ws.conn.state = CONN_ACTIVE;
+    ws.transport.inject(a);
+    ws.conn.sendInput(cmdsUpTo(1), 1);
+    // 2 B of header for each frame under 126 B; the client's frames also carry a 4 B mask.
+    expect(ws.stats.totals[STAT_FRAMING_IN]).toBe(a.length < 126 ? 2 : 4);
+    expect(ws.stats.totals[STAT_FRAMING_OUT]).toBe(6);
+    expect(ws.stats.totals[STAT_BYTES_IN]).toBe(a.length);
+    expect(ws.stats.totals[STAT_BYTES_OUT]).toBe(ws.transport.sent.at(-1)?.length);
+  });
+});
+
+function cmdsUpTo(tick: number): CmdRing {
+  const ring = new CmdRing();
+  for (let t = 1; t <= tick; t++) {
+    const c = new UserCmd();
+    c.tick = t;
+    ring.write(c);
+  }
+  return ring;
+}

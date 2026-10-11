@@ -75,12 +75,19 @@ import {
   copySlot,
   createCollisionWorld,
   createLoopbackPair,
+  decodeEvents,
   decodeInput,
   decodePing,
   decodePong,
   decodeSnapshotBody,
   decodeSnapshotHeader,
   ENTITY_NEW_BITS,
+  EVK_PLAYER_JOIN,
+  EVK_PLAYER_LEAVE,
+  EVK_SERVER_STATS,
+  type EventRecord,
+  EventsMsg,
+  encodeEvents,
   encodeHello,
   encodeInput,
   encodePing,
@@ -103,6 +110,7 @@ import {
   MAX_UNRELIABLE_BYTES,
   type MessageHandler,
   MSG_CMD,
+  MSG_EVENTS,
   MSG_INPUT,
   MSG_PING,
   MSG_PONG,
@@ -212,6 +220,11 @@ const out = vec3();
 const outcomes = new Int32Array(3);
 /** A workload's further outcomes (wsTransport: the client end's). */
 const extra = new Int32Array(4);
+/**
+ * EVENTS outcomes (D-043). codec: [0] messages that came back equal, [1] hostile ones refused;
+ * matchMulti: [0] JOINs, [1] LEAVEs, [2] SERVER_STATS received, [3] messages that did not decode.
+ */
+const eventCounts = new Int32Array(4);
 
 function runQuantize(n: number): void {
   const o = ps.origin;
@@ -662,6 +675,54 @@ for (let i = 0; i < HOSTILE_COUNT; i++) {
 /** Hostile packets refused (all of them, when the decoders work). */
 const codecRejected = new Int32Array(1);
 
+// EVENTS (D-043), from a reliable-sized writer like the match's (63 events take 467 B at most).
+const eventsWriter = new BitWriter(MAX_RELIABLE_BYTES);
+const eventsSent = new EventsMsg();
+const eventsGot = new EventsMsg();
+/**
+ * EVENTS the decoder must refuse (D-043): a count of 0, kinds 0, 4 and 15, a JOIN's team 3, a
+ * LEAVE's reason 3, SERVER_STATS players 65, a truncated message and one with an extra byte; each
+ * a patch of a valid message, which must decode at load (so a layout slip can't refuse them all
+ * on misaligned bits).
+ */
+const hostileEvents: Uint8Array[] = [];
+{
+  const one = (kind: number): Uint8Array => {
+    eventsSent.count = 0;
+    const e = eventsSent.add(kind) as EventRecord;
+    e.clientId = 5;
+    e.team = kind === EVK_PLAYER_JOIN ? 2 : 0;
+    e.players = kind === EVK_SERVER_STATS ? 64 : 0;
+    eventsWriter.reset();
+    if (!encodeEvents(eventsWriter, eventsSent)) throw new Error("hostile EVENTS: base");
+    const bytes = eventsWriter.bytes.slice(0, eventsWriter.byteLength);
+    codecReader.reset(bytes, bytes.length);
+    if (!decodeEvents(codecReader, eventsGot)) throw new Error("hostile EVENTS: twin refused");
+    return bytes;
+  };
+  // type 0–7, count 8–13, kind 14–17, JOIN/LEAVE id 18–23 and team/reason 24–25, players 66–72.
+  const patched = (kind: number, offset: number, width: number, value: number) => {
+    const b = one(kind);
+    patchBits(b, offset, width, value);
+    return b;
+  };
+  hostileEvents.push(
+    patched(EVK_PLAYER_JOIN, 8, 6, 0),
+    patched(EVK_PLAYER_JOIN, 14, 4, 0),
+    patched(EVK_PLAYER_JOIN, 14, 4, 4),
+    patched(EVK_PLAYER_JOIN, 14, 4, 15),
+    patched(EVK_PLAYER_JOIN, 24, 2, 3),
+    patched(EVK_PLAYER_LEAVE, 24, 2, 3),
+    patched(EVK_SERVER_STATS, 66, 7, 65),
+  );
+  const stats = one(EVK_SERVER_STATS);
+  hostileEvents.push(stats.slice(0, stats.length - 1));
+  const longer = new Uint8Array(stats.length + 1);
+  longer.set(stats);
+  hostileEvents.push(longer);
+}
+const HOSTILE_EVENTS = hostileEvents.length;
+
 /**
  * The per-tick messages (D-026, D-033): SNAPSHOT (a full v2 snapshot of a 16-player frame whose
  * players take quantized states with fractional origin and velocity, written into the frame as the
@@ -764,7 +825,46 @@ function runCodec(n: number): void {
             decodeSnapshotBody(r, snapGotHeader, null, 3, snapGotFrame)
           : decodePong(r, pongGot);
     if (!accepted) codecRejected[0] = (codecRejected[0] as number) + 1;
+    if (kind === 3) codecEvents(i);
   }
+}
+
+/**
+ * Every fourth call (D-043): an EVENTS of 1–63 events of the three kinds round-trips, then a
+ * hostile one is refused.
+ */
+function codecEvents(i: number): void {
+  const m = eventsSent;
+  m.count = 0;
+  const n = 1 + ((i >> 2) % 63);
+  for (let k = 0; k < n; k++) {
+    const kind = 1 + ((i + k) % 3);
+    const e = m.add(kind) as EventRecord;
+    if (kind !== EVK_SERVER_STATS) e.clientId = (i + k) & 63;
+    if (kind === EVK_PLAYER_JOIN) e.team = k % 3;
+    else if (kind === EVK_PLAYER_LEAVE) e.reason = k % 3;
+    else {
+      e.tickP50Us = i & 0xffff;
+      e.tickP99Us = (i * 3) & 0xffff;
+      e.tickMaxUs = 0xffff;
+      e.players = k & 63;
+    }
+  }
+  const w = eventsWriter;
+  const r = codecReader;
+  w.reset();
+  encodeEvents(w, m);
+  r.reset(w.bytes, w.byteLength);
+  if (peekMessageType(w.bytes, w.byteLength) === MSG_EVENTS && decodeEvents(r, eventsGot)) {
+    const got = eventsGot.events[n - 1] as EventRecord;
+    const sent = m.events[n - 1] as EventRecord;
+    if (eventsGot.count === n && got.kind === sent.kind && got.clientId === sent.clientId) {
+      eventCounts[0] = (eventCounts[0] as number) + 1;
+    }
+  }
+  const h = hostileEvents[(i >> 2) % HOSTILE_EVENTS] as Uint8Array;
+  r.reset(h, h.length);
+  if (!decodeEvents(r, eventsGot)) eventCounts[1] = (eventCounts[1] as number) + 1;
 }
 
 // Delta snapshots (D-038): a 16-player world the server captures each tick into its 64-frame
@@ -1494,6 +1594,7 @@ class MultiClient {
   id = -1;
   /** 0 playing, 1 HELLO sent (READY next tick), 2 closed (reconnect next tick). */
   phase = 0;
+  readonly eventsIn = new EventsMsg();
   readonly onMessage: MessageHandler = (d, len) => this.receive(d, len);
 
   constructor(
@@ -1502,7 +1603,12 @@ class MultiClient {
   ) {}
 
   private receive(d: Uint8Array, len: number): void {
-    if (peekMessageType(d, len) !== MSG_SNAPSHOT) return;
+    const type = peekMessageType(d, len);
+    if (type === MSG_EVENTS) {
+      this.events(d, len);
+      return;
+    }
+    if (type !== MSG_SNAPSHOT) return;
     const r = this.reader;
     r.reset(d, len);
     const store = this.store;
@@ -1512,6 +1618,22 @@ class MultiClient {
     if (cur !== null && sameFrame(got, cur, this.id)) outcomes[0] = (outcomes[0] as number) + 1;
     else extra[0] = (extra[0] as number) + 1;
     if (store.header.baseBack !== 0) outcomes[1] = (outcomes[1] as number) + 1;
+  }
+
+  /** The roster and stats the match sends (D-043): JOINs, LEAVEs and SERVER_STATS counted. */
+  private events(d: Uint8Array, len: number): void {
+    const r = this.reader;
+    r.reset(d, len);
+    const m = this.eventsIn;
+    if (!decodeEvents(r, m)) {
+      eventCounts[3] = (eventCounts[3] as number) + 1;
+      return;
+    }
+    for (let i = 0; i < m.count; i++) {
+      const kind = (m.events[i] as EventRecord).kind;
+      const at = kind === EVK_PLAYER_JOIN ? 0 : kind === EVK_PLAYER_LEAVE ? 1 : 2;
+      eventCounts[at] = (eventCounts[at] as number) + 1;
+    }
   }
 }
 
@@ -1679,6 +1801,9 @@ function runMatchMulti(n: number): void {
       for (let p = 0; p < pings; p++) abuser.sendUnreliable(w.bytes, w.byteLength);
     }
     if (next % 300 === 150) abuser.sendUnreliable(rig.malformed, rig.malformed.length);
+    // The host's tick times once a second (D-043), integers as TimedPass hands them over.
+    if (next % 60 === 1)
+      match.reportTickStats(40 + (next & 15), 120 + (next & 63), 300 + (next & 255));
     match.tick();
     abuser.poll();
     const t = match.serverTick;
@@ -1898,7 +2023,16 @@ const passClock: PassClock = {
   },
   cpuMicros: () => passClockMs >> 1,
 };
-const idleMatch = { tick: () => {} } as unknown as Match;
+// Each closed second hands the match its tick times (D-043): integers, into its Int32Array.
+const idleTimes = new Int32Array(3);
+const idleMatch = {
+  tick: () => {},
+  reportTickStats: (p50Us: number, p99Us: number, maxUs: number) => {
+    idleTimes[0] = p50Us;
+    idleTimes[1] = p99Us;
+    idleTimes[2] = maxUs;
+  },
+} as unknown as Match;
 const timedMatches: ServerMatch[] = [
   { name: "a", match: idleMatch, ticks: new TickHistogram(), traffic: new WireTraffic() },
   { name: "b", match: idleMatch, ticks: new TickHistogram(), traffic: new WireTraffic() },
@@ -2204,6 +2338,7 @@ console.log(
     attempts,
     outcomes: Array.from(outcomes),
     extra: Array.from(extra),
+    events: Array.from(eventCounts),
     rejected: codecRejected[0],
   }),
 );

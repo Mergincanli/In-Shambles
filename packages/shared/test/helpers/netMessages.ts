@@ -2,6 +2,7 @@ import type { CvarType, CvarValue } from "../../src/cvars/registry";
 import { PITCH_LIMIT_U16 } from "../../src/math/angles";
 import { BitReader, BitWriter } from "../../src/net/bitstream";
 import type { CvarBlock, CvarBlockEntry } from "../../src/net/cvarBlock";
+import { decodeEvents, EVENTS_MAX_PER_MSG, EventsMsg, encodeEvents } from "../../src/net/events";
 import {
   CmdMsg,
   CvarsMsg,
@@ -34,9 +35,13 @@ import {
   WelcomeMsg,
 } from "../../src/net/messages";
 import {
+  EVK_PLAYER_JOIN,
+  EVK_PLAYER_LEAVE,
+  EVK_SERVER_STATS,
   MAX_RELIABLE_BYTES,
   MSG_CMD,
   MSG_CVARS,
+  MSG_EVENTS,
   MSG_HELLO,
   MSG_INPUT,
   MSG_KICK,
@@ -705,7 +710,42 @@ export const MESSAGE_KINDS: readonly MessageKind[] = [
     encodeKick,
     decodeKick,
   ),
+  kind(
+    MSG_EVENTS,
+    "EVENTS",
+    () => new EventsMsg(),
+    (rng, m) => {
+      randomEventsMsg(rng, m);
+    },
+    encodeEvents,
+    decodeEvents,
+  ),
 ];
+
+/**
+ * Random valid EVENTS (D-043): 1–63 events, often a single one, of every kind with every field
+ * across its range, extremes a quarter of the time.
+ */
+export function randomEventsMsg(rng: Mulberry32, m: EventsMsg): EventsMsg {
+  m.count = 0;
+  const n = rng.nextInt(3) === 0 ? 1 : intIn(rng, 1, EVENTS_MAX_PER_MSG);
+  for (let i = 0; i < n; i++) {
+    const kind = pick(rng, [EVK_PLAYER_JOIN, EVK_PLAYER_LEAVE, EVK_SERVER_STATS]);
+    const e = m.add(kind);
+    if (e === null) throw new Error("randomEventsMsg: message full");
+    if (kind === EVK_SERVER_STATS) {
+      e.tickP50Us = intIn(rng, 0, 0xffff);
+      e.tickP99Us = intIn(rng, 0, 0xffff);
+      e.tickMaxUs = intIn(rng, 0, 0xffff);
+      e.players = intIn(rng, 0, 64);
+    } else {
+      e.clientId = intIn(rng, 0, 63);
+      if (kind === EVK_PLAYER_JOIN) e.team = intIn(rng, 0, 2);
+      else e.reason = intIn(rng, 0, 2);
+    }
+  }
+  return m;
+}
 
 export function newWriter(): BitWriter {
   return new BitWriter(MAX_RELIABLE_BYTES);

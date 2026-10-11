@@ -78,8 +78,11 @@ packages/shared/src/
   net/
     bitstream.ts       BitWriter/BitReader: LSB-first, explicit widths, sticky error flag (D-026)
     protocol.ts        PROTOCOL_VERSION, MSG_* type ids, MSG_CHANNEL (type → channel), packet,
-                       client-message and text size limits
+                       client-message and text size limits, EVENTS' EVK_* kinds and EV_LEAVE_*
+                       reasons (D-043)
     messages.ts        message structs + encodeX/decodeX (docs/05 §3.6) but SNAPSHOT; readTick/writeTick
+    events.ts          EVENTS: EventsMsg (63 pooled records), encodeEvents/decodeEvents, the
+                       events' widths (D-043)
     snapshot.ts        SNAPSHOT v2: SnapshotHeader, encodeSnapshot, decodeSnapshotHeader/Body, full and
                        delta forms against a baseline frame, exact size functions localBlockBits and
                        entityRecordBits, the size constants and their static checks (D-033, D-038)
@@ -103,7 +106,9 @@ packages/server/src/
                        (docs/05 §8.1), movement-event history, the world frame captured into the
                        history and the v2 snapshots built from it (deltas against each client's
                        acked tick, D-038; the byte-budget scheduler above 37 players, D-046), CVARS;
-                       the pmove primer at construction (MatchOptions.primer, D-040)
+                       EVENTS after each snapshot: the roster burst, JOIN, LEAVE, SERVER_STATS from
+                       the host's reportTickStats (D-043); the pmove primer at construction
+                       (MatchOptions.primer, D-040)
     history.ts         WorldHistory: the last 64 world frames, shared by every client; the acks'
                        rules (acceptAck, baselineTick, markSent/markUnsent over a client's sent
                        ring; D-038)
@@ -114,7 +119,7 @@ packages/server/src/
                        mirror frame, encode, commit on success (D-046)
     session.ts         per-client state, player, team, input queue, sent ring and acked baseline,
                        the scheduler's rows and mirror, buckets, strike score, timeout ticks,
-                       starved run, counters, admin flag
+                       starved run, counters, admin flag, EventOutbox (its EVENTS to send, D-043)
     spawns.ts          SpawnRotation (info_player_start round-robin in cmap order, origins raised
                        ε) and assignTeam (the team with fewer active players; D-034)
     inputQueue.ts      cmds by tick (64 slots), duplicate/late/early counters
@@ -132,7 +137,8 @@ packages/server/src/
     config.ts          server.cfg (`set` lines; `//` and `#` comment lines) and CLI flags
     serverCvars.ts     SERVER cvars (sv_*, §8)
     host.ts            Node LoopHost (performance.now + setTimeout) and TimedPass (per-match and
-                       per-pass tick times, CPU per second, tick_drop)
+                       per-pass tick times, each match's second to its reportTickStats, CPU per
+                       second, tick_drop)
     metrics.ts         ServerMetrics: GC pauses (PerformanceObserver), memory, wire traffic, run
                        and interval windows; /metrics, the metrics lines, --metrics-out (D-029)
     log.ts             JSON-lines logger
@@ -179,6 +185,8 @@ packages/client/src/
     smoothing.ts       RenderOffset (linear decay over cl_correctionSmoothMs), StepSmoother (render-tick
                        time, cl_stepSmoothMs, capped at 32 u), ViewHeight (cl_viewHeightSmoothMs)
     stats.ts           totals and rolling 1 s windows for the netgraph
+    roster.ts          Roster: who joined on which team, the server's last SERVER_STATS, the join
+                       and leave notices, from EVENTS (D-043)
     cvars.ts           the client's net settings (cl_inputBuffer, cl_correctionSmoothMs, cl_teleportDist,
                        cl_interpDelay, cl_remoteSmoothMs, cl_remoteCrouchBlendMs)
     portTransport.ts   PortTransport over two MessagePort-like ports (the Worker link)
@@ -379,7 +387,7 @@ DEV / OFFLINE                                  ONLINE
 - **Space conversion** (`render/space.ts`): `three.x = q.x × 0.0254`, `three.y = q.z × 0.0254`, `three.z = −q.y × 0.0254`; yaw/pitch mapped accordingly: `setViewAngles` sets Euler order YXZ with `rotation.y = yaw − 90°` and `rotation.x = −pitch` (sim yaw 0 faces +X, positive pitch looks down). The mapping is a proper rotation, so map vertices are converted once at load time (`convertVertices`) and keep their winding. Unit-test the conversions.
 - **World (M2):** one mesh per cmap render surface (one per material), `MeshLambertMaterial` with a procedural 256² grid `CanvasTexture` per material (16 u minor and 64 u major lines, repeat-wrapped; uv0 is 1 per 64 u, `docs/07` §3): floor light grey, wall mid grey, `grey/ladder` with rungs, water blue at 0.5 opacity, double-sided, no depth write, anything else magenta. Hemisphere plus directional light, no shadows; geometry, materials and textures are disposed on unload.
 - **HUD:** DOM overlay updated imperatively (refs). Crosshair and ammo update immediately; scoreboard and minimap at ≤ 15 Hz. No framework re-render per frame. Menus may use a UI framework later.
-  - M2 (`client/src/hud`): a crosshair; a click-to-play prompt while the pointer is free; a blue tint while the camera is inside water (`pointContents` at the camera); the speedometer (`cl_speedometer`: horizontal speed, vertical velocity and ground/air/water/ladder, the mode pmove dispatches on); the netgraph (`cl_netgraph`, bottom right: RTT, jitter, snapshot loss % and snapshots/s; corrections/s with mean and largest size and the render offset left; input-buffer health, its mean and its low edge (the lowest over 1.5 s, which the clock steers to `cl_inputBuffer` by dilation and coarse steps, D-039, so a mean grown above it shows the spread of bursty frames or jitter; after a re-anchor the last low edge until the window refills), starved cmds/s and clock adjustments; bytes in and out per second; hard and pending-parameter resyncs; the simulated profile; since M3 increment 7 a `remote` line: the interpolation delay in ticks and ms and the share of the last second's remote-frames drawn extrapolated or held, D-037); the renderer panel (`r_stats`). Rates are over the last second; the panels' text refreshes at ≤ 15 Hz. When the session closes (a kick, a refused WELCOME, a version or tick-rate mismatch, refused server cvars) the page's error box shows `disconnected: <reason>`, and the prompt and crosshair stay hidden.
+  - M2 (`client/src/hud`): a crosshair; a click-to-play prompt while the pointer is free; a blue tint while the camera is inside water (`pointContents` at the camera); the speedometer (`cl_speedometer`: horizontal speed, vertical velocity and ground/air/water/ladder, the mode pmove dispatches on); the netgraph (`cl_netgraph`, bottom right; seven lines since D-043, `docs/05` §13): `link` (RTT, jitter, snapshot loss % and snapshots/s, the simulated profile); `snaps` (mean and largest snapshot size, full snapshots and baseline drops per second, the players in the newest snapshot, players the server's scheduler left out per snapshot); `remote` (the interpolation delay in ticks and ms, its defer lag, the share of the last second's remote-frames drawn extrapolated or held, D-037); `corr` (corrections/s with mean and largest size, the render offset left, teleports, hard/pending-parameter resyncs); `input` (input-buffer health, its mean and its low edge, the lowest over 1.5 s, which the clock steers to `cl_inputBuffer` by dilation and coarse steps, D-039, so a mean grown above it shows the spread of bursty frames or jitter; after a re-anchor the last low edge until the window refills; starved cmds/s, the mean dilation % over the last second and the clock's coarse steps); `bytes` (in and out per second, payload plus WebSocket framing on a dedicated server); `server` (from the server's `SERVER_STATS` EVENTS, once a second: its tick time p50/p99/max in ms and the players of this match; `-` until the first; offline the Worker's times are as coarse as the browser's timer, 100 µs steps in Chromium, `docs/05` §10). The console prints the join and leave notices of the match's EVENTS (`player 3 joined team 2`, `player 3 timed out`; not the roster burst a joiner gets, only its own `you joined team 1`); the renderer panel (`r_stats`). Rates are over the last second; the panels' text refreshes at ≤ 15 Hz. When the session closes (a kick, a refused WELCOME, a version or tick-rate mismatch, refused server cvars) the page's error box shows `disconnected: <reason>`, and the prompt and crosshair stay hidden.
 - **Players (M3, `client/src/render/players.ts`, D-034):** every other player is a capsule of the hull's radius (15 u) and height (56 u standing; squashed along the up axis to 40 u crouched), standing on the hull's feet and turned to its view yaw, with a small dark nub at eye height in front showing where it faces; colour by team (placeholders, ESTIMATE: team 1 orange `#d9652b`, team 2 blue `#2b8fd9`, no team grey `#9a9a9a`; `render/teamColors.ts`). One `InstancedMesh` of 64 capsules with a colour per instance and one of nubs sharing its matrix buffer: 2 draw calls whatever the player count, none with nobody visible. The game fills a `RemoteView` (`client/src/net/remotes.ts`) each frame from the remote interpolation (D-037, `docs/05` §6) and the renderer reads only that; a crouch or stand-up blends the capsule's height over `cl_remoteCrouchBlendMs` (at once when the slot appears or teleports). Instance matrices are written by `space.ts`'s `uprightToThree` (`space.ts` stays the only module that turns sim angles into scene rotations).
 - **Debug draw** (M2, `client/src/render/debug/debugDraw.ts`): one `LineSegments` with buffers sized once. `r_debugHull` draws the hull box at the drawn origin; `r_debugTraces` the traces of the frame's first predictions from pmove's `PmoveTraceLog` (green when clear, red when they hit, with an 8 u tick along the hit normal; kept while frames predict no tick); `r_debugGround` the ground normal from a short sweep under the predicted state, drawn under the hull's interpolated origin (yellow when walkable, magenta when steep). The segments are built in sim space and converted through `space.ts`.
 - **Audio:**

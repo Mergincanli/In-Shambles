@@ -18,6 +18,7 @@ interface FakeMatch {
   sessionCount: number;
   serverTick: number;
   tick(): void;
+  reportTickStats(p50Us: number, p99Us: number, maxUs: number): void;
 }
 
 function setup() {
@@ -32,6 +33,7 @@ function setup() {
     tick() {
       this.serverTick++;
     },
+    reportTickStats() {},
   };
   const m: ServerMatch = {
     name: "main",
@@ -249,6 +251,7 @@ describe("ServerMetrics", () => {
         tick() {
           this.serverTick++;
         },
+        reportTickStats() {},
       };
       const m: ServerMatch = {
         name,
