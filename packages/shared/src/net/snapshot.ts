@@ -118,8 +118,9 @@ export const SNAP_REUSED_OUT_BITS = ENTITY_REMOVED_BITS;
  * The most players whose every snapshot fits SNAP_BUDGET_BITS without a scheduler (D-034): the
  * worst delta of the M3 design §2.1 size bounds is 312 + 233 bits per other player, so 36 others
  * fit (8700 bits, 1088 B) and 37 do not, as long as baseline and current frame together hold at
- * most this many players. Until the D-046 byte-budget scheduler a match admits at most this many
- * (`sv_maxClients` is clamped to it). The full form is smaller. Both checked below.
+ * most this many players; the full form is smaller (both checked below). Above it (a match admits
+ * up to 64, D-034 amendment) the D-046 byte-budget scheduler keeps every snapshot within
+ * SNAP_BUDGET_BITS, deferring what does not fit, and sessions keep mirrors.
  */
 export const SNAP_FIT_MAX_PLAYERS = 37;
 

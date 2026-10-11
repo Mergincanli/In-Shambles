@@ -456,13 +456,16 @@ function validateRecords(
           );
         }
       }
-      // The first SNAPSHOT is a keyframe (a delta's baseline would not be held), at or after the
-      // start tick: a recorder whose start-tick snapshot failed writes its keyframe a tick later.
+      // The first SNAPSHOT is a keyframe, at or after the start tick (a recorder whose start-tick
+      // snapshot failed writes its keyframe a tick later). Defence in depth, unreachable today:
+      // the ring is empty before the first snapshot, so a first delta was refused just above.
       if (lastSnap === 0 && base !== null) return bad("the first SNAPSHOT is not a keyframe");
       const spare = x.spare;
       if (!decodeSnapshotBody(r, hdr, base, -1, spare)) {
         return bad(`the SNAPSHOT at byte ${at} does not decode`);
       }
+      // Defence in depth, unreachable today: a spectator snapshot has no deferred list (refused
+      // by decodeSnapshotBody) and finishUnlisted stamps every other present slot with the tick.
       for (let s = 0; s < FRAME_SLOTS; s++) {
         if (spare.present[s] === 1 && spare.stamp[s] !== tick) {
           return bad(`the SNAPSHOT at byte ${at} holds a slot of another tick`);
