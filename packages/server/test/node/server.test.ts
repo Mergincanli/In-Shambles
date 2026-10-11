@@ -248,6 +248,22 @@ describe("Node server (in process, real WebSocket)", () => {
     });
   });
 
+  it("answers a set of a SERVER cvar that it is a startup setting, not an unknown cvar", async () => {
+    const input = new PassThrough();
+    const { lines } = await start([], input);
+    const replies = () => lines.filter((l) => l.ev === "console");
+    input.write("set sv_maxClients 40\nreset sv_timeout\ntoggle sv_strictBuild\nset sv_nope 1\n");
+    await until(() => replies().length === 4, "the four console replies");
+    const texts = replies().map((l) => [l.lvl, l.text]);
+    expect(texts.slice(0, 3)).toEqual(
+      ["sv_maxClients", "sv_timeout", "sv_strictBuild"].map((name) => [
+        "error",
+        `${name} is a startup setting: set it in server.cfg or with --set, then restart the server`,
+      ]),
+    );
+    expect(texts[3]).toEqual(["error", "unknown cvar sv_nope"]);
+  });
+
   it("runs rcon as admin of the sender's match; a wrong password logs rcon_fail with the ip only (D-042)", async () => {
     const input = new PassThrough();
     const { server, lines, port } = await start([], input, "open sesame");

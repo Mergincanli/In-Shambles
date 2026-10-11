@@ -1,8 +1,9 @@
 import { createInterface } from "node:readline";
-import { PRINT_ERROR } from "@game/shared";
+import { CvarRegistry, PRINT_ERROR } from "@game/shared";
 import { type AdminReply, tokenizeCommand } from "../match/commands";
 import type { Match } from "../match/match";
 import type { JsonLog } from "./log";
+import { registerServerCvars } from "./serverCvars";
 
 /**
  * The admin console on stdin (D-029): each line is handed to `onLine`. Returns a function that
@@ -50,6 +51,18 @@ export interface ConsoleHost {
   readonly process?: ConsoleProcess;
 }
 
+/** The Node server's own SERVER cvars (built on first use): the console's startup settings. */
+let startupCvars: CvarRegistry | null = null;
+
+/** Whether `name` is one of the Node server's SERVER cvars (`sv_port`, `sv_maxClients`, …). */
+function isStartupCvar(name: string): boolean {
+  if (startupCvars === null) {
+    startupCvars = new CvarRegistry();
+    registerServerCvars(startupCvars);
+  }
+  return startupCvars.has(name);
+}
+
 /** The process commands (D-047): never sent to a match, never with an `@<match>` prefix. */
 const PROCESS_COMMANDS = new Set(["matches", "match_add", "match_remove"]);
 
@@ -59,8 +72,9 @@ const PROCESS_COMMANDS = new Set(["matches", "match_add", "match_remove"]);
  * cvars (the CVARS broadcast following on the next tick), `status`, `kick <id> [reason]`,
  * `record [name]` and `stoprecord` (D-044), and `metrics reset`, which with a prefix restarts that
  * match's run window alone and without one the process's and every match's. The process commands
- * `matches`, `match_add` and `match_remove` take no prefix. The reply is logged as
- * `{"ev":"console"}`, with `match` when a match answered.
+ * `matches`, `match_add` and `match_remove` take no prefix. `set`, `reset` or `toggle` of one of
+ * the server's own SERVER cvars (read once at startup, docs/06 §8) replies that it is a startup
+ * setting. The reply is logged as `{"ev":"console"}`, with `match` when a match answered.
  */
 export function runConsoleLine(line: string, host: ConsoleHost, log: JsonLog): void {
   let text = line.trim();
@@ -110,6 +124,18 @@ export function runConsoleLine(line: string, host: ConsoleHost, log: JsonLog): v
   ) {
     if (named === null) log("info", "console", { text: proc.metricsReset() });
     else log("info", "console", { match: target.name, text: proc.matchMetricsReset(target.name) });
+    return;
+  }
+  const cvar = tokens?.[1];
+  if (
+    (head === "set" || head === "reset" || head === "toggle") &&
+    cvar !== undefined &&
+    !target.match.cvars.has(cvar) &&
+    isStartupCvar(cvar)
+  ) {
+    log("error", "console", {
+      text: `${cvar} is a startup setting: set it in server.cfg or with --set, then restart the server`,
+    });
     return;
   }
   const result = target.match.runAdminCommand(text);
