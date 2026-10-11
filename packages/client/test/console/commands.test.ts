@@ -275,9 +275,17 @@ describe("console commands (M2 design §2)", () => {
     const off = host(false);
     off.cvars.set("rcon_password", "pw");
     expect(off.run("rcon status")).toEqual(["rcon: not connected"]);
-    // Connected, but the CMD does not encode (Connection.sendCommand returns false): the reason.
-    t.cvars.set("rcon_password", "x".repeat(1100));
+    // Open, but not welcomed yet (HELLO sent, no WELCOME): sendCommand refuses a line that fits.
+    t.cvars.set("rcon_password", "pw");
     t.h.sendServer = () => false;
+    expect(t.run("rcon status")).toEqual([
+      "rcon: not connected yet (waiting for the server's WELCOME)",
+    ]);
+    // Connected, but the CMD does not encode (Connection.sendCommand returns false): the reason.
+    expect(t.run("rcon say €uro")).toEqual([
+      `rcon: the command does not fit one message (${TEXT_MAX} Latin-1 chars with the password)`,
+    ]);
+    t.cvars.set("rcon_password", "x".repeat(1100));
     expect(t.run("rcon status")).toEqual([
       `rcon: the command does not fit one message (${TEXT_MAX} Latin-1 chars with the password)`,
     ]);

@@ -191,12 +191,21 @@ function rcon(text: string, first: string, args: readonly string[], host: Consol
   const command = raw.startsWith(first)
     ? raw.slice(first.length).trim()
     : args.map(quoteToken).join(" ");
-  if (!host.sendServer(`rcon "${password}" ${command}`)) {
-    host.print(
-      `rcon: the command does not fit one message (${TEXT_MAX} Latin-1 chars with the password)`,
-    );
+  const line = `rcon "${password}" ${command}`;
+  if (host.sendServer(line)) return;
+  // A line that encodes was refused by the session: open, but not welcomed yet (HELLO sent, no
+  // WELCOME), when no CMD may go.
+  if (line.length <= TEXT_MAX && CMD_TEXT.test(line)) {
+    host.print("rcon: not connected yet (waiting for the server's WELCOME)");
+    return;
   }
+  host.print(
+    `rcon: the command does not fit one message (${TEXT_MAX} Latin-1 chars with the password)`,
+  );
 }
+
+/** The chars a CMD's text may hold (shared writeText's rule: Latin-1, tab and newline). */
+const CMD_TEXT = /^[\t\n\x20-\x7e\xa0-\xff]*$/;
 
 /** The correction log, oldest first: each snapshot tick, the distance and the fields that differed. */
 function netCorrections(host: ConsoleHost): void {
