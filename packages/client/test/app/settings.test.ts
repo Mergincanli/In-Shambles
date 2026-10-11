@@ -9,7 +9,7 @@ import {
   SettingsSaver,
   type SettingsStorage,
 } from "../../src/app/settings";
-import { Binds } from "../../src/console/binds";
+import { Binds, DEFAULT_BINDS } from "../../src/console/binds";
 import { registerClientCvars } from "../../src/console/clientCvars";
 
 function registry(): CvarRegistry {
@@ -53,7 +53,7 @@ describe("settings (ARCHIVE cvars and binds in localStorage)", () => {
     const s = captureSettings(reg, binds);
     expect(s.cvars).toEqual({ sensitivity: "2.5", cl_netgraph: "true" });
     expect(s.binds).toContainEqual(["KeyQ", "+jump"]);
-    expect(s.binds).toHaveLength(11);
+    expect(s.binds).toHaveLength(DEFAULT_BINDS.length + 1);
   });
 
   it("round-trip through storage, and save only after a change", () => {

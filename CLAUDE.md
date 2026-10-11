@@ -74,6 +74,7 @@ docs/       specs, roadmap, decisions, handoffs.
 | `pnpm greybox` | Recompile the greybox courses into `content/maps/` |
 | `pnpm bench` | Microbenchmarks (`--strict` fails on a missed budget) |
 | `pnpm bots --count 16 --profile wan-150-loss2` | Headless bot load test (JSON + markdown summary in `reports/bots/`) |
+| `pnpm demo-info <file> [--json]` | What a server demo holds: header, duration, records, players, cvar changes (D-044) |
 | `pnpm feel-report` | Movement metrics vs. targets |
 | `pnpm balance-report` | Hits-to-kill / TTK tables |
 | `pnpm mapc` | TrenchBroom `.map` compiler |

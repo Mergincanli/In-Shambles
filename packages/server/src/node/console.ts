@@ -30,8 +30,8 @@ export interface ConsoleProcess {
 /**
  * Runs one console line as an admin: `metrics reset` on the process (`proc`), else on `match` the
  * commands an admin client may send (`set`, `reset`, `toggle` on replicated cvars, the CVARS
- * broadcast following on the next tick; `status`; `kick <id> [reason]`; D-042). The reply is
- * logged as `{"ev":"console"}`.
+ * broadcast following on the next tick; `status`; `kick <id> [reason]`; D-042; `record [name]`
+ * and `stoprecord`, D-044). The reply is logged as `{"ev":"console"}`.
  */
 export function runConsoleLine(
   line: string,

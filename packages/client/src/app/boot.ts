@@ -2,12 +2,15 @@ import {
   buildCollisionWorld,
   type Cmap,
   CvarRegistry,
+  demoMapHash,
   findNetProfile,
   NET_PROFILE_LAN,
   NetSimTransport,
   registerPmoveCvars,
   registerServerReplicatedCvars,
   type Transport,
+  VIEW_HEIGHT_STANDING,
+  validateDemo,
 } from "@game/shared";
 import { Binds } from "../console/binds";
 import { registerClientCvars } from "../console/clientCvars";
@@ -22,6 +25,7 @@ import {
   ClientSim,
   type CmdSampler,
   createScriptedInput,
+  DemoPlayer,
   KEEPALIVE_INTERVAL_MS,
   NeutralInput,
   PortTransport,
@@ -29,9 +33,10 @@ import {
 } from "../net";
 import { GameRenderer } from "../render/renderer";
 import type { WorkerOutMsg, WorkerStartMsg } from "../worker/messages";
+import { DemoGame } from "./demoGame";
 import { Game, type StatusSink } from "./game";
 import { fetchMap, loadServerMap } from "./maps";
-import { type BootParams, connectSearch, parseServerUrl } from "./params";
+import { type BootParams, connectSearch, demoSearch, parseServerUrl } from "./params";
 import { browserStorage, type HeldCheats, loadSettings, SettingsSaver } from "./settings";
 
 /** The net simulator's seed on the page: one fixed schedule per profile (D-028). */
@@ -197,6 +202,8 @@ export async function boot(
       client.disconnect("left the server");
       return true;
     },
+    demo: null,
+    playDemo: (url) => reloadWithDemo(url),
   };
   const run = (line: string) => {
     runConsoleCommand(line, host);
@@ -326,4 +333,137 @@ function startWorker(
   };
   worker.postMessage(start, [copy, unreliable.port2, reliable.port2]);
   return { worker, transport: new PortTransport(unreliable.port1, reliable.port1) };
+}
+
+/** The console's `demo <url>` (D-044): the page reloads with `?demo=`. */
+function reloadWithDemo(url: string): string | null {
+  const next = demoSearch(url, location.search);
+  if (!next.ok) return next.error;
+  location.search = next.search;
+  return null;
+}
+
+export interface BootedDemo {
+  readonly game: DemoGame;
+  readonly demo: DemoPlayer;
+  readonly renderer: GameRenderer | null;
+  readonly console: GameConsole;
+}
+
+/**
+ * `?demo=<url>` (D-044, M3 design §2.12): downloads the demo, checks it whole (`validateDemo`),
+ * loads the bundled map its header names and checks the map's hash, then plays it at 1× with the
+ * camera behind the lowest present player: `]`/`[` (follownext/followprev) and the console's
+ * `follow <id>` switch players. The console and binds work as in play (saved settings load); no
+ * session, prediction or pointer lock. Throws (the page shows it) on a demo that is not valid.
+ */
+export async function bootDemo(
+  canvas: HTMLCanvasElement,
+  params: BootParams,
+  status: StatusSink | null,
+): Promise<BootedDemo> {
+  if (status !== null) status.state = "loading";
+  const source = params.demo ?? "";
+  const url = new URL(source, location.href).href;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`demo ${source}: download failed: ${res.status} ${res.statusText}`);
+  const bytes = new Uint8Array(await res.arrayBuffer());
+  const check = validateDemo(bytes);
+  if (!check.ok) throw new Error(`demo ${source}: ${check.error}`);
+  const header = check.header;
+  const map = (await fetchMap(header.mapName)).cmap;
+  const recorded = demoMapHash(header);
+  if (map.contentHash !== recorded) {
+    throw new Error(
+      `demo ${source}: recorded on map ${header.mapName} version ${recorded}, this client has ${map.contentHash}`,
+    );
+  }
+  const world = buildCollisionWorld(map);
+
+  const cvars = new CvarRegistry();
+  registerPmoveCvars(cvars);
+  registerServerReplicatedCvars(cvars);
+  registerClientCvars(cvars);
+  const binds = new Binds();
+  const storage = params.autotest ? null : browserStorage();
+  const held: HeldCheats = {};
+  const settingWarnings = loadSettings(storage, cvars, binds, held);
+  const saver = new SettingsSaver(storage, cvars, binds, held);
+  const demo = new DemoPlayer({ bytes, header, world, cvars, clock: () => performance.now() });
+
+  const renderer = GameRenderer.create(canvas);
+  if (renderer === null) console.warn("WebGL 2 is unavailable: the demo plays without a picture");
+  else renderer.loadMap(map);
+  if (status !== null) {
+    status.webgl = renderer === null ? "0" : "1";
+    status.map = map.name;
+  }
+  const app = canvas.parentElement ?? document.body;
+  const hud = new Hud(app, null, renderer);
+  // A spectator's camera aims nothing: playback shows only the "following #id" line.
+  hud.setCrosshair(false);
+  const host: ConsoleHost = {
+    cvars,
+    binds,
+    print: (text) => gameConsole.print(text),
+    clear: () => gameConsole.clear(),
+    toggleConsole: () => gameConsole.toggle(),
+    sendServer: () => false,
+    net: null,
+    corrections: null,
+    server: `the demo ${source}`,
+    connected: () => false,
+    connect: (address) => {
+      const next = connectSearch(address, location.search);
+      if (!next.ok) return next.error;
+      const q = new URLSearchParams(next.search);
+      q.delete("demo");
+      location.search = q.toString();
+      return null;
+    },
+    disconnect: () => false,
+    demo,
+    playDemo: (next) => reloadWithDemo(next),
+  };
+  const run = (line: string) => {
+    runConsoleCommand(line, host);
+    saver.maybeSave();
+  };
+  const actions = new ActionState();
+  const router = new KeyRouter(binds, actions, run);
+  const gameConsole = new GameConsole(app, {
+    binds,
+    run,
+    onToggle: () => router.releaseAll(),
+  });
+  attachKeyboard(window, router, {
+    consoleOpen: () => gameConsole.open,
+    closeConsole: () => gameConsole.setOpen(false),
+  });
+  gameConsole.print("In Shambles console: help lists the commands; Backquote or Escape closes it.");
+  gameConsole.print(
+    `playing the demo ${source}: map ${header.mapName}, ${check.summary.snapshots} ticks; ` +
+      "] and [ switch players, follow <id> picks one",
+  );
+  for (const w of settingWarnings) gameConsole.print(w);
+
+  // Until someone is followed, the camera stands at the map's first spawn point.
+  const spawn = map.entities.find((e) => e.classname === "info_player_start" && e.origin);
+  const at = spawn?.origin ?? [0, 0, 0];
+  const game = new DemoGame({
+    demo,
+    world,
+    renderer,
+    status,
+    hud,
+    idlePose: [at[0], at[1], at[2] + VIEW_HEIGHT_STANDING, spawn?.angles?.[1] ?? 0, 0],
+    onFrame: () => {
+      const notices = demo.notices;
+      if (notices.length === 0) return;
+      for (const text of notices) gameConsole.print(text);
+      notices.length = 0;
+    },
+  });
+  game.start();
+  return { game, demo, renderer, console: gameConsole };
 }

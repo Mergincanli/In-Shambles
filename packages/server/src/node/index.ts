@@ -30,6 +30,14 @@ export {
   parseServerCfg,
   sessionLimits,
 } from "./config";
+export {
+  DEMO_WRITE_BUFFER,
+  type DemoWriteFn,
+  DemoWriter,
+  defaultDemosDir,
+  FileDemoSink,
+  utcStamp,
+} from "./demoWriter";
 export { createNodeHost, type PassClock, type ServerMatch, TimedPass } from "./host";
 export { createJsonLog, type JsonLog } from "./log";
 export {

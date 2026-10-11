@@ -37,7 +37,12 @@ import {
   type StatusSink,
   THIRD_PERSON_DISTANCE,
 } from "../../src/app/game";
-import { DEFAULT_SERVER_PORT, parseBootParams, parseServerUrl } from "../../src/app/params";
+import {
+  DEFAULT_SERVER_PORT,
+  demoSearch,
+  parseBootParams,
+  parseServerUrl,
+} from "../../src/app/params";
 import { ACTION_FORWARD, ACTION_JUMP, Binds } from "../../src/console/binds";
 import { registerClientCvars } from "../../src/console/clientCvars";
 import { type ConsoleHost, runConsoleCommand } from "../../src/console/commands";
@@ -777,6 +782,8 @@ describe("player input, console, HUD and debug draw in the frame (M2 increment 1
       connected: () => !p.client.closed,
       connect: () => "not in this test",
       disconnect: () => false,
+      demo: null,
+      playDemo: () => "not in this test",
     };
     p.actions.press(ACTION_FORWARD);
     p.actions.press(ACTION_JUMP);
@@ -800,6 +807,7 @@ describe("boot URL parameters (M2 design §2 autotest hooks)", () => {
       camera: null,
       connect: null,
       netProfile: null,
+      demo: null,
     });
     expect(parseBootParams("").autotest).toBe(false);
     expect(parseBootParams("?autotest=yes").autotest).toBe(false);
@@ -813,6 +821,15 @@ describe("boot URL parameters (M2 design §2 autotest hooks)", () => {
     const p = parseBootParams("?connect=ws://127.0.0.1:28700&net_profile=wan-100-loss1");
     expect(p.connect).toBe("ws://127.0.0.1:28700");
     expect(p.netProfile).toBe("wan-100-loss1");
+  });
+
+  it("reads a demo to play (D-044), and the console's demo query drops ?connect=", () => {
+    expect(parseBootParams("?demo=/demos/a.demo").demo).toBe("/demos/a.demo");
+    expect(demoSearch("x.demo", "?connect=ws://h:1/&net_profile=lan")).toEqual({
+      ok: true,
+      search: "net_profile=lan&demo=x.demo",
+    });
+    expect(demoSearch("  ", "")).toEqual({ ok: false, error: "no demo URL" });
   });
 });
 

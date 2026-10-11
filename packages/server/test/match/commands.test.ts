@@ -186,6 +186,14 @@ describe("admin commands on a match (D-042)", () => {
         calls.push("reset");
         return "metrics reset: match main";
       },
+      record: (name) => {
+        calls.push(`record ${name}`);
+        return { ok: name !== "bad", text: name === "bad" ? "record: no" : `recording ${name}` };
+      },
+      stopRecord: () => {
+        calls.push("stoprecord");
+        return { ok: true, text: "stopped" };
+      },
     };
     return { m, calls };
   }
@@ -212,6 +220,29 @@ describe("admin commands on a match (D-042)", () => {
     expect(calls).toEqual(["kick 0 too loud", "kick 7 kicked by an admin", "reset"]);
   });
 
+  it("record and stoprecord need the admin flag and pass the name as typed (D-044)", () => {
+    const { m, calls } = admin();
+    const reg = registry();
+    for (const text of ["record", "record x", "stoprecord"]) {
+      const r = runServerCommand(text, reg, false, m);
+      expect(r.level, text).toBe(PRINT_ERROR);
+      expect(r.text, text).toMatch(/only an admin may record demos \(use rcon/);
+    }
+    expect(calls).toEqual([]);
+    expect(runServerCommand("record", reg, true, m)).toEqual({
+      level: PRINT_INFO,
+      text: "recording null",
+      resendCvars: false,
+    });
+    expect(runServerCommand('record ""', reg, true, m).text).toBe("recording ");
+    expect(runServerCommand("RECORD bad", reg, true, m)).toMatchObject({
+      level: PRINT_ERROR,
+      text: "record: no",
+    });
+    expect(runServerCommand("stoprecord", reg, true, m).text).toBe("stopped");
+    expect(calls).toEqual(["record null", "record ", "record bad", "stoprecord"]);
+  });
+
   it.each([
     ["kick", "usage: kick <client id> [reason]"],
     ["kick -1", "usage: kick <client id> [reason]"],
@@ -219,6 +250,9 @@ describe("admin commands on a match (D-042)", () => {
     ["metrics", "usage: metrics reset"],
     ["metrics reset now", "usage: metrics reset"],
     ["status", "status: there is no match here"],
+    ["record a b", "usage: record [name]"],
+    ["stoprecord now", "usage: stoprecord"],
+    ["record", "record: there is no match here"],
     ["rcon pw status", "rcon: this console already runs as admin"],
   ])("%j → %j", (text, reply) => {
     expect(runServerCommand(text, registry(), true).text).toBe(reply);

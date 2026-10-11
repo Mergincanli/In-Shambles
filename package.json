@@ -23,6 +23,7 @@
     "greybox": "pnpm --filter @game/tools --fail-if-no-match greybox",
     "bench": "pnpm --filter @game/tools --fail-if-no-match bench",
     "bots": "pnpm --filter @game/tools --fail-if-no-match bots",
+    "demo-info": "pnpm --filter @game/tools --fail-if-no-match demo-info",
     "feel-report": "pnpm --filter @game/tools --fail-if-no-match feel-report",
     "balance-report": "node scripts/not-yet.mjs balance-report M6",
     "mapc": "node scripts/not-yet.mjs mapc M5"

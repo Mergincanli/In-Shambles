@@ -11,10 +11,10 @@ import {
  * Console commands a client may send as CMD (M2 design §2, D-027, D-042). A client's `set`, `reset`
  * or `toggle` on a REPLICATED cvar is not applied locally: it travels here, the match applies it to
  * the server's registry, and the CVARS broadcast that follows updates every client's mirror at an
- * effective tick. Changing a cvar, `status`, `kick` and `metrics reset` need the admin flag: the
- * Worker's one client and the stdin console have it; a client of the dedicated server gets it for
- * one command at a time through `rcon <password> <command…>` (`parseRcon`; the match checks the
- * password). `cvars` asks for the current block again (a client whose snapshot hash stays
+ * effective tick. Changing a cvar, `status`, `kick`, `metrics reset` and `record`/`stoprecord`
+ * (D-044) need the admin flag: the Worker's one client and the stdin console have it; a client of
+ * the dedicated server gets it for one command at a time through `rcon <password> <command…>`
+ * (`parseRcon`; the match checks the password). `cvars` asks for the current block again (a client whose snapshot hash stays
  * different) and is open to everyone. Every command acts on one match only; the process's own
  * commands are the stdin console's (node/console.ts). Rare: parsing allocates.
  */
@@ -87,6 +87,19 @@ export interface MatchAdmin {
   kickClient(id: number, reason: string): boolean;
   /** `metrics reset` for this match only; null when its host keeps no metrics (the Worker). */
   metricsReset(): string | null;
+  /**
+   * `record [name]` (D-044): starts a demo of this match, named `name` (null: the host's default
+   * name). `name` is not checked yet: the match refuses one that is not a DEMO_NAME.
+   */
+  record(name: string | null): AdminReply;
+  /** `stoprecord`: ends this match's demo. */
+  stopRecord(): AdminReply;
+}
+
+/** What a match admin command did: whether it acted, and the reply. */
+export interface AdminReply {
+  readonly ok: boolean;
+  readonly text: string;
 }
 
 /** One `rcon` line (D-042): the password and the command it carries, as typed. */
@@ -155,7 +168,13 @@ export function runServerCommand(
   if (verb === "") return reply(PRINT_ERROR, "empty command");
   if (verb === "cvars") return reply(PRINT_INFO, "", true);
   if (verb === "rcon") return reply(PRINT_ERROR, "rcon: this console already runs as admin");
-  if (verb === "status" || verb === "kick" || verb === "metrics") {
+  if (
+    verb === "status" ||
+    verb === "kick" ||
+    verb === "metrics" ||
+    verb === "record" ||
+    verb === "stoprecord"
+  ) {
     return matchCommand(verb, tokens, admin, match);
   }
   if (verb !== "set" && verb !== "reset" && verb !== "toggle") {
@@ -188,7 +207,19 @@ export function runServerCommand(
 
 const CLIENT_ID = /^\d{1,2}$/;
 
-/** `status`, `kick <id> [reason]` and `metrics reset`: admin commands on this match only. */
+/** "list the players" and kin: what a non-admin is told only an admin may do, per verb. */
+const ADMIN_WHAT: Readonly<Record<string, string>> = {
+  status: "list the players",
+  kick: "kick",
+  metrics: "reset metrics",
+  record: "record demos",
+  stoprecord: "record demos",
+};
+
+/**
+ * `status`, `kick <id> [reason]`, `metrics reset`, `record [name]` and `stoprecord`: admin
+ * commands on this match only.
+ */
 function matchCommand(
   verb: string,
   tokens: readonly string[],
@@ -202,12 +233,16 @@ function matchCommand(
   if (verb === "kick" && !CLIENT_ID.test(id)) {
     return reply(PRINT_ERROR, "usage: kick <client id> [reason]");
   }
+  if (verb === "record" && tokens.length > 2) return reply(PRINT_ERROR, "usage: record [name]");
+  if (verb === "stoprecord" && tokens.length > 1) return reply(PRINT_ERROR, "usage: stoprecord");
   if (!admin) {
-    const what =
-      verb === "status" ? "list the players" : verb === "kick" ? "kick" : "reset metrics";
-    return adminOnly(verb === "metrics" ? "metrics reset" : verb, what);
+    return adminOnly(verb === "metrics" ? "metrics reset" : verb, ADMIN_WHAT[verb] ?? verb);
   }
   if (match === null) return reply(PRINT_ERROR, `${verb}: there is no match here`);
+  if (verb === "record" || verb === "stoprecord") {
+    const done = verb === "record" ? match.record(tokens[1] ?? null) : match.stopRecord();
+    return reply(done.ok ? PRINT_INFO : PRINT_ERROR, done.text);
+  }
   if (verb === "status") return { level: PRINT_INFO, text: match.status(), resendCvars: false };
   if (verb === "kick") {
     const reason = tokens.slice(2).join(" ") || "kicked by an admin";

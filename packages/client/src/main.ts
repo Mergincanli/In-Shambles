@@ -1,5 +1,5 @@
 import { setDevAsserts } from "@game/shared";
-import { boot } from "./app/boot";
+import { boot, bootDemo } from "./app/boot";
 import type { StatusSink } from "./app/game";
 import { parseBootParams } from "./app/params";
 import { bootLabel } from "./bootLabel";
@@ -29,9 +29,11 @@ window.addEventListener("error", (e) => showError(e.message));
 window.addEventListener("unhandledrejection", (e) => showError(String(e.reason)));
 
 if (canvas instanceof HTMLCanvasElement) {
-  boot(canvas, params, __BUILD_HASH__, status, showError).catch((e: unknown) =>
-    showError(e instanceof Error ? e.message : String(e)),
-  );
+  // `?demo=` plays a server demo (D-044) instead of a session.
+  (params.demo !== null
+    ? bootDemo(canvas, params, status)
+    : boot(canvas, params, __BUILD_HASH__, status, showError)
+  ).catch((e: unknown) => showError(e instanceof Error ? e.message : String(e)));
 } else {
   showError("page has no #view canvas");
 }

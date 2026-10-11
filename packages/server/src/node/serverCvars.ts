@@ -159,6 +159,15 @@ export function registerServerCvars(reg: CvarRegistry): void {
     flags: CvarFlag.SERVER,
   });
   reg.register({
+    name: "sv_autoRecord",
+    type: "int",
+    default: 0, // design (D-044): a toggle
+    min: 0,
+    max: 1,
+    description: "1: record a demo of the match from startup to shutdown (demos/<map>-<utc>.demo)",
+    flags: CvarFlag.SERVER,
+  });
+  reg.register({
     name: "sv_maxPerIp",
     type: "int",
     default: 8, // ESTIMATE (D-041)

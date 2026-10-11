@@ -8,10 +8,11 @@ import { fromRoot } from "../src/paths";
 // the scenario runner and bots, the per-tick message codecs, delta snapshots through the client's
 // snapshot store (64 slots with deferred lists and pending slots too), the byte-budget scheduler
 // with its mirrors, the transports, the server's match tick (one session, and several with delta
-// snapshots and reconnects) and the Node server's timing wrapper, both ends of the WebSocket
-// transport, the client's prediction and reconciliation, the remote interpolation (16 and 63
-// remotes), and the BVH queries) must not allocate under native ES modules either, where V8 boxes
-// a double returned by a call it doesn't inline or joined with a module constant in a ternary.
+// snapshots, reconnects and a demo recording) and the Node server's timing wrapper, both ends of
+// the WebSocket transport, the client's prediction and reconciliation, the remote interpolation
+// (16 and 63 remotes), and the BVH queries) must not allocate under native ES modules either,
+// where V8 boxes a double returned by a call it doesn't inline or joined with a module constant in
+// a ternary.
 // Vitest's module runner hides that, so this runs a child process.
 //
 // The children run two at a time: one after another this file took some 16 s alone (it set the
@@ -28,7 +29,8 @@ interface ChildResult {
    * run sped up and slowed down (D-039), [2] holds; interp: [0] held; deltaCodec:
    * [0] full snapshots stored, [1] 64-slot snapshots stored as sent, [2] those that were not;
    * match: [0] deltas stored; matchMulti: [0] stored frames that differed from the server's,
-   * [1] the abuser's strike points, [2] its rate-limited ticks, [3] neutral-cmd ticks (D-041);
+   * [1] the abuser's strike points, [2] its rate-limited ticks, [3] neutral-cmd ticks (D-041),
+   * [4] demo records written, [5] demo snapshots that failed to encode (D-044);
    * snapshotSchedule: [0] failed builds, [1] builds past staleness 2, [2] the largest snapshot
    * (B); interp64: [0] NET-05 jumps.
    */
@@ -198,7 +200,8 @@ describe.concurrent("per-tick paths under native ES modules", () => {
     // Reliable deliveries, zero-length markers for oversized messages, drop-oldest losses; on
     // both ends, and the client's sends.
     for (const n of r.outcomes) expect(n).toBeGreaterThan(0);
-    for (const n of r.extra) expect(n).toBeGreaterThan(0);
+    // Its four slots of `extra` (the rest are matchMulti's).
+    for (const n of r.extra.slice(0, 4)) expect(n).toBeGreaterThan(0);
     expect(r.clean, r.attempts.join("; ")).toBe(true);
   }, 30_000);
 
@@ -212,7 +215,7 @@ describe.concurrent("per-tick paths under native ES modules", () => {
     expect(r.clean, r.attempts.join("; ")).toBe(true);
   }, 30_000);
 
-  it("a match tick with several sessions allocates nothing: delta snapshots against rotating acks, lost inputs, rate limits, strikes, neutral cmds, EVENTS; a reconnect costs only its session (D-038, D-041, D-043)", async ({
+  it("a match tick with several sessions allocates nothing: delta snapshots against rotating acks, lost inputs, rate limits, strikes, neutral cmds, EVENTS, a demo recording; a reconnect costs only its session (D-038, D-041, D-043, D-044)", async ({
     expect,
   }) => {
     const r = await runChild("matchMulti");
@@ -232,6 +235,10 @@ describe.concurrent("per-tick paths under native ES modules", () => {
     expect(r.events[1]).toBeGreaterThan(2 * (r.outcomes[2] as number));
     expect(r.events[2]).toBeGreaterThan(0);
     expect(r.events[3]).toBe(0);
+    // The demo recorder ran every tick (D-044): records written (a snapshot a tick, and EVENTS),
+    // more than the ticks (each of the 4 clients stored about one frame a tick), none failed.
+    expect(r.extra[4]).toBeGreaterThan((r.outcomes[0] as number) / 4);
+    expect(r.extra[5]).toBe(0);
     expect(r.clean, r.attempts.join("; ")).toBe(true);
   }, 30_000);
 

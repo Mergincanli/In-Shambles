@@ -9,18 +9,24 @@ import {
   TEXT_MAX,
 } from "@game/shared";
 import { describe, expect, it } from "vitest";
-import { connectSearch } from "../../src/app/params";
+import { connectSearch, demoSearch } from "../../src/app/params";
 import { Binds } from "../../src/console/binds";
 import { registerClientCvars } from "../../src/console/clientCvars";
 import {
   CONSOLE_COMMANDS,
   type ConsoleHost,
   consoleEcho,
+  type DemoFollow,
   runConsoleCommand,
 } from "../../src/console/commands";
 import { CorrectionLog } from "../../src/net/predictor";
 
-function host(connected = true, withNet = true, corrections: CorrectionLog | null = null) {
+function host(
+  connected = true,
+  withNet = true,
+  corrections: CorrectionLog | null = null,
+  demo: DemoFollow | null = null,
+) {
   const cvars: CvarRegistry = new Registry();
   registerPmoveCvars(cvars);
   registerServerReplicatedCvars(cvars);
@@ -31,6 +37,7 @@ function host(connected = true, withNet = true, corrections: CorrectionLog | nul
   let toggled = 0;
   let cleared = 0;
   const connects: string[] = [];
+  const demos: string[] = [];
   let disconnects = 0;
   const h: ConsoleHost = {
     cvars,
@@ -67,6 +74,13 @@ function host(connected = true, withNet = true, corrections: CorrectionLog | nul
       disconnects++;
       return true;
     },
+    demo,
+    playDemo: (url) => {
+      const next = demoSearch(url, "?autotest=1&connect=ws://old:1/");
+      if (!next.ok) return next.error;
+      demos.push(next.search);
+      return null;
+    },
   };
   const run = (line: string) => {
     out.length = 0;
@@ -82,9 +96,72 @@ function host(connected = true, withNet = true, corrections: CorrectionLog | nul
     toggled: () => toggled,
     cleared: () => cleared,
     connects,
+    demos,
     disconnects: () => disconnects,
   };
 }
+
+/** A demo's follow camera over a set of present ids, as DemoPlayer steps it. */
+function follower(present: number[]): DemoFollow & { following: number } {
+  const step = (from: number, dir: number) => {
+    for (let k = 1; k <= 64; k++) {
+      const s = ((((from < 0 ? (dir > 0 ? -1 : 0) : from) + dir * k) % 64) + 64) % 64;
+      if (present.includes(s)) return s;
+    }
+    return -1;
+  };
+  const f = {
+    following: present.length > 0 ? Math.min(...present) : -1,
+    followNext: () => {
+      f.following = step(f.following, 1);
+      return f.following;
+    },
+    followPrev: () => {
+      f.following = step(f.following, -1);
+      return f.following;
+    },
+    follow: (id: number) => {
+      if (!present.includes(id)) return false;
+      f.following = id;
+      return true;
+    },
+  };
+  return f;
+}
+
+describe("demo console commands (D-044)", () => {
+  it("say they are for demo playback outside it", () => {
+    const t = host();
+    for (const line of ["follownext", "followprev", "follow 2"]) {
+      expect(t.run(line)).toEqual([`${line.split(" ")[0]}: only during demo playback`]);
+    }
+  });
+
+  it("step through present players, wrapping, and jump to one that is present", () => {
+    const demo = follower([1, 4, 9]);
+    const t = host(false, false, null, demo);
+    expect(demo.following).toBe(1);
+    expect(t.run("follownext")).toEqual(["following #4"]);
+    expect(t.run("follownext")).toEqual(["following #9"]);
+    expect(t.run("follownext")).toEqual(["following #1"]);
+    expect(t.run("followprev")).toEqual(["following #9"]);
+    expect(t.run("follow 4")).toEqual(["following #4"]);
+    expect(t.run("follow 5")).toEqual(["follow: player #5 is not in the demo now"]);
+    expect(demo.following).toBe(4);
+    expect(t.run("follow")).toEqual(["usage: follow <id>"]);
+    expect(t.run("follow x")).toEqual(["usage: follow <id>"]);
+    expect(host(false, false, null, follower([])).run("follownext")).toEqual([
+      "follownext: nobody to follow",
+    ]);
+  });
+
+  it("demo <url> reloads the page with ?demo= and without ?connect=", () => {
+    const t = host();
+    expect(t.run("demo")).toEqual(["usage: demo <url>"]);
+    expect(t.run("demo /demos/a.demo")).toEqual([]);
+    expect(t.demos).toEqual(["autotest=1&demo=%2Fdemos%2Fa.demo"]);
+  });
+});
 
 describe("console commands (M2 design §2)", () => {
   it("net_corrections prints the correction log with what differed", () => {

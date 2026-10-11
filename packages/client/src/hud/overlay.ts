@@ -1,6 +1,7 @@
 import type { ClientSettings } from "../console/clientCvars";
 import type { NetProfileControl } from "../console/commands";
 import type { ClientSim } from "../net";
+import { teamColor } from "../render/teamColors";
 import { Netgraph } from "./netgraph";
 import { type RenderStats, RenderStatsPanel } from "./renderStats";
 import { Speedometer } from "./speedometer";
@@ -11,6 +12,12 @@ export const HUD_PANEL_INTERVAL_MS = 1000 / 15;
 /** What the frame loop hands the HUD (app/game.ts calls it once per frame). */
 export interface GameHud {
   frame(client: ClientSim, settings: Readonly<ClientSettings>, underwater: boolean): void;
+}
+
+/** What demo playback hands the HUD (app/demoGame.ts, D-044). */
+export interface DemoHud {
+  /** The followed player's id (−1: nobody) and team; the line changes only when they do. */
+  follow(id: number, team: number): void;
 }
 
 function div(parent: HTMLElement, id: string, text = ""): HTMLDivElement {
@@ -27,7 +34,7 @@ function div(parent: HTMLElement, id: string, text = ""): HTMLDivElement {
  * tint and the toggles only when they change, the panels' text at ≤ 15 Hz. It reads the
  * prediction and the stats and never changes them.
  */
-export class Hud implements GameHud {
+export class Hud implements GameHud, DemoHud {
   readonly root: HTMLDivElement;
   readonly speedometer: Speedometer;
   readonly netgraph: Netgraph;
@@ -35,6 +42,10 @@ export class Hud implements GameHud {
   private readonly crosshair: HTMLDivElement;
   private readonly tint: HTMLDivElement;
   private readonly prompt: HTMLDivElement;
+  /** Demo playback's "following #id" line (D-044), hidden outside it. */
+  private readonly followLine: HTMLDivElement;
+  private followId = -1;
+  private followTeam = -1;
   private lastPanels = Number.NEGATIVE_INFINITY;
   private underwater = false;
   private showSpeed = false;
@@ -54,11 +65,25 @@ export class Hud implements GameHud {
     this.netgraph = new Netgraph(div(this.root, "hud-net"));
     this.renderPanel = new RenderStatsPanel(div(this.root, "hud-render"));
     this.prompt = div(this.root, "hud-prompt", "Click to play");
+    this.followLine = div(this.root, "hud-follow");
+    this.followLine.hidden = true;
     this.tint.hidden = true;
     this.speedometer.el.hidden = true;
     this.netgraph.el.hidden = true;
     this.renderPanel.el.hidden = true;
     this.prompt.hidden = true;
+  }
+
+  /** Demo playback: "following #id" in the player's team colour, hidden while nobody is. */
+  follow(id: number, team: number): void {
+    if (id === this.followId && team === this.followTeam) return;
+    this.followId = id;
+    this.followTeam = team;
+    const line = this.followLine;
+    line.hidden = id < 0;
+    if (id < 0) return;
+    line.textContent = `following #${id}`;
+    line.style.color = `#${teamColor(team).toString(16).padStart(6, "0")}`;
   }
 
   /** Shows or hides the click-to-play prompt (no pointer lock, console closed). */

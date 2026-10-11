@@ -1,0 +1,202 @@
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  write,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { buildCollisionWorld, PRINT_ERROR, PRINT_INFO, validateDemo } from "@game/shared";
+import { afterEach, describe, expect, it } from "vitest";
+import { Match } from "../../src/match/match";
+import { runConsoleLine } from "../../src/node/console";
+import {
+  DEMO_WRITE_BUFFER,
+  type DemoWriteFn,
+  DemoWriter,
+  type FileDemoSink,
+  utcStamp,
+} from "../../src/node/demoWriter";
+import type { JsonLog } from "../../src/node/log";
+import { loadMap, TEST_BUILD } from "../match/fixtures";
+
+// D-044 (M3 design §2.12, file names): the Node demo writer. A name must match
+// ^[a-z0-9_-]{1,64}$ (the match refuses others with a PRINT), the path is confined to the demos
+// folder, an existing file is never overwritten (a -2, -3 suffix), and the bytes reach the file
+// whole and in order through the 64 KiB buffer. sv_autoRecord through the Node server is in
+// server.test.ts.
+
+const cmap = loadMap("movement_lab");
+const world = buildCollisionWorld(cmap);
+const dirs: string[] = [];
+
+afterEach(() => {
+  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+
+function tempDir(): string {
+  const d = mkdtempSync(join(tmpdir(), "demo-writer-"));
+  dirs.push(d);
+  return d;
+}
+
+const lines: { ev: string; [k: string]: unknown }[] = [];
+const log: JsonLog = (_lvl, ev, fields) => lines.push({ ev, ...fields });
+
+function matchWith(writer: DemoWriter): Match {
+  return new Match({ cmap, world, buildHash: TEST_BUILD, primer: false, demos: writer });
+}
+
+describe("demo writer (D-044)", () => {
+  it("refuses unsafe names with a PRINT and writes a valid one inside demos/", async () => {
+    const root = tempDir();
+    const demos = join(root, "demos");
+    const writer = new DemoWriter(demos, log, "main");
+    const match = matchWith(writer);
+    for (const name of ["../x", "/abs", "a/b", '""', "x".repeat(65)]) {
+      const r = match.runAdminCommand(`record ${name}`);
+      expect(r.level, name).toBe(PRINT_ERROR);
+      expect(r.text, name).toMatch(/is not a demo name/);
+    }
+    // The writer checks again, whoever calls it.
+    for (const name of ["../x", "/abs", "a/b", "", ".", "x".repeat(65)]) {
+      expect(writer.open(name, "movement_lab"), name).toMatch(/is not a demo name/);
+    }
+    expect(existsSync(demos)).toBe(false);
+    expect(match.runAdminCommand("record run_1").text).toBe("recording demos/run_1.demo");
+    for (let i = 0; i < 30; i++) match.tick();
+    expect(match.runAdminCommand("stoprecord")).toMatchObject({ level: PRINT_INFO });
+    await (writer.last as FileDemoSink).done;
+    expect(readdirSync(demos)).toEqual(["run_1.demo"]);
+    expect(readdirSync(root)).toEqual(["demos"]);
+    const bytes = new Uint8Array(readFileSync(join(demos, "run_1.demo")));
+    const check = validateDemo(bytes);
+    expect(check.ok && check.summary.snapshots).toBe(30);
+  });
+
+  it("records from the stdin console too (as admin of the match)", async () => {
+    const root = tempDir();
+    const writer = new DemoWriter(join(root, "demos"), log, "main");
+    const match = matchWith(writer);
+    const replies: string[] = [];
+    const consoleLog: JsonLog = (_lvl, ev, fields) => {
+      if (ev === "console") replies.push(String(fields?.text));
+    };
+    runConsoleLine("record con_1", "main", match, consoleLog);
+    for (let i = 0; i < 5; i++) match.tick();
+    runConsoleLine("stoprecord", "main", match, consoleLog);
+    expect(replies[0]).toBe("recording demos/con_1.demo");
+    expect(replies[1]).toMatch(/^stopped recording demos\/con_1\.demo \(5 ticks, \d+ B\)$/);
+    await (writer.last as FileDemoSink).done;
+    const check = validateDemo(new Uint8Array(readFileSync(join(root, "demos", "con_1.demo"))));
+    expect(check.ok && check.summary.snapshots).toBe(5);
+  });
+
+  it("never overwrites: an existing name (or a symlink in its place) gets a suffix", () => {
+    const root = tempDir();
+    const demos = join(root, "demos");
+    mkdirSync(demos);
+    writeFileSync(join(demos, "keep.demo"), "old");
+    const outside = join(root, "outside.txt");
+    writeFileSync(outside, "outside");
+    symlinkSync(outside, join(demos, "keep-2.demo"));
+    const writer = new DemoWriter(demos, log, "main");
+    const opened = writer.open("keep", "movement_lab");
+    if (typeof opened === "string") throw new Error(opened);
+    expect(opened.file).toBe("demos/keep-3.demo");
+    opened.sink.close();
+    expect(readFileSync(join(demos, "keep.demo"), "utf8")).toBe("old");
+    expect(readFileSync(outside, "utf8")).toBe("outside");
+  });
+
+  it("confines to the folder's real path and names a default demo <map>-<utc>", () => {
+    const root = tempDir();
+    const real = join(root, "real");
+    mkdirSync(real);
+    symlinkSync(real, join(root, "demos"));
+    const at = new Date(Date.UTC(2026, 9, 11, 7, 5, 9));
+    expect(utcStamp(at)).toBe("20261011-070509");
+    const writer = new DemoWriter(join(root, "demos"), log, "main", () => at);
+    const opened = writer.open(null, "arena_greybox");
+    if (typeof opened === "string") throw new Error(opened);
+    expect(opened.file).toBe("demos/arena_greybox-20261011-070509.demo");
+    opened.sink.close();
+    expect(readdirSync(real)).toEqual(["arena_greybox-20261011-070509.demo"]);
+  });
+
+  it("writes across buffer boundaries in order", async () => {
+    const root = tempDir();
+    const writer = new DemoWriter(root, log, "main");
+    const opened = writer.open("big", "movement_lab");
+    if (typeof opened === "string") throw new Error(opened);
+    const sink = opened.sink as FileDemoSink;
+    const chunk = new Uint8Array(5000);
+    const total = DEMO_WRITE_BUFFER * 3 + 123;
+    let n = 0;
+    while (n < total) {
+      const len = Math.min(chunk.length, total - n);
+      for (let i = 0; i < len; i++) chunk[i] = (n + i) & 0xff;
+      sink.write(chunk, len);
+      n += len;
+    }
+    sink.close();
+    await sink.done;
+    const back = readFileSync(join(root, "big.demo"));
+    expect(back.length).toBe(total);
+    let wrong = 0;
+    for (let i = 0; i < total; i++) if (back[i] !== (i & 0xff)) wrong++;
+    expect(wrong).toBe(0);
+    expect(sink.flushed).toBe(total);
+    expect(lines.some((l) => l.ev === "demo_stop" && l.bytes === total)).toBe(true);
+    // A closed file leaves the writer: a long run keeps no sink (and no buffer) per demo.
+    expect(writer.pending.size).toBe(0);
+  });
+
+  it("continues short writes until each chunk is on disk", async () => {
+    const root = tempDir();
+    let calls = 0;
+    // A disk that takes at most 777 B a write (fs.write may write less than it was given).
+    const short: DemoWriteFn = (fd, buf, off, len, pos, cb) => {
+      calls++;
+      write(fd, buf, off, Math.min(len, 777), pos, (e, n) => cb(e, n));
+    };
+    const writer = new DemoWriter(root, log, "main", undefined, short);
+    const opened = writer.open("short", "movement_lab");
+    if (typeof opened === "string") throw new Error(opened);
+    const sink = opened.sink as FileDemoSink;
+    const total = DEMO_WRITE_BUFFER + 4321;
+    const chunk = new Uint8Array(total);
+    for (let i = 0; i < total; i++) chunk[i] = (i * 7) & 0xff;
+    sink.write(chunk, total);
+    sink.close();
+    await sink.done;
+    expect(calls).toBe(Math.ceil(DEMO_WRITE_BUFFER / 777) + Math.ceil(4321 / 777));
+    expect(sink.error).toBeNull();
+    expect(sink.flushed).toBe(total);
+    const back = readFileSync(join(root, "short.demo"));
+    expect(back.equals(Buffer.from(chunk))).toBe(true);
+  });
+
+  it("logs a write error once and drops the rest", async () => {
+    const root = tempDir();
+    // A disk that fails every write (the file itself stays open, so its close still works).
+    const failing: DemoWriteFn = (_fd, _buf, _off, _len, _pos, cb) =>
+      setImmediate(() => cb(Object.assign(new Error("EIO: i/o error, write"), { code: "EIO" }), 0));
+    const before = lines.length;
+    const writer = new DemoWriter(root, log, "main", undefined, failing);
+    const opened = writer.open("broken", "movement_lab");
+    if (typeof opened === "string") throw new Error(opened);
+    const sink = opened.sink as FileDemoSink;
+    sink.write(new Uint8Array(10), 10);
+    sink.close();
+    await sink.done;
+    expect(sink.error).not.toBeNull();
+    expect(sink.flushed).toBe(0);
+    expect(lines.slice(before).filter((l) => l.ev === "demo_error")).toHaveLength(1);
+  });
+});

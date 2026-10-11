@@ -205,6 +205,14 @@ describe("SnapshotStore (M3 design §2.3)", () => {
     expect([store.spectatorDropped, store.stored, store.lastStored]).toEqual([1, 0, null]);
   });
 
+  it("as a demo's spectator store takes only spectator snapshots, every slot a record (D-044)", () => {
+    const store = new SnapshotStore(true);
+    expect(receive(store, snapshot(5))).toBe(STORE_SPECTATOR);
+    expect(receive(store, snapshot(6, SNAP_FLAG_SPECTATOR))).toBe(STORE_STORED);
+    expect(frameDigest(store.lastStored as WorldFrame, -1)).toBe(frameDigest(serverFrame(6), -1));
+    expect([store.spectatorDropped, store.stored]).toEqual([1, 1]);
+  });
+
   it("leaves the store as it was when a snapshot does not decode", () => {
     const store = new SnapshotStore();
     receive(store, snapshot(7));

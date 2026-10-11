@@ -156,6 +156,13 @@ describe("root scripts", () => {
     );
   });
 
+  it("run demo-info from the tools' replay CLI (D-044)", () => {
+    expect(rootScripts["demo-info"]).toBe("pnpm --filter @game/tools --fail-if-no-match demo-info");
+    expect(packageScripts.get("@game/tools")?.["demo-info"]).toBe(
+      "node --import tsx src/replay/cli.ts",
+    );
+  });
+
   it("never use a pnpm built-in command name (D-015)", () => {
     for (const name of Object.keys(rootScripts)) expect(PNPM_BUILTINS, name).not.toContain(name);
   });

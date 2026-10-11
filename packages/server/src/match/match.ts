@@ -12,12 +12,15 @@ import {
   captureCvarBlock,
   copyUserCmd,
   cvarHash16,
+  DEMO_NAME,
+  DEMO_REC_CVARS,
   DEV_ASSERT,
   decodeCmd,
   decodeHello,
   decodeInput,
   decodePing,
   decodeReady,
+  demoHeaderProblem,
   ENTITY_EVENT_SLOTS,
   ENTITY_NONE,
   EV_LEAVE_KICKED,
@@ -87,7 +90,14 @@ import {
   WelcomeMsg,
   type WorldFrame,
 } from "@game/shared";
-import { type CommandResult, type MatchAdmin, parseRcon, runServerCommand } from "./commands";
+import {
+  type AdminReply,
+  type CommandResult,
+  type MatchAdmin,
+  parseRcon,
+  runServerCommand,
+} from "./commands";
+import { type DemoHost, DemoRecorder, type DemoSink } from "./demo";
 import { ACK_AHEAD, ACK_AHEAD_STRIKES, acceptAck, WorldHistory } from "./history";
 import type { MatchEventLog, MatchLog, RconGate } from "./host";
 import {
@@ -136,7 +146,7 @@ export function effectiveMaxClients(requested: number): number {
  */
 export const SERVER_STATS_INTERVAL_TICKS = TICK_RATE;
 
-/** What sending EVENTS needs from a target: a session's transport, later a demo sink (D-044). */
+/** What sending EVENTS needs from a target: a session's transport, or the demo recorder (D-044). */
 export type EventsTarget = Pick<Transport, "sendReliable">;
 
 /** Stamina at spawn, in hundredths: staminaMax = health 100 with no vest (docs/03 §5.2, FACT). */
@@ -203,6 +213,12 @@ export interface MatchOptions {
    * only (M3 design §2.14) and returns the reply. Absent: the match has no metrics to reset.
    */
   readonly metricsReset?: () => string;
+  /**
+   * Opens demo files for `record` (D-044): the Node server's writer, confined to its demos folder.
+   * Absent: the match records only through `startRecording` (tests); `record` replies that it
+   * cannot.
+   */
+  readonly demos?: DemoHost;
 }
 
 /** Match-wide counters (live). */
@@ -245,6 +261,9 @@ export class MatchMetrics {
   rconOk = 0;
   rconFailed = 0;
   rconLocked = 0;
+  /** Demo records written and demo snapshots that failed to encode (D-044), all recordings. */
+  demoRecords = 0;
+  demoFailed = 0;
 }
 
 function ignoreLog(): void {}
@@ -308,7 +327,10 @@ function freeClientId(sessions: readonly Session[], cap: number): number {
  *    just joined: every player present, then itself; then each JOIN and LEAVE), and on every 60th
  *    tick SERVER_STATS with the tick times the host last reported (`reportTickStats`; the match
  *    never reads a clock) and the players in the match, at most 63 events a message.
- * 8. Metrics.
+ * 8. While recording a demo (D-044, `demo.ts`): the tick's CVARS when the block changed, the
+ *    spectator snapshot of every player, and the tick's broadcast EVENTS (the roster as a JOIN
+ *    burst on the first tick instead).
+ * 9. Metrics.
  *
  * After warm-up a tick allocates nothing: messages decode into and encode from preallocated
  * structs, and the transports pool their packets. HELLO, CMD, kicks and cvar changes allocate
@@ -348,6 +370,13 @@ export class Match implements MatchAdmin {
   private readonly rconCheck: ((password: string) => boolean) | null;
   private readonly rconGate: RconGate | null;
   private readonly onMetricsReset: (() => string) | null;
+  private readonly demoHost: DemoHost | null;
+  /** The demo recorder, made by the first recording (D-044). */
+  private recorder: DemoRecorder | null = null;
+  /** This tick broadcast CVARS (step 4): a recording writes them too. */
+  private cvarsChanged = false;
+  /** A recording's first tick: the JOIN of every player present (as a joiner's burst). */
+  private readonly demoBurst = new EventOutbox();
   /** Rate limits, strike levels and timeouts (D-041). */
   readonly limits: SessionLimits;
   private readonly timeouts: boolean;
@@ -416,6 +445,7 @@ export class Match implements MatchAdmin {
     this.rconCheck = options.rcon ?? null;
     this.rconGate = options.rconGate ?? null;
     this.onMetricsReset = options.metricsReset ?? null;
+    this.demoHost = options.demos ?? null;
     this.limits = options.limits ?? new SessionLimits();
     this.timeouts = options.timeouts ?? false;
     let cvars = options.cvars;
@@ -581,8 +611,10 @@ export class Match implements MatchAdmin {
       s.strikeScore.tick();
     }
     if (this.anyClosed) this.removeClosed();
+    this.cvarsChanged = false;
     if (this.cvars.version !== this.cvarVersion && this.refreshCvars()) {
       this.blockEffectiveTick = t;
+      this.cvarsChanged = true;
       for (let i = 0; i < sessions.length; i++) {
         const s = sessions[i] as Session;
         if (s.state === SESSION_WELCOMED || s.state === SESSION_ACTIVE) this.sendCvars(s);
@@ -618,6 +650,7 @@ export class Match implements MatchAdmin {
         box.clear();
       }
     }
+    if (this.recorder?.active === true) this.recordTick(this.recorder, t);
     this.currentTick = t;
     this.metrics.ticks++;
     this.tickEvents.clear();
@@ -941,6 +974,79 @@ export class Match implements MatchAdmin {
     return this.onMetricsReset === null ? null : this.onMetricsReset();
   }
 
+  /** The demo being recorded (its file), or null (D-044). */
+  get recording(): string | null {
+    const r = this.recorder;
+    return r?.active ? r.file : null;
+  }
+
+  /** The recorder of the current or last demo, or null before the first (its counters). */
+  get demoRecorder(): DemoRecorder | null {
+    return this.recorder;
+  }
+
+  /**
+   * `record [name]` (MatchAdmin, D-044): a name that is not a DEMO_NAME is refused; otherwise the
+   * host opens the file (its default name for null) and the recording starts with the next
+   * tick's end (the end of this tick when the command came in during one).
+   */
+  record(name: string | null): AdminReply {
+    if (name !== null && !DEMO_NAME.test(name)) {
+      return {
+        ok: false,
+        text: `record: "${name}" is not a demo name (1 to 64 of a-z, 0-9, _ and -)`,
+      };
+    }
+    const current = this.recording;
+    if (current !== null) return { ok: false, text: `record: already recording ${current}` };
+    const host = this.demoHost;
+    if (host === null) return { ok: false, text: "record: this server does not record demos" };
+    // Checked before the file is opened: a header refused at the first tick would leave it empty.
+    const why = demoHeaderProblem(this.mapName, this.buildHash);
+    if (why !== null) return { ok: false, text: `record: ${why}` };
+    const opened = host.open(name, this.mapName);
+    if (typeof opened === "string") return { ok: false, text: `record: ${opened}` };
+    this.startRecording(opened.sink, opened.file);
+    return { ok: true, text: `recording ${opened.file}` };
+  }
+
+  /** `stoprecord` (MatchAdmin, D-044). */
+  stopRecord(): AdminReply {
+    const r = this.recorder;
+    if (r === null || !r.active) return { ok: false, text: "stoprecord: not recording" };
+    const file = this.stopRecording();
+    return { ok: true, text: `stopped recording ${file} (${r.snapshots} ticks, ${r.bytes} B)` };
+  }
+
+  /**
+   * Records this match into `sink` from the end of the next tick simulated (D-044); `file` names
+   * it in replies. Ends a recording already running first. The recorder is made once per match.
+   */
+  startRecording(sink: DemoSink, file: string): void {
+    if (this.recorder === null) this.recorder = new DemoRecorder();
+    const r = this.recorder;
+    if (r.active) this.stopRecording();
+    r.start(
+      sink,
+      file,
+      { name: this.mapName, hashLo: this.mapHashLo, hashHi: this.mapHashHi },
+      this.buildHash,
+    );
+    this.log("info", `recording ${file} from tick ${this.currentTick + 1}`);
+  }
+
+  /** Ends the recording (its END record, then the sink's close); returns its file, "" if none. */
+  stopRecording(): string {
+    const r = this.recorder;
+    if (r === null || !r.active) return "";
+    // Stopped before its first tick: still a valid demo, a header and its END.
+    if (r.startTick === 0) r.beginTick(this.currentTick + 1, this.block, this.blockEffectiveTick);
+    const ticks = r.snapshots;
+    const file = r.stop();
+    this.log("info", `stopped recording ${file}: ${ticks} ticks, ${r.bytes} B`);
+    return file;
+  }
+
   // -------------------------------------------------------------------------------------------
   // Simulation
 
@@ -1225,6 +1331,45 @@ export class Match implements MatchAdmin {
     if (stale > m.maxStaleness) m.maxStaleness = stale;
   }
 
+  /**
+   * Step 8 (D-044): tick `t`'s demo records. The first tick's header carries the block; later
+   * ticks carry a CVARS record when step 4 broadcast one. Then the spectator snapshot from the
+   * world frame, then EVENTS: on the first tick a JOIN for every player present (so a demo knows
+   * its whole roster, as a joiner's burst does), after it the tick's broadcast JOINs and LEAVEs;
+   * SERVER_STATS with them on its ticks. The EVENTS counter counts only clients' messages.
+   */
+  private recordTick(r: DemoRecorder, t: number): void {
+    const m = this.metrics;
+    const records = r.records;
+    const failed = r.failed;
+    const first = r.beginTick(t, this.block, this.blockEffectiveTick);
+    if (!r.active) {
+      m.demoFailed += r.failed - failed;
+      return;
+    }
+    if (!first && this.cvarsChanged && this.encodeCvarsMsg()) {
+      r.write(DEMO_REC_CVARS, t, this.writer.bytes, this.writer.byteLength);
+    }
+    r.writeSnapshot(t, this.history, this.blockHash16);
+    let box = this.tickEvents;
+    if (first) {
+      box = this.demoBurst;
+      box.clear();
+      const sessions = this.sessions;
+      for (let i = 0; i < sessions.length; i++) {
+        const s = sessions[i] as Session;
+        if (s.state === SESSION_ACTIVE) box.push(EVK_PLAYER_JOIN, s.clientId, s.team);
+      }
+    }
+    if (box.count > 0 || this.statsDue) {
+      const sent = m.eventsSent;
+      this.sendEvents(r.events, box, this.statsDue);
+      m.eventsSent = sent;
+    }
+    m.demoRecords += r.records - records;
+    m.demoFailed += r.failed - failed;
+  }
+
   private sendPong(s: Session): void {
     const m = this.pong;
     m.pingId = this.ping.pingId;
@@ -1236,6 +1381,13 @@ export class Match implements MatchAdmin {
 
   /** The block simulated now, with the tick it took effect (a broadcast or a resend). */
   private sendCvars(s: Session): void {
+    if (!this.encodeCvarsMsg()) return;
+    s.transport.sendReliable(this.writer.bytes, this.writer.byteLength);
+    this.metrics.cvarsSent++;
+  }
+
+  /** CVARS of the block simulated now and its effective tick, into the writer. */
+  private encodeCvarsMsg(): boolean {
     const m = this.cvarsMsg;
     m.effectiveTick = this.blockEffectiveTick;
     m.block.entries.length = 0;
@@ -1244,10 +1396,9 @@ export class Match implements MatchAdmin {
     w.reset();
     if (!encodeCvars(w, m)) {
       DEV_ASSERT(false, "CVARS did not encode");
-      return;
+      return false;
     }
-    s.transport.sendReliable(w.bytes, w.byteLength);
-    this.metrics.cvarsSent++;
+    return true;
   }
 
   private sendPrint(s: Session, level: number, text: string): void {

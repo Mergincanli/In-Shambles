@@ -13,10 +13,13 @@ import {
 } from "../../src/console/binds";
 
 describe("binds (M2 design §2)", () => {
-  it("default to WASD, Space, C, X, ShiftLeft, Mouse0 and Backquote, with no Ctrl binds", () => {
+  it("default to WASD, Space, C, X, ShiftLeft, Mouse0, Backquote and the brackets, no Ctrl", () => {
     const b = new Binds();
     expect(Object.fromEntries(b.list())).toEqual({
       Backquote: "toggleconsole",
+      // Demo playback's player cycling (D-044).
+      BracketLeft: "followprev",
+      BracketRight: "follownext",
       KeyA: "+moveleft",
       KeyC: "+crouch",
       KeyD: "+moveright",

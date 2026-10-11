@@ -22,8 +22,21 @@ import { RCON_PASSWORD_CVAR } from "./clientCvars";
  * broadcast changes the mirror at an effective tick. The server's PRINT reply shows up in the
  * console. Any other cvar is the client's own and changes at once, unless it is CHEAT and the
  * server's `sv_cheats` is 0 (D-042). `rcon <command…>` sends the command with `rcon_password` for
- * the server to run as admin of this match; the password is never printed.
+ * the server to run as admin of this match; the password is never printed. `demo <url>` plays a
+ * server demo, and `follow <id>`, `follownext` and `followprev` move its camera (D-044).
  */
+
+/**
+ * Demo playback's follow camera (D-044; `DemoPlayer`): the followed id (−1 for nobody), stepping
+ * to the next or previous present player, and jumping to one.
+ */
+export interface DemoFollow {
+  readonly following: number;
+  followNext(): number;
+  followPrev(): number;
+  /** False when `id` is not present in the demo now. */
+  follow(id: number): boolean;
+}
 
 /** The simulated link on the client's end of the connection (NetSimTransport). */
 export interface NetProfileControl {
@@ -55,6 +68,10 @@ export interface ConsoleHost {
   connect(address: string): string | null;
   /** Ends the session; false when there is none. */
   disconnect(): boolean;
+  /** The playing demo's follow camera, or null outside demo playback (D-044). */
+  readonly demo: DemoFollow | null;
+  /** Plays the demo at `url` (the page reloads with `?demo=`); returns why it can't, or null. */
+  playDemo(url: string): string | null;
 }
 
 /** Every command and its usage, for `help` and docs/06 §6. */
@@ -70,6 +87,10 @@ export const CONSOLE_COMMANDS: readonly (readonly [string, string])[] = Object.f
   ["connect", "connect [ws://host[:port]]: show the server, or play on another (the page reloads)"],
   ["disconnect", "disconnect: leave the server"],
   ["rcon", "rcon <command…>: run a server command as admin, with rcon_password (set it first)"],
+  ["demo", "demo <url>: play a server demo (.demo; the page reloads)"],
+  ["follow", "follow <id>: in a demo, follow player #id"],
+  ["follownext", "follownext: in a demo, follow the next player (bound to ])"],
+  ["followprev", "followprev: in a demo, follow the previous player (bound to [)"],
   ["clear", "clear: empty the console"],
   ["toggleconsole", "toggleconsole: open or close the console"],
   ["help", "help: this list; a cvar's name alone shows its value"],
@@ -253,6 +274,18 @@ export function runConsoleCommand(text: string, host: ConsoleHost): void {
     case "rcon":
       rcon(text, first, args, host);
       return;
+    case "demo":
+      if (args[0] === undefined) host.print("usage: demo <url>");
+      else {
+        const why = host.playDemo(args[0]);
+        if (why !== null) host.print(`demo: ${why}`);
+      }
+      return;
+    case "follow":
+    case "follownext":
+    case "followprev":
+      follow(verb, args, host);
+      return;
     case "clear":
       host.clear();
       return;
@@ -353,6 +386,34 @@ function bind(args: string[], host: ConsoleHost): void {
   }
   host.binds.bind(code, command);
   host.print(`${code} = ${command.trim()}`);
+}
+
+/** A player id as `follow` takes it: 0–63. */
+const PLAYER_ID = /^\d{1,2}$/;
+
+/**
+ * `follow <id>`, `follownext`, `followprev` (D-044, M3 design §2.12): the demo camera's player;
+ * outside demo playback they say so.
+ */
+function follow(verb: string, args: readonly string[], host: ConsoleHost): void {
+  const demo = host.demo;
+  if (demo === null) {
+    host.print(`${verb}: only during demo playback`);
+    return;
+  }
+  if (verb === "follow") {
+    const id = args[0];
+    if (id === undefined || !PLAYER_ID.test(id)) {
+      host.print("usage: follow <id>");
+      return;
+    }
+    if (!demo.follow(Number(id)))
+      host.print(`follow: player #${Number(id)} is not in the demo now`);
+    else host.print(`following #${Number(id)}`);
+    return;
+  }
+  const id = verb === "follownext" ? demo.followNext() : demo.followPrev();
+  host.print(id < 0 ? `${verb}: nobody to follow` : `following #${id}`);
 }
 
 function netProfile(name: string | undefined, host: ConsoleHost): void {

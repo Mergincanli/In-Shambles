@@ -1,5 +1,6 @@
 import {
   CONTENTS_WATER,
+  type CollisionWorld,
   HULL_CROUCHED_MAXS,
   HULL_MINS,
   HULL_STANDING_MAXS,
@@ -12,6 +13,7 @@ import {
   TraceResult,
   traceBox,
   u16ToDegrees,
+  type Vec3,
   VIEW_HEIGHT_CROUCHED,
   VIEW_HEIGHT_STANDING,
   vec3,
@@ -118,6 +120,36 @@ export const THIRD_PERSON_DISTANCE = 120;
 /** The third-person camera's box, kept clear of walls by a trace (half-size 4 u). */
 const CAMERA_MINS = vec3(-4, -4, -4);
 const CAMERA_MAXS = vec3(4, 4, 4);
+
+/**
+ * The third-person pull-back (`cl_thirdPerson`, and demo playback's follow camera, D-044): `pose`
+ * ([0..2] eye, [3] yaw, [4] pitch, degrees) moves THIRD_PERSON_DISTANCE behind the eye along the
+ * view, pulled in where a wall is closer (a small box traced from the eye; `start`, `end` and
+ * `trace` are the caller's scratch). Presentation only.
+ */
+export function thirdPersonPullBack(
+  world: CollisionWorld,
+  pose: Float64Array,
+  start: Vec3,
+  end: Vec3,
+  trace: TraceResult,
+): void {
+  const yaw = (pose[3] as number) * RAD_PER_DEG;
+  const pitch = (pose[4] as number) * RAD_PER_DEG;
+  const cp = Math.cos(pitch);
+  start[0] = pose[0] as number;
+  start[1] = pose[1] as number;
+  start[2] = pose[2] as number;
+  // Forward is (cos p · cos y, cos p · sin y, −sin p): positive pitch looks down.
+  end[0] = (start[0] as number) - cp * Math.cos(yaw) * THIRD_PERSON_DISTANCE;
+  end[1] = (start[1] as number) - cp * Math.sin(yaw) * THIRD_PERSON_DISTANCE;
+  end[2] = (start[2] as number) + Math.sin(pitch) * THIRD_PERSON_DISTANCE;
+  traceBox(world, start, end, CAMERA_MINS, CAMERA_MAXS, MASK_SOLID, trace);
+  if (trace.allSolid) return;
+  pose[0] = trace.endpos[0] as number;
+  pose[1] = trace.endpos[1] as number;
+  pose[2] = trace.endpos[2] as number;
+}
 
 /** Where the autotest hooks report (M2 design §2): `document.documentElement.dataset`. */
 export type StatusSink = Record<string, string | undefined>;
@@ -470,25 +502,7 @@ export class Game {
    * where a wall is closer (a small box traced from the eye). Presentation only.
    */
   private pullBack(): void {
-    const pose = this.pose;
-    const yaw = (pose[3] as number) * RAD_PER_DEG;
-    const pitch = (pose[4] as number) * RAD_PER_DEG;
-    const cp = Math.cos(pitch);
-    const a = this.camStart;
-    const b = this.camEnd;
-    a[0] = pose[0] as number;
-    a[1] = pose[1] as number;
-    a[2] = pose[2] as number;
-    // Forward is (cos p · cos y, cos p · sin y, −sin p): positive pitch looks down.
-    b[0] = (a[0] as number) - cp * Math.cos(yaw) * THIRD_PERSON_DISTANCE;
-    b[1] = (a[1] as number) - cp * Math.sin(yaw) * THIRD_PERSON_DISTANCE;
-    b[2] = (a[2] as number) + Math.sin(pitch) * THIRD_PERSON_DISTANCE;
-    const tr = this.camTrace;
-    traceBox(this.client.world, a, b, CAMERA_MINS, CAMERA_MAXS, MASK_SOLID, tr);
-    if (tr.allSolid) return;
-    pose[0] = tr.endpos[0] as number;
-    pose[1] = tr.endpos[1] as number;
-    pose[2] = tr.endpos[2] as number;
+    thirdPersonPullBack(this.client.world, this.pose, this.camStart, this.camEnd, this.camTrace);
   }
 
   /**

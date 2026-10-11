@@ -31,6 +31,7 @@ import {
   acceptAck,
   buildSnapshot,
   type ClientMirror,
+  type DemoSink,
   LoopStats,
   Match,
   MirrorPool,
@@ -219,7 +220,7 @@ const prev = vec3(0, 400, 24);
 const out = vec3();
 const outcomes = new Int32Array(3);
 /** A workload's further outcomes (wsTransport: the client end's). */
-const extra = new Int32Array(4);
+const extra = new Int32Array(6);
 /**
  * EVENTS outcomes (D-043). codec: [0] messages that came back equal, [1] hostile ones refused;
  * matchMulti: [0] JOINs, [1] LEAVEs, [2] SERVER_STATS received, [3] messages that did not decode.
@@ -1577,8 +1578,21 @@ function runMatch(n: number): void {
 // per-tick security paths: it never sends a cmd (so it starves, then repeats the neutral cmd), a
 // PING a second keeps it from the idle timeout, a malformed INPUT every 300 ticks strikes it (+5,
 // decayed by the next one), and every 1024 ticks a burst of MM_BURST PINGs empties its unreliable
-// bucket (dropped packets, a rate-limited tick). Its score stays below the warn level.
+// bucket (dropped packets, a rate-limited tick). Its score stays below the warn level. And the
+// match records a demo all along (D-044): every tick's spectator snapshot (a keyframe every 600),
+// its broadcast EVENTS and the first tick's roster burst into a sink that only counts the bytes.
 const MM_CLIENTS = 4;
+
+/** A demo sink that keeps nothing: the recorder's encode path alone is measured. */
+class CountingDemoSink implements DemoSink {
+  bytes = 0;
+  writes = 0;
+  write(_bytes: Uint8Array, length: number): void {
+    this.bytes += length;
+    this.writes++;
+  }
+  close(): void {}
+}
 const MM_BURST = 244;
 const MM_RECONNECT_TICKS = 4096;
 const MM_POOL = 24;
@@ -1650,6 +1664,7 @@ class MatchMultiRig {
   readonly abuserSession: Session;
   readonly ping = new PingMsg();
   readonly malformed = new Uint8Array([MSG_INPUT, 1, 2]);
+  readonly demo = new CountingDemoSink();
   warmup = 1;
 
   constructor() {
@@ -1660,6 +1675,7 @@ class MatchMultiRig {
       buildHash: "alloc",
       timeouts: true,
     });
+    this.match.startRecording(this.demo, "alloc");
     this.hello.buildHash = "alloc";
     for (let i = 0; i < MM_POOL; i++) {
       const [c, s] = createLoopbackPair();
@@ -1817,6 +1833,8 @@ function runMatchMulti(n: number): void {
   extra[1] = abused.strikes;
   extra[2] = abused.rateLimitedTicks;
   extra[3] = match.metrics.neutralTicks;
+  extra[4] = match.metrics.demoRecords;
+  extra[5] = match.metrics.demoFailed;
 }
 
 // Prediction and reconciliation (M2 design §5, D-027/D-028): the real ClientSim on a fractional

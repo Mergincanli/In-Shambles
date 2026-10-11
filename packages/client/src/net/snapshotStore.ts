@@ -15,7 +15,10 @@ export const STORE_STORED = 0;
 export const STORE_STALE = 1;
 /** It did not decode: the caller strikes it. */
 export const STORE_BAD = 2;
-/** A spectator snapshot (demo files only, D-044): a live connection drops and strikes it. */
+/**
+ * A spectator snapshot on a live store, or a live one on a spectator store (D-044): dropped. A
+ * live connection strikes it: spectator snapshots exist in demo files only.
+ */
 export const STORE_SPECTATOR = 3;
 /**
  * A delta whose baseline frame the store no longer (or never) held: dropped, not struck (D-038).
@@ -43,6 +46,9 @@ export const BASELINE_MISSES_BEFORE_FULL = 8;
  * scheduler left out keeps its baseline's state and stamp, or is pending (D-046). Prediction reads
  * the local slot of the newest (`slotToPlayerState`); the interpolator (D-037) reads the other
  * slots of all, by stamp.
+ *
+ * A spectator store (`DemoPlayer`'s, D-044) takes only spectator snapshots, every slot a record
+ * (receiver id −1), and drops live ones; a live store does the opposite.
  */
 export class SnapshotStore {
   readonly ring = new FrameRing();
@@ -58,7 +64,10 @@ export class SnapshotStore {
   stale = 0;
   /** Deltas dropped because their baseline frame was not held (STAT_BASELINE_DROPS). */
   baselineDrops = 0;
-  /** Spectator snapshots refused (a live connection never gets one from an honest server). */
+  /**
+   * Snapshots of the other kind refused: spectator ones on a live store (an honest server never
+   * sends one), live ones on a demo's.
+   */
   spectatorDropped = 0;
   /**
    * Of the snapshots stored, players the server's byte-budget scheduler left out (deferred ids,
@@ -74,6 +83,9 @@ export class SnapshotStore {
   private wantFull = false;
   private spare = new WorldFrame();
   private latest: WorldFrame | null = null;
+
+  /** `spectator`: a demo's store (D-044), which takes spectator snapshots only. */
+  constructor(readonly spectator = false) {}
 
   /**
    * The frame of the snapshot last stored (the receiver's view of that tick), or null. After a
@@ -108,7 +120,7 @@ export class SnapshotStore {
       this.bad++;
       return STORE_BAD;
     }
-    if ((h.flags & SNAP_FLAG_SPECTATOR) !== 0) {
+    if (((h.flags & SNAP_FLAG_SPECTATOR) !== 0) !== this.spectator) {
       this.spectatorDropped++;
       return STORE_SPECTATOR;
     }
@@ -128,7 +140,7 @@ export class SnapshotStore {
       }
     }
     const f = this.spare;
-    if (!decodeSnapshotBody(r, h, base, selfId, f)) {
+    if (!decodeSnapshotBody(r, h, base, this.spectator ? -1 : selfId, f)) {
       this.bad++;
       return STORE_BAD;
     }

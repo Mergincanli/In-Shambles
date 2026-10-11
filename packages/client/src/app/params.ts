@@ -15,6 +15,11 @@ export interface BootParams {
   readonly connect: string | null;
   /** `?net_profile=<name>`: the simulated link on the client's end from the start (`lan` else). */
   readonly netProfile: string | null;
+  /**
+   * `?demo=<url>`: play that server demo (D-044) instead of a session; it wins over `?connect=`.
+   * Resolved against the page's URL.
+   */
+  readonly demo: string | null;
 }
 
 export function parseBootParams(search: string): BootParams {
@@ -33,6 +38,7 @@ export function parseBootParams(search: string): BootParams {
     camera,
     connect: q.get("connect"),
     netProfile: q.get("net_profile"),
+    demo: q.get("demo"),
   };
 }
 
@@ -92,5 +98,21 @@ export function connectSearch(
   if (!target.ok) return target;
   const q = new URLSearchParams(search);
   q.set("connect", target.url);
+  return { ok: true, search: q.toString() };
+}
+
+/**
+ * The page query that plays the demo at `url` (the console's `demo`, D-044): `search` with `demo`
+ * set and `connect` dropped (playback has no session), everything else kept.
+ */
+export function demoSearch(
+  url: string,
+  search: string,
+): { readonly ok: true; readonly search: string } | { readonly ok: false; readonly error: string } {
+  const raw = url.trim();
+  if (raw === "") return { ok: false, error: "no demo URL" };
+  const q = new URLSearchParams(search);
+  q.set("demo", raw);
+  q.delete("connect");
   return { ok: true, search: q.toString() };
 }

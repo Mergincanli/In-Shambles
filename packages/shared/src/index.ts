@@ -8,6 +8,7 @@ export * from "./math/quant";
 export * from "./math/vec3";
 export * from "./net/bitstream";
 export * from "./net/cvarBlock";
+export * from "./net/demo";
 export * from "./net/events";
 export * from "./net/messages";
 export * from "./net/netsim";

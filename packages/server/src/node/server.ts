@@ -27,6 +27,7 @@ import {
   sessionLimits,
 } from "./config";
 import { runConsoleLine, startConsole } from "./console";
+import { type DemoWriteFn, DemoWriter, defaultDemosDir } from "./demoWriter";
 import { createNodeHost, type ServerMatch, TimedPass } from "./host";
 import { createJsonLog, type JsonLog, matchLog } from "./log";
 import { defaultMapsDir, loadMap } from "./maps";
@@ -64,6 +65,13 @@ export interface StartOptions {
    * empty disables rcon.
    */
   readonly rconPassword?: string;
+  /**
+   * Where `record` writes demos (D-044): the repository's `demos/` by default. Never chosen by a
+   * command (rcon names a file, not a folder).
+   */
+  readonly demosDir?: string;
+  /** The demo files' writes (`fs.write`; a test passes a slow disk). */
+  readonly demoWrite?: DemoWriteFn;
 }
 
 export interface RunningServer {
@@ -80,6 +88,8 @@ export interface RunningServer {
   readonly metrics: ServerMetrics;
   /** Wrong rcon passwords per remote address, across every match (D-042). */
   readonly rconGuard: RconGuard;
+  /** The match's demo files (D-044). */
+  readonly demos: DemoWriter;
   /**
    * Graceful shutdown (D-029): stop accepting, KICK every client "server shutting down" and close
    * its socket 1001, stop the loop, write `--metrics-out`, and wait (bounded) for the sockets to
@@ -145,6 +155,9 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   const primerMs = primer && primePmoveOnce(primerParams) ? performance.now() - primerStart : 0;
 
   const maxClients = cvars.getNumber("sv_maxClients", MATCH_DEFAULT_MAX_CLIENTS);
+  const demosDir =
+    options.demosDir === undefined ? defaultDemosDir(cwd) : resolve(cwd, options.demosDir);
+  const demos = new DemoWriter(demosDir, log, DEFAULT_MATCH, undefined, options.demoWrite);
   const main: ServerMatch = {
     name: DEFAULT_MATCH,
     match: new Match({
@@ -166,12 +179,18 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
         log("info", "metrics_reset", { reason: "rcon", match: DEFAULT_MATCH });
         return `metrics reset: match ${DEFAULT_MATCH}`;
       },
+      demos,
     }),
     ticks: new TickHistogram(),
     traffic: new WireTraffic(),
   };
   const matches: Record<string, ServerMatch> = { [DEFAULT_MATCH]: main };
   const list = [main];
+  // sv_autoRecord (D-044): the whole run, from the first tick to shutdown.
+  if (cvars.getNumber("sv_autoRecord", 0) === 1) {
+    const r = main.match.record(null);
+    if (!r.ok) throw new ConfigError(`sv_autoRecord: ${r.text}`);
+  }
 
   const pass = new TimedPass(list, log);
 
@@ -240,16 +259,19 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     log("info", "shutdown", signal === undefined ? {} : { signal });
     stopConsole();
     listener.stopAccepting();
+    // The demo ends first (its END record), so the shutdown kicks are not in it.
+    for (const m of list) m.match.stopRecording();
     for (const m of list) kickAll(m.match, "server shutting down");
     loop.stop();
     timers.stop();
     metrics.gc.stop();
     if (metricsOut !== null) writeMetrics(metricsOut, buildHash, metrics, log);
-    stopping = listener.close(SHUTDOWN_CLOSE_MS);
+    const files = Promise.all(Array.from(demos.pending, (sink) => sink.done));
+    stopping = Promise.all([listener.close(SHUTDOWN_CLOSE_MS), files]).then(() => {});
     return stopping;
   };
 
-  return { matches, listener, loop, pass, cvars, buildHash, log, metrics, rconGuard, stop };
+  return { matches, listener, loop, pass, cvars, buildHash, log, metrics, rconGuard, demos, stop };
 }
 
 /** Seconds between the memory samples that give the metrics windows their peaks. */

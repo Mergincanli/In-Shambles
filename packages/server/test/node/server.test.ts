@@ -1,10 +1,10 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, write, writeFileSync } from "node:fs";
 import type { IncomingMessage } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
-import { EVK_PLAYER_JOIN, EVK_SERVER_STATS, PROTOCOL_VERSION } from "@game/shared";
+import { EVK_PLAYER_JOIN, EVK_SERVER_STATS, PROTOCOL_VERSION, validateDemo } from "@game/shared";
 import { afterEach, describe, expect, it, onTestFinished } from "vitest";
 import { type RunningServer, startServer } from "../../src/node/server";
 import { TestClient } from "../match/fixtures";
@@ -528,5 +528,38 @@ describe("Node server (in process, real WebSocket)", () => {
     await expect(
       startServer({ args: ["--port", "0", "--set", "sv_sendBufferClose=2048"], cwd: serverDir }),
     ).rejects.toThrow(/sv_sendBufferClose \(2048\) must be above sv_sendBufferDrop \(32768\)/);
+  });
+});
+
+describe("sv_autoRecord (D-044)", () => {
+  it("records the Node server's whole run, closed by a shutdown that waits for the file", async () => {
+    const root = mkdtempSync(join(tmpdir(), "server-autorecord-"));
+    onTestFinished(() => rmSync(root, { recursive: true, force: true }));
+    const server = await startServer({
+      args: ["--port", "0", "--set", "sv_autoRecord=1"],
+      cwd: serverDir,
+      write: () => {},
+      primer: false,
+      rconPassword: "",
+      demosDir: join(root, "demos"),
+      // A slow disk: shutdown must still wait for the file.
+      demoWrite: (fd, buf, off, len, pos, cb) =>
+        setTimeout(() => write(fd, buf, off, len, pos, (e, n) => cb(e, n)), 150),
+    });
+    const match = server.matches.main?.match;
+    expect(match?.recording).toMatch(/^demos\/arena_greybox-\d{8}-\d{6}\.demo$/);
+    await until(() => (match?.serverTick ?? 0) > 0, "a tick");
+    const sink = server.demos.last;
+    await server.stop();
+    // stop() resolves only once the demo is on disk and closed.
+    expect(sink?.written).toBeGreaterThan(0);
+    expect(sink?.flushed).toBe(sink?.written);
+    expect(server.demos.pending.size).toBe(0);
+    const files = readdirSync(join(root, "demos"));
+    expect(files).toHaveLength(1);
+    const check = validateDemo(
+      new Uint8Array(readFileSync(join(root, "demos", files[0] as string))),
+    );
+    expect(check.ok, check.ok ? "" : check.error).toBe(true);
   });
 });
