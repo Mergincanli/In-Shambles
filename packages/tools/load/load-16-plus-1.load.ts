@@ -11,11 +11,13 @@ import { type BotsCliRun, check, runBotsCli, settleHost, summaryOf, writeNotes }
 // at nice 10. The human joined (the server holds 17, its page draws 16), its prediction stays
 // healthy by the e2e rule (`packages/client/e2e/health.ts`) and inside NET-04's bounds, its
 // remotes never jump (NET-05) at a 2–6 tick delay, the server's run window holds p99 ≤ 4 ms and
-// GC ≤ 8 ms, and every bots check passes. If contention skews the server's p99 (it FAILs, and
-// every other FAIL is one of the server's tick or GC checks), the leg is repeated without --human
-// and the two are judged separately: the server's numbers from the run without the browser, the
-// rest from the run with it (the design's rule, §5 "16 + 1"). A GC pause over 8 ms beside the
-// browser with p99 inside its bound is not that case: the leg FAILs with the numbers.
+// GC ≤ 8 ms, and every bots check passes. If the browser skews the server's own checks (every
+// FAIL is one of the server's tick or GC checks), the leg is repeated without --human and the two
+// are judged separately: the server's numbers from the run without the browser, the rest from the
+// run with it. The design's rule (§5 "16 + 1") named p99; Mustafa extended it to the GC pause on
+// 2026-10-12 (D-045): on a 4-vCPU host the headless browser's software WebGL takes about two
+// cores and stretches the server's GC pauses past 8 ms, while the same server without it stays
+// near 4 ms, so the GC bound is judged without the browser unless the host has cores to spare.
 
 const ARGS = [
   "--count",
@@ -28,10 +30,11 @@ const ARGS = [
   "arena_greybox",
   "--strict",
 ];
-/** What the fallback answers: contention skewing the server's p99 (design §5 "16 + 1"). */
-const SKEWED = "server tick p99";
-/** The server checks judged from the run without the browser once p99 was skewed. */
-const SERVER_SIDE = new Set(["server tick p50", SKEWED, "server GC pause max"]);
+/**
+ * The server checks the browser can skew on a small host, judged from a run without it when they
+ * are the only FAILs (design §5 "16 + 1" for p99; the GC pause by Mustafa's decision, D-045).
+ */
+const SERVER_SIDE = new Set(["server tick p50", "server tick p99", "server GC pause max"]);
 
 function failing(s: BotsSummary): string[] {
   return s.checks.filter((c) => c.judged && !c.pass).map((c) => c.name);
@@ -85,9 +88,9 @@ describe("16 bots + 1 human on arena_greybox at wan-100-loss1 (M3 acceptance, lo
     if (h.end.webgl === "1") expect(h.end.capsules, run.md).toBe("16");
     expect(h.end.renderSnaps, run.md).toBe("0");
     const fails = failing(s);
-    if (fails.includes(SKEWED) && fails.every((name) => SERVER_SIDE.has(name))) {
-      // The design's fallback: the server's numbers from a run without the browser. The browser
-      // run's server numbers go into the notes, so CI's records show how often it was needed.
+    if (fails.length > 0 && fails.every((name) => SERVER_SIDE.has(name))) {
+      // The fallback: the server's numbers from a run without the browser. The browser run's
+      // server numbers go into the notes, so CI's records show how often it was needed.
       const beside = fails.map((name) => `${name} ${check(s, name).value}`).join(", ");
       console.log(`load: ${beside} beside the browser; repeating without --human`);
       await settleHost();
@@ -96,7 +99,7 @@ describe("16 bots + 1 human on arena_greybox at wan-100-loss1 (M3 acceptance, lo
       console.log(alone.md);
       writeNotes(
         "16-plus-1",
-        `16 + 1: p99 skewed beside the browser (${beside}); the server judged without it: ` +
+        `16 + 1: server checks skewed beside the browser (${beside}); the server judged without it: ` +
           `${[...SERVER_SIDE].map((name) => `${name} ${check(a, name).value}`).join(", ")}.`,
       );
       expectServer(a, alone);
