@@ -176,4 +176,32 @@ describe("shared purity guard", () => {
       expect(violations(readFileSync(file, "utf8"))).toEqual([]);
     },
   );
+
+  // The pmove primer (D-040) is inert by construction too: it reaches nothing a match or client
+  // holds (no registry, PRNG, protocol or match state), only pmove, the world builders and the
+  // event filing, as its imports show.
+  it("sim/pmove/primer.ts imports only pmove, the world builders and the event filing", () => {
+    const src = readFileSync(join(root, "sim", "pmove", "primer.ts"), "utf8");
+    const from = [...src.matchAll(/from "([^"]+)"/g)].map((m) => m[1]).sort();
+    expect(from).toEqual([
+      "../../net/worldFrame",
+      "../../time",
+      "../../world/brushBuild",
+      "../../world/collisionWorld",
+      "../../world/contents",
+      "../../world/shapes",
+      "../../world/trace",
+      "../entity",
+      "../events",
+      "../hull",
+      "../playerState",
+      "../usercmd",
+      "./debug",
+      "./params",
+      "./pmove",
+    ]);
+    // From net/worldFrame it takes the pure per-event conversion only.
+    expect(src).toMatch(/import \{ entityEventValue \} from "\.\.\/\.\.\/net\/worldFrame";/);
+    expect(src).not.toMatch(/Mulberry32|hash32|CvarRegistry/);
+  });
 });

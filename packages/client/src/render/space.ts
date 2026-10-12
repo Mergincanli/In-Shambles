@@ -63,6 +63,53 @@ export function setViewAngles(cam: Object3D, yawDeg: number, pitchDeg: number): 
   cam.rotation.set(-pitchDeg * DEG_TO_RAD, (yawDeg - 90) * DEG_TO_RAD, 0, "YXZ");
 }
 
+/** `uprightToThree` pose slots. */
+export const UPRIGHT_X = 0;
+export const UPRIGHT_Y = 1;
+export const UPRIGHT_Z = 2;
+/** Sim yaw, degrees about +Z (0 faces +X). */
+export const UPRIGHT_YAW = 3;
+/** Scale along sim +Z (a crouch squashes the body). */
+export const UPRIGHT_HEIGHT = 4;
+export const UPRIGHT_SLOTS = 5;
+
+/**
+ * An upright body's model matrix (column-major, Three's `Matrix4.elements` layout) into `out` from
+ * float `offset`: a mesh modelled in scene axes and metres around its feet, turned by the sim yaw
+ * about the up axis, scaled along it by `pose[UPRIGHT_HEIGHT]`, placed at the sim position
+ * `pose[UPRIGHT_X..Z]` (u). Sim yaw θ about +Z is a turn by θ about scene +Y (sim +X stays scene
+ * +X and sim +Y is scene −Z), so a mesh's local +X is its facing. The pose comes in a Float64Array
+ * and the matrix goes straight into an instance buffer, so per-frame callers pass no doubles and
+ * allocate nothing.
+ */
+export function uprightToThree(pose: Float64Array, out: Float32Array, offset: number): void {
+  const yaw = (pose[UPRIGHT_YAW] as number) * DEG_TO_RAD;
+  const c = Math.cos(yaw);
+  const s = Math.sin(yaw);
+  const k = METERS_PER_UNIT;
+  out[offset] = c;
+  out[offset + 1] = 0;
+  out[offset + 2] = -s;
+  out[offset + 3] = 0;
+  out[offset + 4] = 0;
+  out[offset + 5] = pose[UPRIGHT_HEIGHT] as number;
+  out[offset + 6] = 0;
+  out[offset + 7] = 0;
+  out[offset + 8] = s;
+  out[offset + 9] = 0;
+  out[offset + 10] = c;
+  out[offset + 11] = 0;
+  out[offset + 12] = (pose[UPRIGHT_X] as number) * k;
+  out[offset + 13] = (pose[UPRIGHT_Z] as number) * k;
+  out[offset + 14] = -(pose[UPRIGHT_Y] as number) * k;
+  out[offset + 15] = 1;
+}
+
+/** A length in u as metres (a mesh's size), for geometry built once. */
+export function unitsToMeters(u: number): number {
+  return u * METERS_PER_UNIT;
+}
+
 /**
  * The cmap's vertices (`CMAP_VERTEX_FLOATS` per vertex: position, normal, uv0; docs/07 §2) for
  * `count` vertices from `first`, converted at load time into a new interleaved array of the same

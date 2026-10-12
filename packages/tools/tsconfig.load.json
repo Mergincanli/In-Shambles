@@ -1,0 +1,10 @@
+{
+  // The load tier (D-045, `vitest.load.config.ts`): Node code that also judges the headless
+  // browser's page with the client e2e's health rule, whose page callbacks need the DOM.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": ["node"]
+  },
+  "include": ["load"]
+}

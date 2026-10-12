@@ -190,9 +190,10 @@ export type CvarApplyResult =
  * Applies a server block to a client's mirror registry, all or nothing. The block must list
  * exactly the registry's REPLICATED cvars, spelled as registered, with their types and values
  * within their bounds; otherwise nothing changes (a client with another cvar set is another build,
- * and a clamped value would mispredict). The server already applied its CHEAT and LATCH rules to
- * the values it sends, so the mirror stores them as they are (`CvarRegistry.setReplicated`),
- * whatever its own cheat setting: prediction uses the server's values only.
+ * and a clamped value would mispredict). The server already applied its LATCH rule to the values
+ * it sends, so the mirror stores them as they are (`CvarRegistry.setReplicated`): prediction uses
+ * the server's values only. No REPLICATED cvar is CHEAT (D-042), so the client's cheat reset never
+ * touches one.
  * On success the registry's `registryCvarHash` equals the block's `cvarBlockHash`.
  */
 export function applyCvarBlock(reg: CvarRegistry, block: CvarBlock): CvarApplyResult {

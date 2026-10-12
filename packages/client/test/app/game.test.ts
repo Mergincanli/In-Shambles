@@ -1,20 +1,33 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { Match } from "@game/server";
+import { DEFAULT_PORT } from "@game/server/node";
 import {
+  BitWriter,
   buildCollisionWorld,
+  type CloseHandler,
   CvarRegistry,
   createLoopbackPair,
   decodeCmap,
   degreesToU16,
   ENTITY_NONE,
+  encodeHello,
+  encodeReady,
+  HelloMsg,
   HULL_MINS,
+  MAX_RELIABLE_BYTES,
+  type MessageHandler,
   MOVE_AXIS_MAX,
   PlayerState,
   registerPmoveCvars,
+  registerServerReplicatedCvars,
+  TEAM_2,
   TRACE_EPSILON,
+  type Transport,
+  type TransportStats,
   type UserCmd,
   VIEW_HEIGHT_STANDING,
+  vec3,
 } from "@game/shared";
 import { describe, expect, it } from "vitest";
 import {
@@ -24,7 +37,12 @@ import {
   type StatusSink,
   THIRD_PERSON_DISTANCE,
 } from "../../src/app/game";
-import { parseBootParams } from "../../src/app/params";
+import {
+  DEFAULT_SERVER_PORT,
+  demoSearch,
+  parseBootParams,
+  parseServerUrl,
+} from "../../src/app/params";
 import { ACTION_FORWARD, ACTION_JUMP, Binds } from "../../src/console/binds";
 import { registerClientCvars } from "../../src/console/clientCvars";
 import { type ConsoleHost, runConsoleCommand } from "../../src/console/commands";
@@ -35,31 +53,113 @@ import {
   ClientSim,
   type CmdSampler,
   NeutralInput,
+  type RemoteView,
   STAT_HARD_RESYNCS,
+  STAT_SNAPSHOTS_LOST,
+  STAT_STARVED,
   StrafeCircuit,
 } from "../../src/net";
+import type { GameRenderer } from "../../src/render/renderer";
+import { workerCvars } from "../../src/worker/workerCvars";
 
 const mapUrl = new URL("../../../../content/maps/movement_lab.cmap", import.meta.url);
 const cmap = decodeCmap(new Uint8Array(readFileSync(fileURLToPath(mapUrl))));
 const world = buildCollisionWorld(cmap);
 const BUILD = "game-test";
 
+/**
+ * The client's end of the link, with stalls: `up`/`down` held keep what is sent that way until
+ * released (then it goes through in order, as a stalled browser network process lets it), and
+ * `dropDown` loses the unreliable messages coming down instead.
+ */
+class StallableLink implements Transport {
+  up = false;
+  down = false;
+  dropDown = false;
+  private readonly upQueue: { d: Uint8Array; reliable: boolean }[] = [];
+  private readonly downQueue: { d: Uint8Array; reliable: boolean }[] = [];
+  private cb: MessageHandler = () => {};
+
+  constructor(private readonly inner: Transport) {
+    inner.onMessage((d, len, reliable) => {
+      if (this.dropDown && !reliable) return;
+      if (this.down || this.downQueue.length > 0) {
+        this.downQueue.push({ d: d.slice(0, len), reliable });
+        if (!this.down) this.flushDown();
+        return;
+      }
+      this.cb(d, len, reliable);
+    });
+  }
+
+  sendUnreliable(d: Uint8Array, len: number): void {
+    if (this.up) this.upQueue.push({ d: d.slice(0, len), reliable: false });
+    else this.inner.sendUnreliable(d, len);
+  }
+
+  sendReliable(d: Uint8Array, len: number): void {
+    if (this.up) this.upQueue.push({ d: d.slice(0, len), reliable: true });
+    else this.inner.sendReliable(d, len);
+  }
+
+  onMessage(cb: MessageHandler): void {
+    this.cb = cb;
+  }
+
+  onClose(cb: CloseHandler): void {
+    this.inner.onClose(cb);
+  }
+
+  poll(): void {
+    if (!this.up) {
+      for (const m of this.upQueue.splice(0)) {
+        if (m.reliable) this.inner.sendReliable(m.d, m.d.length);
+        else this.inner.sendUnreliable(m.d, m.d.length);
+      }
+    }
+    if (!this.down) this.flushDown();
+    this.inner.poll();
+  }
+
+  close(reason?: string): void {
+    this.inner.close(reason);
+  }
+
+  isOpen(): boolean {
+    return this.inner.isOpen();
+  }
+
+  stats(): TransportStats {
+    return this.inner.stats();
+  }
+
+  private flushDown(): void {
+    for (const m of this.downQueue.splice(0)) this.cb(m.d, m.d.length, m.reliable);
+  }
+}
+
 /** The page's pieces without the page: a Match, a client over loopback, a Game, a fake clock. */
 function session(
   input: CmdSampler,
   camera: CameraOverride | null = null,
-  extra: Pick<GameOptions, "look" | "hud"> = {},
+  extra: Pick<GameOptions, "look" | "hud"> & { renderer?: GameRenderer } = {},
 ) {
   const now = { t: 0 };
   const [clientEnd, serverEnd] = createLoopbackPair();
-  const match = new Match({ cmap, world, buildHash: BUILD });
+  // The Worker's match (sv_cheats 1, D-042), so third person and the debug views can be set.
+  const match = new Match({ cmap, world, cvars: workerCvars(), buildHash: BUILD, primer: false });
   match.connect(serverEnd, true);
   // The page's registry (boot.ts), so the client cvars are the registered ones.
   const cvars = new CvarRegistry();
   registerPmoveCvars(cvars);
+  registerServerReplicatedCvars(cvars);
   registerClientCvars(cvars);
+  // As the Worker's WELCOME will (sv_cheats 1), so a test may set the CHEAT views before it.
+  cvars.setAllowCheats(true);
+  const link = new StallableLink(clientEnd);
   const client = new ClientSim({
-    transport: clientEnd,
+    primer: false,
+    transport: link,
     cmap,
     world,
     buildHash: BUILD,
@@ -68,7 +168,7 @@ function session(
     input,
   });
   const status: StatusSink = {};
-  const game = new Game({ client, renderer: null, status, camera, ...extra });
+  const game = new Game({ client, status, camera, ...extra, renderer: extra.renderer ?? null });
   client.connect();
   let serverTicks = 0;
   let frames = 0;
@@ -103,7 +203,26 @@ function session(
     now.t = end;
     frames = Math.floor((end * 144) / 1000);
   };
-  return { game, client, match, status, run, hitch };
+  /**
+   * The snapshot stream stops for `ms` while frames go on (a link or server stall): the server's
+   * ticks of that stretch then run at once at its end, as a match loop catches up.
+   */
+  const stallSnapshots = (ms: number) => {
+    const end = now.t + ms;
+    for (;;) {
+      const nextFrame = ((frames + 1) * 1000) / 144;
+      if (nextFrame > end) break;
+      now.t = nextFrame;
+      frames++;
+      game.frame();
+    }
+    now.t = end;
+    while (((serverTicks + 1) * 1000) / 60 <= end) {
+      serverTicks++;
+      match.tick();
+    }
+  };
+  return { game, client, match, status, run, hitch, stallSnapshots, link };
 }
 
 /** Walks north (yaw 90°) at full speed while `walking`. */
@@ -140,6 +259,8 @@ describe("game frame loop (M2 design §2)", () => {
     expect(Number(status.snapshots)).toBeGreaterThan(150);
     expect(Number(status.ticks)).toBeGreaterThan(150);
     expect(Number(status.corrections)).toBe(0);
+    // The corrections' summed distance (NET-04's mean for `pnpm bots --human`, D-045).
+    expect(status.correctionDist).toBe("0.000");
     expect(Number(status.frames)).toBeGreaterThan(game.frames - 40);
     expect(Number(status.frames)).toBeLessThanOrEqual(game.frames);
     // The page clock at the report, at most one status interval old.
@@ -155,6 +276,7 @@ describe("game frame loop (M2 design §2)", () => {
     expect(Number(status.maxFrameMs)).toBe(7);
     expect(status.longFrames).toBe("0");
     expect(status.lateResyncs).toBe("0");
+    expect(status.resyncLog).toBe("");
     // A gap inside the 2-tick input buffer (33 ms) is not long and resyncs nothing.
     const resyncs = client.stats.totals[STAT_HARD_RESYNCS] as number;
     hitch(15);
@@ -170,6 +292,12 @@ describe("game frame loop (M2 design §2)", () => {
     expect(game.lateResyncs).toBe(1);
     expect(status.longFrames).toBe("1");
     expect(status.lateResyncs).toBe("1");
+    // The resync's timing: the 300 ms frame, the server tick it found past the prediction.
+    expect(status.resyncLog).toMatch(
+      /^at \d+ dt 3\d\d snapGap \d+ predicted \d+ server \d+ lead \d+ rtt \d+ low -?\d+$/,
+    );
+    const [, predicted, server] = /predicted (\d+) server (\d+)/.exec(status.resyncLog ?? "") ?? [];
+    expect(Number(server)).toBeGreaterThan(Number(predicted));
     expect(Number(status.maxFrameMs)).toBeGreaterThanOrEqual(300);
     expect(Number(status.maxFrameMs)).toBeLessThan(315);
     // The longest gap is per report: the next one is back to the frame period.
@@ -178,11 +306,80 @@ describe("game frame loop (M2 design §2)", () => {
     expect(status.lateResyncs).toBe("1");
   });
 
+  it("reports the gaps in the snapshot stream past the input buffer and the frame rhythm", () => {
+    const { game, status, run, stallSnapshots } = session(new StrafeCircuit());
+    run(2000);
+    // 60 Hz snapshots taken by 144 Hz frames: at most a tick and a frame apart.
+    expect(status.linkGaps).toBe("0");
+    expect(Number(status.maxSnapGapMs)).toBeLessThanOrEqual(21);
+    // 30 ms without a snapshot: within the 2-tick input buffer plus a frame.
+    stallSnapshots(30);
+    run(500);
+    expect(game.linkGaps).toBe(0);
+    // 80 ms, ended by a burst of the held snapshots: a link gap, with every frame on time.
+    stallSnapshots(80);
+    run(300);
+    expect(game.linkGaps).toBe(1);
+    expect(game.longFrames).toBe(0);
+    expect(status.linkGaps).toBe("1");
+    expect(status.lastLinkGap).toMatch(/^(8\d|9\d)ms@\d+$/);
+    // The longest gap per report resets; the peak stays.
+    run(500);
+    expect(Number(status.maxSnapGapMs)).toBeLessThanOrEqual(21);
+    expect(Number(status.peakSnapGapMs)).toBeGreaterThanOrEqual(80);
+  });
+
+  it("does not count a gap that lost snapshots (a tick jump, not a burst) as a link gap", () => {
+    const { game, client, status, run, link } = session(new StrafeCircuit());
+    run(2000);
+    const lost = client.stats.totals[STAT_SNAPSHOTS_LOST] as number;
+    link.dropDown = true;
+    run(80);
+    link.dropDown = false;
+    run(500);
+    expect(client.stats.totals[STAT_SNAPSHOTS_LOST] as number).toBeGreaterThan(lost);
+    expect(Number(status.peakSnapGapMs)).toBeGreaterThanOrEqual(80);
+    expect(game.linkGaps).toBe(0);
+    expect(game.longFrames).toBe(0);
+  });
+
+  it("excuses only the starves right after a link stall, and probes the last one", () => {
+    const { game, client, status, run, link } = session(new StrafeCircuit());
+    run(3000);
+    const t = client.stats.totals;
+    const starved0 = t[STAT_STARVED] as number;
+    // Both ways held 100 ms, frames on time (a stalled browser network process): the server
+    // starves past the input buffer, and those flags come down in the burst that ends the gap.
+    link.up = true;
+    link.down = true;
+    run(100);
+    link.up = false;
+    link.down = false;
+    run(1000);
+    const starved1 = t[STAT_STARVED] as number;
+    expect(starved1).toBeGreaterThan(starved0);
+    expect(game.longFrames).toBe(0);
+    expect(game.linkGaps).toBe(1);
+    expect(game.starvedAfterGap).toBe(starved1 - starved0);
+    expect(status.starvedAfterGap).toBe(String(starved1 - starved0));
+    expect(status.lastStarve).toMatch(
+      /^at \d+ lead -?\d+ low -?\d+ mean -?[\d.]+ dt \d+ snapGap \d+ rtt \d+$/,
+    );
+    // Only the uplink held: the snapshots keep coming, so nothing excuses these starves.
+    link.up = true;
+    run(100);
+    link.up = false;
+    run(1000);
+    expect(t[STAT_STARVED] as number).toBeGreaterThan(starved1);
+    expect(game.linkGaps).toBe(1);
+    expect(game.starvedAfterGap).toBe(starved1 - starved0);
+  });
+
   it("puts the eye at the interpolated origin plus the eye height, facing the spawn's yaw", () => {
     const { game, client, match, run } = session(new NeutralInput());
     run(1000);
     expect(client.active).toBe(true);
-    const o = match.spawnOrigin;
+    const o = match.spawns.origin(0, vec3());
     expect(Array.from(game.pose)).toEqual([
       o[0],
       o[1],
@@ -364,6 +561,79 @@ describe("game frame loop (M2 design §2)", () => {
   });
 });
 
+describe("other players in the frame (M3 increments 5 and 7, D-034, D-037)", () => {
+  /** A second player on `match` that only joins (HELLO, READY) and then stands still. */
+  function joinBystander(match: Match): void {
+    const [end, serverEnd] = createLoopbackPair();
+    match.connect(serverEnd);
+    end.onMessage(() => {});
+    const w = new BitWriter(MAX_RELIABLE_BYTES);
+    const hello = new HelloMsg();
+    hello.buildHash = BUILD;
+    encodeHello(w, hello);
+    end.sendReliable(w.bytes, w.byteLength);
+    w.reset();
+    encodeReady(w);
+    end.sendReliable(w.bytes, w.byteLength);
+  }
+
+  it("draws every other player interpolated from the snapshots, never its own, and clears them on close", () => {
+    // A renderer stand-in that records what Game hands the capsules each frame.
+    const drawn: number[] = [];
+    const renderer = {
+      view: { pose: new Float64Array(5) },
+      players: {
+        count: 0,
+        update(v: RemoteView) {
+          this.count = v.count;
+          drawn.push(v.count);
+        },
+      },
+      debug: { update: () => {} },
+      render: () => {},
+      drawCalls: 0,
+      triangles: 0,
+    } as unknown as GameRenderer;
+    const { game, client, match, status, run } = session(new StrafeCircuit(), null, { renderer });
+    run(1000);
+    expect(client.connection.clientId).toBe(0);
+    expect(game.remotes.count).toBe(0);
+    expect(status.remotes).toBe("0");
+    expect(drawn.length).toBeGreaterThan(100);
+    joinBystander(match);
+    run(1000);
+    const other = match.session(1)?.player;
+    if (other === undefined) throw new Error("the bystander did not join");
+    const v = game.remotes;
+    expect(v.count).toBe(1);
+    expect([v.visible[0], v.visible[1]]).toEqual([0, 1]);
+    // The second joiner is on team 2; it stands where the server has it.
+    expect(v.team[1]).toBe(TEAM_2);
+    // Standing still, so the interpolated position is the server's exactly.
+    expect([v.x[1], v.y[1], v.z[1]]).toEqual(Array.from(other.origin));
+    expect(status.remotes).toBe("1");
+    expect(status.capsules).toBe("1");
+    // Smooth, interpolated (not extrapolated) at a delay the snapshot stream sized.
+    expect(status.remoteJumps).toBe("0");
+    expect(Number(status.remoteJudged)).toBeGreaterThan(50);
+    expect(status.extrapolations).toBe("0");
+    expect(status.renderSnaps).toBe("0");
+    expect(Number(status.remoteFrames)).toBeGreaterThan(50);
+    expect(Number(status.interpDelay)).toBeGreaterThanOrEqual(2);
+    expect(Number(status.interpDelay)).toBeLessThanOrEqual(6);
+    expect(drawn.at(-1)).toBe(1);
+    // The session ends: nobody is drawn any more.
+    const frames = drawn.length;
+    match.kick(match.session(0) as NonNullable<ReturnType<typeof match.session>>, "test over");
+    run(500);
+    expect(status.state).not.toBe("running");
+    expect(game.remotes.count).toBe(0);
+    expect([v.visible[0], v.visible[1]]).toEqual([0, 0]);
+    expect(status.remotes).toBe("0");
+    expect(drawn.length).toBe(frames);
+  });
+});
+
 describe("player input, console, HUD and debug draw in the frame (M2 increment 12)", () => {
   /** The player's input path: actions and mouse look feeding PlayerInput. */
   function player() {
@@ -510,6 +780,12 @@ describe("player input, console, HUD and debug draw in the frame (M2 increment 1
       sendServer: (t) => p.client.sendCommand(t),
       net: null,
       corrections: p.client.predictor.corrections,
+      server: "the test match",
+      connected: () => !p.client.closed,
+      connect: () => "not in this test",
+      disconnect: () => false,
+      demo: null,
+      playDemo: () => "not in this test",
     };
     p.actions.press(ACTION_FORWARD);
     p.actions.press(ACTION_JUMP);
@@ -531,6 +807,9 @@ describe("boot URL parameters (M2 design §2 autotest hooks)", () => {
       autotest: true,
       bot: "circle",
       camera: null,
+      connect: null,
+      netProfile: null,
+      demo: null,
     });
     expect(parseBootParams("").autotest).toBe(false);
     expect(parseBootParams("?autotest=yes").autotest).toBe(false);
@@ -538,5 +817,55 @@ describe("boot URL parameters (M2 design §2 autotest hooks)", () => {
     for (const bad of ["1,2,3,4", "1,2,3,4,5,6", "1,2,,4,5", "a,2,3,4,5", "1,2,3,4,Infinity"]) {
       expect(parseBootParams(`?cam=${bad}`).camera, bad).toBeNull();
     }
+  });
+
+  it("reads a server to connect to and a net profile (D-031)", () => {
+    const p = parseBootParams("?connect=ws://127.0.0.1:28700&net_profile=wan-100-loss1");
+    expect(p.connect).toBe("ws://127.0.0.1:28700");
+    expect(p.netProfile).toBe("wan-100-loss1");
+  });
+
+  it("reads a demo to play (D-044), and the console's demo query drops ?connect=", () => {
+    expect(parseBootParams("?demo=/demos/a.demo").demo).toBe("/demos/a.demo");
+    expect(demoSearch("x.demo", "?connect=ws://h:1/&net_profile=lan")).toEqual({
+      ok: true,
+      search: "net_profile=lan&demo=x.demo",
+    });
+    expect(demoSearch("  ", "")).toEqual({ ok: false, error: "no demo URL" });
+  });
+});
+
+describe("server addresses (D-031)", () => {
+  it("take ws://host:port or host:port, with an optional path", () => {
+    expect(parseServerUrl("ws://127.0.0.1:28700")).toEqual({
+      ok: true,
+      url: "ws://127.0.0.1:28700/",
+    });
+    expect(parseServerUrl(" localhost:28700 ")).toEqual({ ok: true, url: "ws://localhost:28700/" });
+    // Without a port: the server's default, not the scheme's 80.
+    expect(DEFAULT_SERVER_PORT).toBe(DEFAULT_PORT);
+    expect(parseServerUrl("ws://host/m/lab")).toEqual({ ok: true, url: "ws://host:28700/m/lab" });
+    expect(parseServerUrl("localhost")).toEqual({ ok: true, url: "ws://localhost:28700/" });
+    expect(parseServerUrl("[::1]")).toEqual({ ok: true, url: "ws://[::1]:28700/" });
+    expect(parseServerUrl("ws://[::1]:9/")).toEqual({ ok: true, url: "ws://[::1]:9/" });
+    // An explicit 80 stays 80 (URL writes it without the port).
+    expect(parseServerUrl("ws://host:80/")).toEqual({ ok: true, url: "ws://host/" });
+  });
+
+  it.each([
+    ["", /no server address/],
+    ["ws://", /not a server address/],
+    ["wss://example.org", /wss:\/\/ comes with deployment/],
+    ["http://example.org", /starts with ws:\/\//],
+    ["ws://host:1/?a=1", /no query string/],
+    ["ws://host:1/#x", /no query string/],
+    ["ws://host:1/?", /no query string/],
+    ["ws://host:1/#", /no query string/],
+    ["host:1?", /no query string/],
+    ["ws://user:pw@host:1", /no user name/],
+  ])("refuse %j", (text, why) => {
+    const r = parseServerUrl(text);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(why);
   });
 });

@@ -94,6 +94,11 @@ export class CvarRegistry {
     if (def.min !== undefined && def.max !== undefined && def.min > def.max) {
       throw new Error(`cvar "${def.name}": min ${def.min} > max ${def.max}`);
     }
+    // A client's cheat reset (`setAllowCheats(false)`) must never touch a value the server owns
+    // (D-027, D-042), so no cvar is both.
+    if (isReplicatedDef(def) && ((def.flags ?? 0) & CvarFlag.CHEAT) !== 0) {
+      throw new Error(`cvar "${def.name}" cannot be both REPLICATED and CHEAT`);
+    }
     if (isReplicatedDef(def) && def.name.length > SHORT_TEXT_MAX) {
       throw new Error(`replicated cvar "${def.name}": name longer than ${SHORT_TEXT_MAX} chars`);
     }
@@ -181,10 +186,10 @@ export class CvarRegistry {
 
   /**
    * Stores a server-sent value of a REPLICATED cvar on a client's mirror (`applyCvarBlock`). The
-   * server already applied its CHEAT and LATCH rules to it, so neither applies here: prediction
-   * must use the server's value. The value is stored as sent, never clamped; false, changing
-   * nothing, for an unknown or non-replicated cvar or a value of the wrong type, outside min/max
-   * or not encodable. Drops any pending latched value.
+   * server already applied its LATCH rule to it, so the mirror's does not apply here: prediction
+   * must use the server's value (a REPLICATED cvar is never CHEAT, D-042). The value is stored as
+   * sent, never clamped; false, changing nothing, for an unknown or non-replicated cvar or a value
+   * of the wrong type, outside min/max or not encodable. Drops any pending latched value.
    */
   setReplicated(name: string, value: CvarValue): boolean {
     const entry = this.lookup(name);

@@ -11,7 +11,7 @@
 | M1 | Simulation core: tick, math, brush collision, greybox builder | ☑ done | [2026-10-06](handoffs/2026-10-06-M1-simulation-core.md) |
 | M2 | Base Q3 movement + client shell + Worker server + prediction | ☑ done | [2026-10-07](handoffs/2026-10-07-M2-movement-and-prediction.md) |
 | — | *Optional:* Style spike: toon material, hull outline, crease lines on greybox (`docs/08` §18) | ☐ | |
-| M3 | Real networking: dedicated server, protocol, snapshots, interpolation, bots | ☐ | |
+| M3 | Real networking: dedicated server, protocol, snapshots, interpolation, bots | ☑ done | [2026-10-12](handoffs/2026-10-12-M3-real-networking.md) |
 | M4 | UrT movement set (sprint/stamina, wall jumps, slide, ledge grab, …) | ☐ | |
 | M5 | TrenchBroom pipeline: game config, FGD, `.map` compiler, hot reload | ☐ | |
 | M6 | Combat core: hitboxes, lag comp, weapons, damage, armor, bleeding, loadouts | ☐ | |
@@ -110,9 +110,13 @@
 - Remote entity interpolation; simple capsule player models in team colors.
 - Full netgraph.
 - Headless bots (`pnpm bots`), demo recording (server snapshot stream) and playback (basic).
-- Deterministic pmove primer at match and prediction start, guarded by a late-branch native-ESM allocation workload (the M2 warm-up transient, `docs/10` §4).
+- Also in the approved M3 plan (its binding answers 2 and 4 for the cap and the extras): up to 64 players per match with a snapshot byte-budget scheduler (D-034, D-046); session security: per-session rate limits, strikes, handshake and idle timeouts, `sv_maxPerIp` and `sv_allowedOrigins` (D-041; M9 hardens them); rcon with its lockout, `sv_cheats` and CHEAT client cvars (D-042); demo playback with `[`/`]` player cycling and `pnpm demo-info` (D-044); several matches per server process (D-047).
+- Deterministic pmove primer at match and prediction start, guarded by a late-branch native-ESM allocation workload (the M2 warm-up transient, `docs/10` §4). Done in increment 12 (D-040): a no-retry multi-process guard with a primer-off control and a block-coverage guard, in `pnpm test:long`.
+- Load check (D-045): `pnpm test:load` runs NET-09 on the built server with 16 bots and the 16 bots + 1 human acceptance run with a headless Chromium stand-in, gated (host gate, nice 10 generators, 10 s metrics discard), and reports a 63-bot match and 4 matches × 16 bots; CI runs it in a `load` job that reports without blocking. Done in increment 18: all legs pass on the 4-vCPU VM, the 16 + 1 run's server GC (7.83 ms of 8) with the least margin (`docs/10` §4.1).
 
 **Out of scope:** combat, relevance culling (send everything in M3), WebTransport.
+
+**Records:** the approved plan and the design it builds on are `docs/design/M3-plan.md` and `docs/design/M3-design.md`.
 
 **Acceptance**
 - NET-01, 02, 04, 05, 07, 08 (bandwidth measured, even if relevance comes later), 09, 10, 12 pass.
@@ -205,7 +209,7 @@
 **Scope**
 - `WebTransportTransport` (datagrams) with WebSocket fallback + feature detection.
 - Relevance and visibility culling with hysteresis (`docs/05` §9); audio events for unseen players; cluster visibility from the compiler.
-- Server validation and strike system; rate limits.
+- Server validation and strike system; rate limits. M3 laid the basics (D-041: per-session token buckets, weighted strikes with a warning and a kick, handshake and idle timeouts, the neutral cmd for silent players, the hidden-tab keepalive, `sv_maxPerIp` and `sv_allowedOrigins` at the upgrade); M9 hardens them: temporary bans, limits per address across processes behind a proxy, `wss://`, tuning the ESTIMATEs on public servers, and (D-048) raw TCP connections capped per address, `maxConnections` and shorter header timeouts, a kicked socket terminated after a grace period and a per-address reconnect penalty.
 - Deployment (container image, one EU region), health checks, metrics endpoint, structured logs.
 - Crash/telemetry reporting (privacy-respecting), bandwidth/perf budgets in CI, 32-bot stress test, 24 h soak.
 

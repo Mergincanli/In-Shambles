@@ -47,6 +47,7 @@ Every frame should read like a panel from a European adventure album: flat, conf
   - one **sky treatment** (painted gradient bands or flat sky with ink clouds)
 - **Color pipeline:** light in linear space → tone map (neutral or none) → optional per-map LUT → sRGB output. Saturation is authored in the palette, never boosted globally in post.
 - **Team colors:** two default hues chosen for contrast against every map palette, plus colorblind presets (deuteranopia/protanopia/tritanopia). Each team also has a **shape cue** (e.g., stripes vs. chevrons on armbands) so color isn't the only signal.
+  - *Placeholder until M8* (D-034, ESTIMATE): M3's capsule players use orange `#d9652b` for team 1, blue `#2b8fd9` for team 2 and grey `#9a9a9a` for no team (`client/src/render/teamColors.ts`), a pair that reads apart for the common colour-vision deficiencies. This section still picks the real hues and the shape cue.
 
 ## 6. Lighting model
 

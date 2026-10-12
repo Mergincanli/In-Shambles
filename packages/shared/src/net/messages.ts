@@ -1,6 +1,5 @@
 import { PITCH_LIMIT_U16 } from "../math/angles";
 import { toSigned16 } from "../math/quant";
-import { PlayerState } from "../sim/playerState";
 import { BUTTON_MASK, MOVE_AXIS_MAX, UserCmd, WEAPON_SLOT_COUNT } from "../sim/usercmd";
 import { TICK_MAX, TICK_RATE } from "../time";
 import {
@@ -12,7 +11,6 @@ import {
   writeText,
 } from "./bitstream";
 import { CvarBlock, cvarBlockHash, decodeCvarBlock, encodeCvarBlock } from "./cvarBlock";
-import { decodePlayerState, encodePlayerState } from "./playerStateCodec";
 import {
   INPUT_MAX_CMDS,
   INPUT_TICK_BACK_MAX,
@@ -25,29 +23,27 @@ import {
   MSG_PONG,
   MSG_PRINT,
   MSG_READY,
-  MSG_SNAPSHOT,
   MSG_WELCOME,
   PRINT_ERROR,
   PROTOCOL_VERSION,
   SHORT_TEXT_MAX,
-  SNAP_FLAG_MASK,
   TEXT_MAX,
 } from "./protocol";
 
 /**
- * Protocol v1 messages (docs/05 §3.6, D-026): one fixed-shape struct per message and a codec
- * pair. The caller resets the writer, encodes one message and sends `w.byteLength` bytes; the
+ * Protocol messages (docs/05 §3.6, D-026; SNAPSHOT lives in snapshot.ts, D-033): one fixed-shape
+ * struct per message and a codec pair. The caller resets the writer, encodes one message and sends `w.byteLength` bytes; the
  * receiver resets a reader over the packet, switches on `peekMessageType` and decodes into a
  * struct it keeps.
  *
  * - `encodeX(w, msg)` returns false (the writer's error flag) when a field is out of the range its
  *   layout carries or the buffer is full: a sender bug, so the message is not sent.
  * - `decodeX(r, out)` returns false on a short read, a wrong type byte, any value the encoder
- *   never writes (origin past ±16384 u, pitch past ±16201, a tick past TICK_MAX, an INPUT count
- *   outside 1–4, a non-zero baseline in M2…) or bits left after the message's last byte. The caller
+ *   never writes (pitch past ±16201, a tick past TICK_MAX, an INPUT count outside 1–4…) or bits
+ *   left after the message's last byte. The caller
  *   drops the packet and counts a strike; `out` is then partial. Decoders never throw.
  *
- * INPUT, SNAPSHOT, PING and PONG encode and decode without allocating, rejected packets
+ * INPUT, PING and PONG encode and decode without allocating, rejected packets
  * included: ticks are read through `readTick`, so a hostile u32 never becomes a heap number. The
  * text and cvar-block fields of the reliable setup messages allocate (rare).
  */
@@ -57,7 +53,8 @@ export function peekMessageType(bytes: Uint8Array, length: number): number {
   return length >= 1 && bytes.length >= 1 ? (bytes[0] as number) : 0;
 }
 
-function writeTick(w: BitWriter, tick: number): void {
+/** A tick in 32 bits; past TICK_MAX (or not a u32) sets the writer's error flag. */
+export function writeTick(w: BitWriter, tick: number): void {
   if (tick > TICK_MAX) w.fail();
   w.writeBits(tick, 32);
 }
@@ -71,7 +68,7 @@ const TICK_HI_MAX = TICK_MAX >>> 16;
  * small integer (V8's are 31 bits under pointer compression), so returning one from a reader
  * call V8 doesn't inline, or storing it, would allocate a heap number for every hostile packet.
  */
-function readTick(r: BitReader): number {
+export function readTick(r: BitReader): number {
   const lo = r.readBits(16);
   const hi = r.readBits(16);
   if (hi > TICK_HI_MAX) return -1;
@@ -278,66 +275,6 @@ export function decodeInput(r: BitReader, out: InputMsg): boolean {
     c.weaponSlot = r.readBits(8);
     if (!cmdInRange(c)) return false;
   }
-  return r.atEnd();
-}
-
-// ---------------------------------------------------------------------------------------------
-// SNAPSHOT S→C (unreliable): serverTick u32, baselineTick u32 (0 = full; always 0 in M2),
-// lastProcessedCmdTick u32, inputBufferHealth i8, cvarHash u16, flags u8 (SNAP_FLAG_*), then the
-// PlayerState (playerStateCodec.ts). 335 bits, 42 B.
-
-export class SnapshotMsg {
-  serverTick = 0;
-  baselineTick = 0;
-  /** The tick of the last cmd the server simulated for this client (docs/05 §4.2). */
-  lastProcessedCmdTick = 0;
-  /** Newest received cmd tick − the tick simulated, clamped to i8 (docs/05 §8.2). */
-  inputBufferHealth = 0;
-  /** Low 16 bits of the replicated cvar hash the server simulated this tick with. */
-  cvarHash = 0;
-  /** SNAP_FLAG_* bits. */
-  flags = 0;
-  readonly state = new PlayerState();
-}
-
-export function encodeSnapshot(w: BitWriter, m: SnapshotMsg): boolean {
-  w.writeBits(MSG_SNAPSHOT, 8);
-  writeTick(w, m.serverTick);
-  // M2 sends full snapshots only (D-026); delta baselines are M3.
-  if (m.baselineTick !== 0) w.fail();
-  w.writeBits(m.baselineTick, 32);
-  writeTick(w, m.lastProcessedCmdTick);
-  w.writeSigned(m.inputBufferHealth, 8);
-  w.writeBits(m.cvarHash, 16);
-  if ((m.flags & ~SNAP_FLAG_MASK) !== 0) w.fail();
-  w.writeBits(m.flags, 8);
-  encodePlayerState(w, m.state);
-  return !w.error;
-}
-
-export function decodeSnapshot(r: BitReader, out: SnapshotMsg): boolean {
-  if (r.readBits(8) !== MSG_SNAPSHOT) return false;
-  const serverTick = readTick(r);
-  const baselineTick = readTick(r);
-  const lastProcessedCmdTick = readTick(r);
-  const health = r.readSigned(8);
-  const cvarHash = r.readBits(16);
-  const flags = r.readBits(8);
-  if (
-    serverTick < 0 ||
-    baselineTick !== 0 ||
-    lastProcessedCmdTick < 0 ||
-    (flags & ~SNAP_FLAG_MASK) !== 0
-  ) {
-    return false;
-  }
-  out.serverTick = serverTick;
-  out.baselineTick = baselineTick;
-  out.lastProcessedCmdTick = lastProcessedCmdTick;
-  out.inputBufferHealth = health;
-  out.cvarHash = cvarHash;
-  out.flags = flags;
-  if (!decodePlayerState(r, out.state)) return false;
   return r.atEnd();
 }
 

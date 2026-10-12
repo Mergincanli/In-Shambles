@@ -71,6 +71,24 @@ describe("InputQueue", () => {
     expect(counters(q)).toEqual({ accepted: 0, duplicates: 0, late: 2, early: 0 });
   });
 
+  it("skips a tick without taking its cmd: later copies for it are duplicates, not late", () => {
+    // A respawn's spawn tick is not simulated (M3 design §2.4): the queue closes it with skip.
+    const q = new InputQueue();
+    q.reset(10);
+    expect(q.push(cmdAt(10))).toBe(true);
+    expect(q.push(cmdAt(11, 5))).toBe(true);
+    q.skip(10);
+    q.skip(12);
+    expect(q.next).toBe(13);
+    // The cmd for 12 arrives after its tick was closed: a duplicate, like the second copy of 10's.
+    expect(q.push(cmdAt(12))).toBe(false);
+    expect(q.push(cmdAt(10))).toBe(false);
+    const out = new UserCmd();
+    expect(q.take(10, out)).toBe(false);
+    expect(q.take(12, out)).toBe(false);
+    expect(counters(q)).toEqual({ accepted: 2, duplicates: 2, late: 0, early: 0 });
+  });
+
   it("counts copies of cmds already simulated as duplicates, not late", () => {
     // A lossless link with 4× redundancy, cmds two ticks ahead: every cmd arrives four times, the
     // last copies after its tick was simulated. Nothing is late.

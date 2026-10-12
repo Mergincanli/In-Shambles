@@ -40,8 +40,9 @@ export function actionOf(command: string): number {
 }
 
 /**
- * The defaults (M2 design §2). No Ctrl binds: the browser keeps Ctrl+W and its kin for itself.
- * Sprint and attack are bound so the keys already feel right; both stay inert in M2.
+ * The defaults (M2 design §2; the brackets M3 design §2.12). No Ctrl binds: the browser keeps
+ * Ctrl+W and its kin for itself. Sprint and attack are bound so the keys already feel right; both
+ * stay inert in M2.
  */
 export const DEFAULT_BINDS: readonly (readonly [code: string, command: string])[] = Object.freeze([
   ["KeyW", "+forward"],
@@ -54,6 +55,9 @@ export const DEFAULT_BINDS: readonly (readonly [code: string, command: string])[
   ["ShiftLeft", "+sprint"],
   ["Mouse0", "+attack"],
   ["Backquote", "toggleconsole"],
+  // Demo playback's player cycling (D-044); elsewhere they say they are for demos.
+  ["BracketRight", "follownext"],
+  ["BracketLeft", "followprev"],
 ]);
 
 /** The command that opens and closes the console; it works with the console's input focused. */

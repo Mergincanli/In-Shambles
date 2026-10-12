@@ -4,6 +4,7 @@ import type { RenderStats } from "../hud/renderStats";
 import { FirstPersonCamera } from "./camera";
 import { DebugDraw } from "./debug/debugDraw";
 import { GreyboxMaterials, type GridCanvas } from "./materials";
+import { PlayerCapsules } from "./players";
 import { toThreeDir } from "./space";
 import { buildWorldMesh, type WorldMesh } from "./world";
 
@@ -25,15 +26,17 @@ export function webglAvailable(): boolean {
 }
 
 /**
- * The scene and its WebGL renderer (M2 design §2 "World"): the map's greybox meshes, a hemisphere
- * plus a directional light (no shadows), and the first-person camera. It only reads what the game
- * hands it each frame; nothing here touches the simulation.
+ * The scene and its WebGL renderer (M2 design §2 "World"): the map's greybox meshes, the other
+ * players' capsules, a hemisphere plus a directional light (no shadows), and the first-person
+ * camera. It only reads what the game hands it each frame; nothing here touches the simulation.
  */
 export class GameRenderer implements RenderStats {
   readonly scene = new Scene();
   readonly view = new FirstPersonCamera();
   /** The `r_debug*` lines (game.ts fills them each frame). */
   readonly debug = new DebugDraw();
+  /** The other players (game.ts updates them from its `RemoteView` each frame). */
+  readonly players = new PlayerCapsules();
   private world: WorldMesh | null = null;
   private materials: GreyboxMaterials | null = null;
 
@@ -50,6 +53,7 @@ export class GameRenderer implements RenderStats {
     this.scene.add(sun);
     this.scene.add(sun.target);
     this.scene.add(this.debug.object);
+    this.scene.add(this.players.object);
   }
 
   /**
@@ -130,6 +134,7 @@ export class GameRenderer implements RenderStats {
   dispose(): void {
     this.unloadMap();
     this.debug.dispose();
+    this.players.dispose();
     this.gl.dispose();
   }
 }

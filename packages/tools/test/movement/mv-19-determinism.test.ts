@@ -1,6 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PMOVE_PRIMER_TICKS, PmoveParams, pmovePrimed, primePmove } from "@game/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { coursePath } from "../../src/scenarios/course";
 import {
@@ -11,16 +12,19 @@ import {
   runDeterminismProbe,
 } from "../../src/scenarios/determinismProbe";
 import { logMeasured } from "../../src/scenarios/metrics";
-import {
-  bundleProbeWithServerBuild,
-  bundleProbeWithVite,
-  runProbeBundle,
-} from "../../src/scenarios/probeBuilds";
+import { bundleProbeWithServerBuild, runProbeBundle } from "../../src/scenarios/probeBuilds";
+
+/** The first line `packages/server/build.mjs` writes into every bundle (its esbuild banner). */
+const SERVER_BUILD_BANNER =
+  /^import \{ createRequire as __createRequire \} from "node:module"; const require = __createRequire\(import\.meta\.url\);\n/;
 
 // docs/03 §8 MV-19, M2 design §5: the same inputs give bit-identical states over 10k ticks, run
 // twice and across the client and server builds. A seeded sticky cmd stream on movement_lab, with
 // a teleport to the next anchor every 1000 ticks, is digested every tick. The browser leg is the
-// pmove vectors, which `pnpm test:browser` replays in Chromium, Firefox and WebKit (D-022).
+// pmove vectors, which `pnpm test:browser` replays in Chromium, Firefox and WebKit (D-022). Tiers
+// (D-032): the client build's leg (Vite library mode) runs in `pnpm test:long`; `pnpm test:movement`
+// runs both. The pmove primer (D-040) leaves the digests unchanged: a run after a full primer pass
+// matches the first.
 
 const cmapPath = coursePath("movement_lab");
 const bytes = () => new Uint8Array(readFileSync(cmapPath));
@@ -45,6 +49,14 @@ describe("MV-19: determinism across runs and builds", () => {
     expect(again).toEqual(reference);
     expect(reference.checkpoints).toHaveLength(MV19_TICKS / MV19_TELEPORT_TICKS);
     expect(reference.digest).toBe(first[MV19_TICKS - 1]);
+  });
+
+  it("gives the same digest every tick after a full pmove primer pass (D-040: the primer is inert)", () => {
+    expect(pmovePrimed()).toBe(false);
+    primePmove(new PmoveParams(), PMOVE_PRIMER_TICKS);
+    const primed = new Uint32Array(MV19_TICKS);
+    expect(runDeterminismProbe(bytes(), MV19_TICKS, primed)).toEqual(reference);
+    expect(firstDifference(first, primed)).toBe(-1);
   });
 
   it("the stream reaches every mode the courses offer", () => {
@@ -75,14 +87,15 @@ describe("MV-19: determinism across runs and builds", () => {
       if (outDir !== "") rmSync(outDir, { recursive: true, force: true, maxRetries: 5 });
     });
 
-    it.each([
-      ["the server's esbuild build", async () => bundleProbeWithServerBuild(outDir)],
-      ["Vite library mode, minified", () => bundleProbeWithVite(outDir)],
-    ])(
+    // Vite library mode, minified (the client's build), is the long tier's (D-032,
+    // `packages/tools/long/mv-19-determinism.long.ts`).
+    it.each([["the server's esbuild build", async () => bundleProbeWithServerBuild(outDir)]])(
       "%s gives the same digests",
       async (_name, bundle) => {
         const file = await bundle();
-        const source = readFileSync(file, "utf8");
+        // The server build starts every bundle with a `require` for its CommonJS dependencies
+        // (ws; packages/server/build.mjs): build preamble, not part of the sim.
+        const source = readFileSync(file, "utf8").replace(SERVER_BUILD_BANNER, "");
         // The sim is inside the bundle, and it needs nothing from Node.
         expect(source).not.toMatch(/@game\/shared|["']node:/);
         expect(runProbeBundle(file, cmapPath)).toEqual(reference);

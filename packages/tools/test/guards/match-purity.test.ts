@@ -106,7 +106,8 @@ describe("server match purity guard", () => {
     ) as { include: string[] };
     expect(config.include.sort()).toEqual(["src/index.ts", "src/match"]);
     const pkg = JSON.parse(readFileSync(fromRoot("packages", "server", "package.json"), "utf8"));
-    expect(pkg.exports).toEqual({ ".": "./src/index.ts" });
+    // The one other entry is the Node host (M3 design §1), outside the scanned match code.
+    expect(pkg.exports).toEqual({ ".": "./src/index.ts", "./node": "./src/node/index.ts" });
     expect(pkg.scripts.typecheck).toContain("tsconfig.match.json");
   });
 });

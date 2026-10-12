@@ -9,11 +9,15 @@ import {
   copyUserCmd,
   decodeCmap,
   decodeCvars,
+  decodeEvents,
   decodeKick,
   decodePong,
   decodePrint,
-  decodeSnapshot,
+  decodeSnapshotBody,
+  decodeSnapshotHeader,
   decodeWelcome,
+  EventRecord,
+  EventsMsg,
   encodeCmd,
   encodeHello,
   encodeInput,
@@ -22,21 +26,25 @@ import {
   HelloMsg,
   InputMsg,
   KickMsg,
-  type LoopbackEndpoint,
   MAX_RELIABLE_BYTES,
   MSG_CVARS,
+  MSG_EVENTS,
   MSG_KICK,
   MSG_PONG,
   MSG_PRINT,
   MSG_SNAPSHOT,
   MSG_WELCOME,
   PingMsg,
+  PlayerState,
   PongMsg,
   PrintMsg,
   peekMessageType,
-  SnapshotMsg,
+  SnapshotHeader,
+  slotToPlayerState,
+  type Transport,
   type UserCmd,
   WelcomeMsg,
+  WorldFrame,
 } from "@game/shared";
 
 /** A committed greybox course, decoded with hash verification (content/maps). */
@@ -47,25 +55,72 @@ export function loadMap(name: string): Cmap {
 
 export const TEST_BUILD = "test-build";
 
+/** A decoded v2 snapshot (D-033) as the receiver holds it: the header, the frame, its own state. */
+export class TestSnapshot {
+  readonly header = new SnapshotHeader();
+  readonly frame = new WorldFrame();
+  /** The receiver's state, from its slot (the local block). */
+  readonly state = new PlayerState();
+
+  get serverTick(): number {
+    return this.header.serverTick;
+  }
+  get flags(): number {
+    return this.header.flags;
+  }
+  get inputBufferHealth(): number {
+    return this.header.inputBufferHealth;
+  }
+  get cvarHash(): number {
+    return this.header.cvarHash;
+  }
+  get teleportSeq(): number {
+    return this.header.teleportSeq;
+  }
+  /** 0 for a full snapshot, else serverTick − the baseline's tick (D-038). */
+  get baseBack(): number {
+    return this.header.baseBack;
+  }
+  /** The ids of the other players the snapshot lists, ascending. */
+  get entities(): number[] {
+    const ids: number[] = [];
+    for (let s = 0; s < this.frame.present.length; s++) {
+      if (this.frame.present[s] === 1 && s !== this.clientId) ids.push(s);
+    }
+    return ids;
+  }
+
+  constructor(readonly clientId: number) {}
+}
+
 /**
- * A scripted client on one end of a loopback pair: encodes what a test sends and decodes, into
- * fresh copies, everything the match sends back.
+ * A scripted client on any transport (one end of a loopback pair, or a real WebSocket in the Node
+ * server tests): encodes what a test sends and decodes, into fresh copies, everything the match
+ * sends back.
  */
 export class TestClient {
   readonly welcomes: WelcomeMsg[] = [];
-  readonly snapshots: SnapshotMsg[] = [];
+  readonly snapshots: TestSnapshot[] = [];
   readonly pongs: PongMsg[] = [];
   readonly cvars: CvarsMsg[] = [];
   readonly prints: PrintMsg[] = [];
   readonly kicks: KickMsg[] = [];
+  /** Every EVENTS record received, in order (copies), and the EVENTS messages' counts (D-043). */
+  readonly events: EventRecord[] = [];
+  readonly eventMessages: number[] = [];
+  /** When set, every message's type byte in arrival order (opt-in: long runs would grow it). */
+  typeLog: number[] | null = null;
   /** Packets that did not decode (the match must never send one). */
   bad = 0;
+  /** Deltas whose baseline this client never decoded (the match must never send one). */
+  noBaseline = 0;
   closed: string | null = null;
   private readonly w = new BitWriter(MAX_RELIABLE_BYTES);
   private readonly r = new BitReader();
+  private readonly eventsIn = new EventsMsg();
   private packetSeq = 0;
 
-  constructor(readonly transport: LoopbackEndpoint) {
+  constructor(readonly transport: Transport) {
     transport.onMessage((d, len) => this.receive(d, len));
     transport.onClose((reason) => {
       this.closed = reason;
@@ -125,7 +180,7 @@ export class TestClient {
     this.transport.poll();
   }
 
-  lastSnapshot(): SnapshotMsg {
+  lastSnapshot(): TestSnapshot {
     const s = this.snapshots.at(-1);
     if (s === undefined) throw new Error("no snapshot yet");
     return s;
@@ -135,15 +190,32 @@ export class TestClient {
     const r = this.r;
     r.reset(d, len);
     const type = peekMessageType(d, len);
+    this.typeLog?.push(type);
     let ok = false;
     if (type === MSG_WELCOME) {
       const m = new WelcomeMsg();
       ok = decodeWelcome(r, m);
       if (ok) this.welcomes.push(m);
     } else if (type === MSG_SNAPSHOT) {
-      const m = new SnapshotMsg();
-      ok = decodeSnapshot(r, m);
-      if (ok) this.snapshots.push(m);
+      // Decoded as the client WELCOME named (none yet: refused as bad); a delta against the
+      // frame this client decoded for its baseline tick (D-038).
+      const id = this.welcomes.at(-1)?.clientId ?? -1;
+      const m = new TestSnapshot(id);
+      ok = decodeSnapshotHeader(r, m.header);
+      let base: WorldFrame | null = null;
+      if (ok && m.header.baseBack !== 0) {
+        const tick = m.header.serverTick - m.header.baseBack;
+        base = this.snapshots.findLast((x) => x.serverTick === tick)?.frame ?? null;
+        if (base === null) {
+          this.noBaseline++;
+          return;
+        }
+      }
+      ok = ok && decodeSnapshotBody(r, m.header, base, id, m.frame);
+      if (ok) {
+        slotToPlayerState(m.frame, id, m.state);
+        this.snapshots.push(m);
+      }
     } else if (type === MSG_PONG) {
       const m = new PongMsg();
       ok = decodePong(r, m);
@@ -160,6 +232,14 @@ export class TestClient {
       const m = new KickMsg();
       ok = decodeKick(r, m);
       if (ok) this.kicks.push(m);
+    } else if (type === MSG_EVENTS) {
+      const m = this.eventsIn;
+      ok = decodeEvents(r, m);
+      if (ok) {
+        this.eventMessages.push(m.count);
+        for (let i = 0; i < m.count; i++)
+          this.events.push(Object.assign(new EventRecord(), m.events[i]));
+      }
     }
     if (!ok) this.bad++;
   }

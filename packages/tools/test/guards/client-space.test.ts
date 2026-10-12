@@ -16,6 +16,9 @@ const FORBIDDEN: (readonly [string, RegExp])[] = [
     "camera orientation",
     /\.up\s*\.\s*set\b|\.lookAt\s*\(|\.quaternion\s*\.\s*setFrom|\.setRotationFrom/,
   ],
+  // Instance placement (the remote capsules) writes its matrices through space.ts's
+  // uprightToThree; composing or rotating a matrix by hand would be a second conversion.
+  ["matrix placement", /\.setMatrixAt\s*\(|\.compose\s*\(|\.makeRotation[XYZ]\s*\(/],
 ];
 
 function violations(source: string): string[] {
@@ -38,6 +41,9 @@ describe("client space guard", () => {
     ["camera.lookAt(target);", "camera orientation"],
     ["cam.quaternion.setFromEuler(e);", "camera orientation"],
     ["cam.setRotationFromEuler(e);", "camera orientation"],
+    ["mesh.setMatrixAt(i, m);", "matrix placement"],
+    ["m.compose(p, q, s);", "matrix placement"],
+    ["m.makeRotationY(yaw);", "matrix placement"],
   ])("flags %j", (source, label) => {
     expect(violations(source)).toContain(label);
   });

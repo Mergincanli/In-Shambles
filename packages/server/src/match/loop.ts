@@ -19,8 +19,10 @@ export class LoopStats {
   ticks = 0;
   /** Ticks dropped after stalls. */
   dropped = 0;
-  /** Host wakes, including early ones that ran no tick. */
+  /** Host wakes, including early ones that ran no tick and late ones that yielded. */
   wakes = 0;
+  /** Late wakes (two or more ticks due) that yielded to the host's I/O before catching up. */
+  yields = 0;
   /** Milliseconds spent inside `tick()` calls, summed, and the longest single wake's share. */
   readonly busyMs = new Float64Array(2);
 }
@@ -31,6 +33,19 @@ export class LoopStats {
  * the loop started, runs those not yet accounted for (at most MAX_CATCHUP_TICKS; then it drops
  * the rest with one warning, so less than a tick stays owed), and asks to be woken when the next
  * tick is due. A wake that comes early runs nothing and re-arms.
+ *
+ * A wake that finds two or more ticks due came a tick or more late (the host stalled). It runs
+ * nothing yet and yields: it re-arms at 0 ms and the next wake runs what is due by then, so input
+ * that arrived while the loop was late is delivered first and the catch-up ticks have the cmds
+ * clients sent on time. Node runs an overdue timer before the socket reads that piled up while
+ * JS was blocked (a GC, a long I/O or signal callback, a stall inside a wake) or the process was
+ * SIGSTOPped; without the yield every catch-up tick past the input buffer then repeated a cmd
+ * (starved) that was already waiting in the socket. (A process descheduled while idle in
+ * epoll_wait reads its I/O first anyway; the yield costs nothing there but the delay.) A host's
+ * 0 ms timer (Node's 1 ms `setTimeout`, a browser's 0–4 ms one) runs after the I/O and messages
+ * already queued; the cost is that delay on a wake that is a tick late anyway. A browser that
+ * throttles a hidden page's timers to about 1 s makes every wake yield, so the catch-up runs one
+ * throttle period later; offline play only, where those ticks are dropped anyway.
  *
  * The accumulator is the elapsed time since start, not a running sum of wake intervals, so
  * rounding never adds up: a second of wall time is exactly 60 ticks however the wakes fall. Tick
@@ -50,6 +65,8 @@ export class MatchLoop {
   private armed = false;
   /** Bumped by start(), so a wake notices a restart made from inside one of its ticks. */
   private generation = 0;
+  /** The last wake was late and yielded: this one runs the ticks due (it never yields twice). */
+  private yielded = false;
   private readonly wakeCb: () => void;
 
   constructor(
@@ -66,6 +83,7 @@ export class MatchLoop {
     this.generation++;
     this.time[0] = this.host.now();
     this.accounted = 0;
+    this.yielded = false;
     // After stop(), a wake may still be pending: it re-arms for the new start instead.
     if (!this.armed) this.arm();
   }
@@ -117,6 +135,15 @@ export class MatchLoop {
     stats.wakes++;
     t[1] = host.now();
     const due = this.dueBy() - this.accounted;
+    if (due > 1 && !this.yielded) {
+      // Late by a tick or more: let the host deliver what arrived meanwhile, then catch up.
+      this.yielded = true;
+      stats.yields++;
+      this.armed = true;
+      host.schedule(this.wakeCb, 0);
+      return;
+    }
+    this.yielded = false;
     let ran = 0;
     while (ran < due && ran < MAX_CATCHUP_TICKS && this.running && this.generation === gen) {
       this.target.tick();

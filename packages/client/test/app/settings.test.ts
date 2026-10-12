@@ -1,4 +1,4 @@
-import { CvarRegistry, registerPmoveCvars } from "@game/shared";
+import { CvarRegistry, registerPmoveCvars, registerServerReplicatedCvars } from "@game/shared";
 import { describe, expect, it } from "vitest";
 import {
   applySettings,
@@ -9,12 +9,13 @@ import {
   SettingsSaver,
   type SettingsStorage,
 } from "../../src/app/settings";
-import { Binds } from "../../src/console/binds";
+import { Binds, DEFAULT_BINDS } from "../../src/console/binds";
 import { registerClientCvars } from "../../src/console/clientCvars";
 
 function registry(): CvarRegistry {
   const reg = new CvarRegistry();
   registerPmoveCvars(reg);
+  registerServerReplicatedCvars(reg);
   registerClientCvars(reg);
   return reg;
 }
@@ -52,7 +53,7 @@ describe("settings (ARCHIVE cvars and binds in localStorage)", () => {
     const s = captureSettings(reg, binds);
     expect(s.cvars).toEqual({ sensitivity: "2.5", cl_netgraph: "true" });
     expect(s.binds).toContainEqual(["KeyQ", "+jump"]);
-    expect(s.binds).toHaveLength(11);
+    expect(s.binds).toHaveLength(DEFAULT_BINDS.length + 1);
   });
 
   it("round-trip through storage, and save only after a change", () => {
@@ -181,5 +182,83 @@ describe("settings (ARCHIVE cvars and binds in localStorage)", () => {
     refuse = false;
     expect(saver.maybeSave()).toBe(true);
     expect(JSON.parse(storage.items.get(SETTINGS_KEY) ?? "{}").cvars).toEqual({ sensitivity: "3" });
+  });
+});
+
+describe("CHEAT cvars in saved settings (D-042)", () => {
+  /** Storage holding third person on, as an offline session (sv_cheats 1) saved it. */
+  function saved(): MemoryStorage {
+    const storage = new MemoryStorage();
+    storage.setItem(
+      SETTINGS_KEY,
+      JSON.stringify({
+        version: SETTINGS_VERSION,
+        cvars: { cl_thirdPerson: "true", sensitivity: "3" },
+      }),
+    );
+    storage.writes = 0;
+    return storage;
+  }
+
+  it("hold a stored CHEAT value while cheats are off, without a warning, and restore it on", () => {
+    const storage = saved();
+    const reg = registry();
+    const binds = new Binds();
+    const held = {};
+    expect(loadSettings(storage, reg, binds, held)).toEqual([]);
+    expect([reg.get("cl_thirdPerson"), reg.get("sensitivity")]).toEqual([false, 3]);
+    expect(held).toEqual({ cl_thirdPerson: "true" });
+    const saver = new SettingsSaver(storage, reg, binds, held);
+    saver.restoreCheats();
+    expect(reg.get("cl_thirdPerson")).toBe(false);
+    // A block with sv_cheats 1 (ClientSim), then the page's hook.
+    reg.setAllowCheats(true);
+    saver.restoreCheats();
+    expect(reg.get("cl_thirdPerson")).toBe(true);
+  });
+
+  it("never write the reset that turning cheats off makes", () => {
+    const storage = saved();
+    const reg = registry();
+    const binds = new Binds();
+    const held = {};
+    loadSettings(storage, reg, binds, held);
+    const saver = new SettingsSaver(storage, reg, binds, held);
+    // While off, any later save keeps the held value as it was stored.
+    reg.set("sensitivity", 4);
+    expect(saver.maybeSave()).toBe(true);
+    const stored = () => JSON.parse(storage.getItem(SETTINGS_KEY) ?? "{}").cvars;
+    expect(stored()).toEqual({ cl_thirdPerson: "true", sensitivity: "4" });
+    // On: the player turns the hull on too; the save records both.
+    reg.setAllowCheats(true);
+    saver.restoreCheats();
+    reg.set("r_debugHull", true);
+    saver.maybeSave();
+    expect(stored()).toMatchObject({ cl_thirdPerson: "true", r_debugHull: "true" });
+    // Off again (a dedicated server): the views reset in memory, and storage keeps the choice.
+    reg.setAllowCheats(false);
+    expect([reg.get("cl_thirdPerson"), reg.get("r_debugHull")]).toEqual([false, false]);
+    reg.set("sensitivity", 5);
+    saver.maybeSave();
+    expect(stored()).toEqual({ cl_thirdPerson: "true", r_debugHull: "true" });
+    // A view turned back off while cheats are on is dropped from storage and from the held set.
+    reg.setAllowCheats(true);
+    saver.restoreCheats();
+    reg.set("r_debugHull", false);
+    saver.maybeSave();
+    reg.setAllowCheats(false);
+    reg.set("sensitivity", 6);
+    saver.maybeSave();
+    expect(stored()).toEqual({ cl_thirdPerson: "true", sensitivity: "6" });
+  });
+
+  it("never store rcon_password", () => {
+    const reg = registry();
+    reg.set("rcon_password", "hunter2");
+    expect(captureSettings(reg, new Binds()).cvars).toEqual({});
+    expect(
+      applySettings({ version: SETTINGS_VERSION, cvars: { rcon_password: "x" } }, reg, new Binds()),
+    ).toEqual(["settings: skipped rcon_password"]);
+    expect(reg.get("rcon_password")).toBe("hunter2");
   });
 });

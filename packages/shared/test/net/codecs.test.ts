@@ -2,13 +2,20 @@ import { describe, expect, it } from "vitest";
 import { PITCH_LIMIT_U16 } from "../../src/math/angles";
 import type { BitWriter } from "../../src/net/bitstream";
 import {
+  decodeEvents,
+  EVENTS_MAX_PER_MSG,
+  type EventRecord,
+  EventsMsg,
+  encodeEvents,
+  eventBits,
+} from "../../src/net/events";
+import {
   CvarsMsg,
   decodeCvars,
   decodeHello,
   decodeInput,
   decodePong,
   decodePrint,
-  decodeSnapshot,
   decodeWelcome,
   encodeCvars,
   encodeHello,
@@ -17,7 +24,6 @@ import {
   encodePong,
   encodePrint,
   encodeReady,
-  encodeSnapshot,
   encodeWelcome,
   HelloMsg,
   InputMsg,
@@ -26,18 +32,64 @@ import {
   PrintMsg,
   peekHelloVersion,
   peekMessageType,
-  SnapshotMsg,
   WelcomeMsg,
+  writeTick,
 } from "../../src/net/messages";
+import { PLAYER_STATE_BITS } from "../../src/net/playerStateCodec";
 import {
+  EV_LEAVE_KICKED,
+  EV_LEAVE_TIMED_OUT,
+  EVK_PLAYER_JOIN,
+  EVK_PLAYER_LEAVE,
+  EVK_SERVER_STATS,
   INPUT_MAX_CMDS,
+  MAX_RELIABLE_BYTES,
+  MAX_SNAPSHOT_BYTES,
+  MAX_SPECTATOR_SNAPSHOT_BYTES,
   MAX_UNRELIABLE_BYTES,
+  MSG_EVENTS,
   MSG_INPUT,
   MSG_SNAPSHOT,
   MSG_TYPE_MAX,
   PROTOCOL_VERSION,
+  SNAP_FLAG_DEFERRED,
+  SNAP_FLAG_SPECTATOR,
+  SNAP_FLAG_STARVED,
 } from "../../src/net/protocol";
+import {
+  decodeSnapshotBody,
+  decodeSnapshotHeader,
+  ENTITY_DELTA_MAX_BITS,
+  ENTITY_NEW_BITS,
+  ENTITY_REMOVED_BITS,
+  encodeSnapshot,
+  entityRecordBits,
+  LOCAL_DELTA_MAX_BITS,
+  localBlockBits,
+  SNAP_DEFERRED_COUNT_BITS,
+  SNAP_DEFERRED_ID_BITS,
+  SNAP_DELTA_FIXED_BITS,
+  SNAP_ENTITY_COUNT_BITS,
+  SNAP_FIT_MAX_PLAYERS,
+  SNAP_FULL_FIXED_BITS,
+  SNAP_HEADER_BITS,
+  SNAP_MAX_STALENESS,
+  SNAP_MIN_CAPACITY,
+  SNAP_MIN_CAPACITY_FULL,
+  SNAP_SPECTATOR_HEADER_BITS,
+  SnapshotHeader,
+} from "../../src/net/snapshot";
+import {
+  copySlot,
+  FRAME_SLOTS,
+  frameDigest,
+  playerStateToSlot,
+  slotToPlayerState,
+  WorldFrame,
+} from "../../src/net/worldFrame";
 import { Mulberry32 } from "../../src/rng/mulberry32";
+import { ENTITY_FLAG_MASK, TEAM_1 } from "../../src/sim/entity";
+import { PMEV_JUMP, PMEV_LAND, PMEV_STEP } from "../../src/sim/events";
 import {
   copyPlayerState,
   PlayerState,
@@ -47,44 +99,26 @@ import {
 import { copyUserCmd, sanitizeUserCmd, UserCmd } from "../../src/sim/usercmd";
 import { TICK_MAX } from "../../src/time";
 import {
+  decodeEverywhere,
+  expectBitFlipsSafe,
+  expectCorruptionsSafe,
+  expectTruncationsRefused,
+  FAST_FUZZ,
+  hex,
+} from "../helpers/codecFuzz";
+import {
+  decodeSnapshotParts,
+  encodeSnapshotParts,
+  LIVE_FULL_MAX_OTHERS,
   MESSAGE_KINDS,
-  type MessageKind,
   newWriter,
   randomCmdFields,
-  randomState,
+  randomFrame,
+  randomSnapshot,
   readerOver,
+  SNAP_SELF,
+  SnapshotParts,
 } from "../helpers/netMessages";
-
-function hex(bytes: Uint8Array): string {
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-function kindOf(type: number): MessageKind {
-  const k = MESSAGE_KINDS.find((m) => m.type === type);
-  if (k === undefined) throw new Error(`no kind ${type}`);
-  return k;
-}
-
-/**
- * Decodes `bytes` with every decoder; whichever accepts it must re-encode it, and byte for byte
- * (so an accepted packet is exactly what an encoder writes: every value in range and canonical).
- * A decoder that accepts what its encoder refuses fails the test. Returns how many decoders
- * accepted it.
- */
-function decodeEverywhere(bytes: Uint8Array, length: number, w: BitWriter): number {
-  let accepted = 0;
-  for (const k of MESSAGE_KINDS) {
-    if (!k.decode(readerOver(bytes, length))) continue;
-    accepted++;
-    expect(k.type).toBe(bytes[0]);
-    expect(
-      k.decodeAndReencode(readerOver(bytes, length), w),
-      `${k.name} accepted a packet its encoder refuses: ${hex(bytes.subarray(0, length))}`,
-    ).toBe(true);
-    expect(hex(w.bytes.subarray(0, w.byteLength))).toBe(hex(bytes.subarray(0, length)));
-  }
-  return accepted;
-}
 
 /** `bytes` with the `width` bits at bit `offset` replaced by `value` (LSB-first), as a copy. */
 function patchBits(bytes: Uint8Array, offset: number, width: number, value: number): Uint8Array {
@@ -106,6 +140,10 @@ function encodedBy(encode: (w: BitWriter) => boolean): Uint8Array {
 
 const kinds = MESSAGE_KINDS.map((k) => [k.name, k] as const);
 
+// Tiers (D-032): the truncation, bit-flip and corruption fuzz runs the same seeds with smaller
+// counts here (FAST_FUZZ); `packages/shared/long/net-01-codec-fuzz.long.ts` runs the full counts
+// (FULL_FUZZ) in `pnpm test:long` under its own describe, and `pnpm test:net` runs both.
+
 describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", () => {
   it("covers every message type", () => {
     expect(MESSAGE_KINDS.map((k) => k.type).sort((a, b) => a - b)).toEqual(
@@ -124,48 +162,92 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
       }
     });
 
-    it("SNAPSHOT: every field and the state come back bit for bit", () => {
+    it("SNAPSHOT: the header, the local block and every record come back bit for bit", () => {
       const rng = new Mulberry32(0x5a4b);
       const w = newWriter();
-      const m = new SnapshotMsg();
-      const out = new SnapshotMsg();
-      for (let i = 0; i < 2000; i++) {
-        m.serverTick = rng.nextInt(0x200000) * 512;
-        m.lastProcessedCmdTick = Math.max(0, m.serverTick - 3);
-        m.inputBufferHealth = rng.nextInt(256) - 128;
-        m.cvarHash = rng.nextInt(0x10000);
-        m.flags = rng.nextInt(4);
-        randomState(rng, m.state);
+      const m = new SnapshotParts();
+      const out = new SnapshotParts(m.base);
+      let deltas = 0;
+      let deferredSnapshots = 0;
+      const sent = new PlayerState();
+      const got = new PlayerState();
+      for (let i = 0; i < 1500; i++) {
+        randomSnapshot(rng, m);
         w.reset();
-        expect(encodeSnapshot(w, m)).toBe(true);
-        expect(w.byteLength).toBe(42);
-        expect(decodeSnapshot(readerOver(w.bytes, w.byteLength), out)).toBe(true);
-        expect([out.serverTick, out.baselineTick, out.lastProcessedCmdTick]).toEqual([
-          m.serverTick,
-          0,
-          m.lastProcessedCmdTick,
+        expect(encodeSnapshotParts(w, m)).toBe(true);
+        expect(decodeSnapshotParts(readerOver(w.bytes, w.byteLength), out)).toBe(true);
+        const h = m.hdr;
+        const spectator = (h.flags & SNAP_FLAG_SPECTATOR) !== 0;
+        expect([out.hdr.serverTick, out.hdr.baseBack, out.hdr.flags, out.hdr.cvarHash]).toEqual([
+          h.serverTick,
+          h.baseBack,
+          h.flags,
+          h.cvarHash,
         ]);
-        expect([out.inputBufferHealth, out.cvarHash, out.flags]).toEqual([
-          m.inputBufferHealth,
-          m.cvarHash,
-          m.flags,
-        ]);
-        expect(playerStateEquals(out.state, m.state)).toBe(true);
-        for (let a = 0; a < 3; a++) {
-          expect(Object.is(out.state.origin[a], m.state.origin[a])).toBe(true);
-          expect(Object.is(out.state.velocity[a], m.state.velocity[a])).toBe(true);
+        const self = m.selfId;
+        if (h.baseBack > 0) deltas++;
+        // The exact size functions add up to what the encoder wrote (M3 design §2.3), a left-out
+        // slot (D-046) costing its id in the deferred list instead of a record.
+        let bits = spectator
+          ? SNAP_SPECTATOR_HEADER_BITS
+          : SNAP_HEADER_BITS + localBlockBits(m.frame, m.baseline, self);
+        bits += SNAP_ENTITY_COUNT_BITS;
+        let left = 0;
+        for (let s = 0; s < FRAME_SLOTS; s++) {
+          if (s === self) continue;
+          if (m.frame.present[s] === 1 && m.frame.stamp[s] !== h.serverTick) left++;
+          else bits += entityRecordBits(m.frame, m.baseline, s);
         }
+        if (left > 0) bits += SNAP_DEFERRED_COUNT_BITS + left * SNAP_DEFERRED_ID_BITS;
+        if (left > 0) deferredSnapshots++;
+        expect(bits).toBe(w.bitLength);
+        expect(out.hdr.deferred).toBe(left);
+        expect(out.hdr.inputBufferHealth).toBe(spectator ? 0 : h.inputBufferHealth);
+        expect(out.hdr.teleportSeq).toBe(spectator ? 0 : m.frame.teleportSeq[self]);
+        // What the receiver holds equals the frame it was encoded from, as it sees it.
+        expect(frameDigest(out.frame, self)).toBe(frameDigest(m.frame, self));
+        expect(out.frame.presentCount).toBe(m.frame.presentCount);
+        expect(out.frame.pendingCount).toBe(m.frame.pendingCount);
+        // Per-slot checks count mismatches in plain loops (an expect per slot made this test the
+        // slowest of the file), then assert the count once.
+        let bad = 0;
+        for (let s = 0; s < FRAME_SLOTS; s++) {
+          if (out.frame.present[s] !== m.frame.present[s]) bad++;
+          else if (m.frame.present[s] === 1 && out.frame.stamp[s] !== m.frame.stamp[s]) bad++;
+        }
+        if (!spectator) {
+          slotToPlayerState(m.frame, self, sent);
+          slotToPlayerState(out.frame, self, got);
+          expect(playerStateEquals(got, sent)).toBe(true);
+          for (let a = 0; a < 3; a++) {
+            expect(Object.is(got.origin[a], sent.origin[a])).toBe(true);
+            expect(Object.is(got.velocity[a], sent.velocity[a])).toBe(true);
+          }
+        }
+        // A record's flags arrive masked, the rest as sent (a pending slot has none yet).
+        for (let s = 0; s < FRAME_SLOTS; s++) {
+          if (m.frame.present[s] !== 1 || m.frame.stamp[s] === 0 || s === self) continue;
+          if (out.frame.flags[s] !== ((m.frame.flags[s] as number) & ENTITY_FLAG_MASK)) bad++;
+          if (out.frame.originX[s] !== m.frame.originX[s]) bad++;
+          if (out.frame.entVelZ[s] !== m.frame.entVelZ[s]) bad++;
+          if (out.frame.pitch[s] !== m.frame.pitch[s]) bad++;
+        }
+        expect(bad).toBe(0);
       }
+      expect(deltas).toBeGreaterThan(500);
+      expect(deferredSnapshots).toBeGreaterThan(200);
     });
 
     it("SNAPSHOT: any quantized state with a sanitized pitch encodes, and decodes to itself", () => {
       const rng = new Mulberry32(0x9a17);
       const w = newWriter();
-      const m = new SnapshotMsg();
-      const out = new SnapshotMsg();
+      const m = new SnapshotParts();
+      m.hdr.serverTick = 77;
+      const out = new SnapshotParts();
+      const s = new PlayerState();
+      const got = new PlayerState();
       const again = new PlayerState();
       for (let i = 0; i < 2000; i++) {
-        const s = m.state;
         for (let a = 0; a < 3; a++) {
           s.origin[a] = (rng.nextFloat() - 0.5) * (i % 10 === 0 ? 1e6 : 40000);
           s.velocity[a] = (rng.nextFloat() - 0.5) * (i % 10 === 0 ? 1e7 : 4000);
@@ -177,13 +259,75 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
         s.waterLevel = rng.nextInt(6) - 1;
         s.stamina = (rng.nextFloat() - 0.1) * 80000;
         quantizePlayerState(s);
+        m.frame.clear();
+        m.frame.setPresent(SNAP_SELF, 77);
+        playerStateToSlot(m.frame, SNAP_SELF, s);
         w.reset();
-        expect(encodeSnapshot(w, m)).toBe(true);
-        expect(decodeSnapshot(readerOver(w.bytes, w.byteLength), out)).toBe(true);
-        expect(playerStateEquals(out.state, s)).toBe(true);
-        copyPlayerState(again, out.state);
+        expect(encodeSnapshotParts(w, m)).toBe(true);
+        expect(decodeSnapshotParts(readerOver(w.bytes, w.byteLength), out)).toBe(true);
+        slotToPlayerState(out.frame, SNAP_SELF, got);
+        expect(playerStateEquals(got, s)).toBe(true);
+        copyPlayerState(again, got);
         quantizePlayerState(again);
-        expect(playerStateEquals(again, out.state)).toBe(true);
+        expect(playerStateEquals(again, got)).toBe(true);
+      }
+    });
+
+    it("SNAPSHOT: each record field alone and every field at its extremes round-trips", () => {
+      const w = newWriter();
+      const m = new SnapshotParts();
+      const out = new SnapshotParts();
+      m.hdr.serverTick = 1000;
+      randomFrame(new Mulberry32(3), m.frame, 1000, SNAP_SELF, 0);
+      const f = m.frame;
+      const s = 40;
+      f.setPresent(s, 1000);
+      const edits: [string, (v: number) => void, number[]][] = [
+        ["originX", (v) => (f.originX[s] = v), [-524288, -1, 0, 1, 524288]],
+        ["originY", (v) => (f.originY[s] = v), [-524288, 524288]],
+        ["originZ", (v) => (f.originZ[s] = v), [-524288, 524288]],
+        ["entVelX", (v) => (f.entVelX[s] = v), [-32767, 0, 32767]],
+        ["entVelY", (v) => (f.entVelY[s] = v), [-32767, 32767]],
+        ["entVelZ", (v) => (f.entVelZ[s] = v), [-32767, 32767]],
+        ["yaw", (v) => (f.yaw[s] = v), [0, 1, 0xffff]],
+        ["pitch", (v) => (f.pitch[s] = v), [-PITCH_LIMIT_U16, 0, PITCH_LIMIT_U16]],
+        ["flags", (v) => (f.flags[s] = v), [ENTITY_FLAG_MASK, 1, 1 << 9]],
+        ["team", (v) => (f.team[s] = v), [0, 1, 2]],
+        ["teleportSeq", (v) => (f.teleportSeq[s] = v), [0, 255]],
+        ["eventSeq", (v) => (f.eventSeq[s] = v), [0, 255]],
+      ];
+      let previous = "";
+      for (const [name, set, values] of edits) {
+        for (const v of values) {
+          set(v);
+          w.reset();
+          expect(encodeSnapshotParts(w, m), `${name} ${v}`).toBe(true);
+          const bytes = hex(w.bytes.subarray(0, w.byteLength));
+          expect(decodeSnapshotParts(readerOver(w.bytes, w.byteLength), out)).toBe(true);
+          expect(frameDigest(out.frame, SNAP_SELF), `${name} ${v}`).toBe(frameDigest(f, SNAP_SELF));
+          if (v !== 0) expect(bytes, `${name} ${v} changes the bytes`).not.toBe(previous);
+          previous = bytes;
+        }
+        set(0);
+      }
+      // Events: STEP and LAND carry any byte, JUMP 0; one or two slots.
+      const e = s * 2;
+      for (const [k0, v0, k1, v1] of [
+        [PMEV_STEP, 255, 0, 0],
+        [PMEV_JUMP, 0, PMEV_LAND, 255],
+        [PMEV_LAND, 1, PMEV_STEP, 0],
+      ] as const) {
+        f.evKind[e] = k0;
+        f.evValue[e] = v0;
+        f.evKind[e + 1] = k1;
+        f.evValue[e + 1] = v1;
+        w.reset();
+        expect(encodeSnapshotParts(w, m)).toBe(true);
+        expect(decodeSnapshotParts(readerOver(w.bytes, w.byteLength), out)).toBe(true);
+        expect([
+          ...out.frame.evKind.subarray(e, e + 2),
+          ...out.frame.evValue.subarray(e, e + 2),
+        ]).toEqual([k0, k1, v0, v1]);
       }
     });
 
@@ -216,74 +360,130 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
   });
 
   describe("rejections", () => {
-    function snapshotWith(edit: (m: SnapshotMsg) => void): boolean {
-      const m = new SnapshotMsg();
+    /** A valid live snapshot (tick 1000, receiver SNAP_SELF, two records) after `edit`. */
+    function snapshotWith(edit: (m: SnapshotParts) => void): boolean {
+      const m = new SnapshotParts();
+      m.hdr.serverTick = 1000;
+      randomFrame(new Mulberry32(11), m.frame, 1000, SNAP_SELF, 2);
       edit(m);
-      return encodeSnapshot(newWriter(), m);
+      return encodeSnapshotParts(newWriter(), m);
+    }
+
+    /** A delta of tick `t`, 10 back (within the window), its players restamped to `t`. */
+    function earlyDelta(m: SnapshotParts, t: number): void {
+      m.hdr.serverTick = t;
+      m.hdr.baseBack = 10;
+      for (let s = 0; s < FRAME_SLOTS; s++) if (m.frame.present[s] === 1) m.frame.setPresent(s, t);
+      copySlot(m.base, SNAP_SELF, m.frame, SNAP_SELF);
     }
 
     it("encoders refuse what their layout can't carry", () => {
       expect(snapshotWith(() => {})).toBe(true);
-      expect(
-        snapshotWith((m) => {
-          m.baselineTick = 5;
-        }),
-      ).toBe(false);
-      expect(
-        snapshotWith((m) => {
-          m.serverTick = TICK_MAX + 1;
-        }),
-      ).toBe(false);
-      expect(
-        snapshotWith((m) => {
-          m.inputBufferHealth = 128;
-        }),
-      ).toBe(false);
-      expect(
-        snapshotWith((m) => {
-          m.flags = 4;
-        }),
-      ).toBe(false);
-      for (const edit of [
-        (s: PlayerState) => {
-          s.origin[0] = 16384.03125;
-        },
-        (s: PlayerState) => {
-          s.origin[1] = 1 / 64;
-        },
-        (s: PlayerState) => {
-          s.velocity[2] = 1 / 32;
-        },
-        (s: PlayerState) => {
-          s.velocity[0] = 32768;
-        },
-        (s: PlayerState) => {
-          s.viewPitch = (PITCH_LIMIT_U16 + 1) & 0xffff;
-        },
-        (s: PlayerState) => {
-          s.viewPitch = -(PITCH_LIMIT_U16 + 1) & 0xffff;
-        },
-        (s: PlayerState) => {
-          s.flags = 0x400;
-        },
-        (s: PlayerState) => {
-          s.groundEntity = -2;
-        },
-        (s: PlayerState) => {
-          s.groundEntity = 32768;
-        },
-        (s: PlayerState) => {
-          s.waterLevel = 4;
-        },
-        (s: PlayerState) => {
-          s.stamina = 0.5;
-        },
-        (s: PlayerState) => {
-          s.origin[2] = Number.NaN;
-        },
-      ]) {
-        expect(snapshotWith((m) => edit(m.state))).toBe(false);
-      }
+      // The earliest baseline, tick 1 (tick 10 before it is refused below).
+      expect(snapshotWith((m) => earlyDelta(m, 11))).toBe(true);
+      const other = (m: SnapshotParts) => {
+        for (let s = 0; s < FRAME_SLOTS; s++) if (s !== SNAP_SELF && m.frame.present[s]) return s;
+        throw new Error("no record");
+      };
+      const refused: [string, (m: SnapshotParts) => void][] = [
+        ["a delta whose baseline lacks the receiver", (m) => (m.hdr.baseBack = 1)],
+        [
+          "a delta whose baseline holds the receiver as pending (D-046)",
+          (m) => {
+            m.hdr.baseBack = 1;
+            m.base.setPresent(SNAP_SELF, 0);
+          },
+        ],
+        [
+          "baseBack 64",
+          (m) => {
+            m.hdr.baseBack = 64;
+            copySlot(m.base, SNAP_SELF, m.frame, SNAP_SELF);
+          },
+        ],
+        ["a baseline before tick 1", (m) => earlyDelta(m, 10)],
+        ["tick 0", (m) => (m.hdr.serverTick = 0)],
+        ["tick past TICK_MAX", (m) => (m.hdr.serverTick = TICK_MAX + 1)],
+        ["health 128", (m) => (m.hdr.inputBufferHealth = 128)],
+        ["v1's teleport bit", (m) => (m.hdr.flags = 1 << 1)],
+        ["flag bit 7", (m) => (m.hdr.flags = 1 << 7)],
+        ["spectator + starved", (m) => (m.hdr.flags = SNAP_FLAG_SPECTATOR | SNAP_FLAG_STARVED)],
+        ["receiver absent", (m) => m.frame.setAbsent(SNAP_SELF)],
+        ["receiver's stamp not the tick", (m) => m.frame.setPresent(SNAP_SELF, 999)],
+        [
+          "a left-out slot with state in a full snapshot (D-046)",
+          (m) => m.frame.setPresent(other(m), 999),
+        ],
+        [
+          "a left-out slot in a spectator snapshot (D-046)",
+          (m) => {
+            m.hdr.flags = SNAP_FLAG_SPECTATOR;
+            m.frame.setPresent(other(m), 0);
+          },
+        ],
+        ["origin past +16384 u", (m) => (m.frame.originY[other(m)] = 524289)],
+        ["origin past −16384 u", (m) => (m.frame.originZ[other(m)] = -524289)],
+        ["velocity −32768", (m) => (m.frame.entVelX[other(m)] = -32768)],
+        ["pitch past +16201", (m) => (m.frame.pitch[other(m)] = PITCH_LIMIT_U16 + 1)],
+        ["pitch past −16201", (m) => (m.frame.pitch[other(m)] = -PITCH_LIMIT_U16 - 1)],
+        ["team 3", (m) => (m.frame.team[other(m)] = 3)],
+        [
+          "event kind 4",
+          (m) => {
+            m.frame.evKind[other(m) * 2] = 4;
+          },
+        ],
+        [
+          "an empty slot with a value",
+          (m) => {
+            const e = other(m) * 2;
+            m.frame.evKind[e] = 0;
+            m.frame.evKind[e + 1] = 0;
+            m.frame.evValue[e] = 1;
+          },
+        ],
+        [
+          "an empty slot before a full one",
+          (m) => {
+            const e = other(m) * 2;
+            m.frame.evKind[e] = 0;
+            m.frame.evValue[e] = 0;
+            m.frame.evKind[e + 1] = PMEV_STEP;
+          },
+        ],
+        [
+          "JUMP with a value",
+          (m) => {
+            const e = other(m) * 2;
+            m.frame.evKind[e] = PMEV_JUMP;
+            m.frame.evValue[e] = 3;
+          },
+        ],
+        [
+          "a local state off the grid",
+          (m) => {
+            m.frame.ground1[SNAP_SELF] = 32769;
+          },
+        ],
+      ];
+      for (const [label, edit] of refused) expect(snapshotWith(edit), label).toBe(false);
+      // The encoder sets DEFERRED itself: a caller's bit without a left-out slot is dropped, and
+      // a pending slot in a full snapshot is left out (D-046).
+      expect(snapshotWith((m) => (m.hdr.flags = SNAP_FLAG_DEFERRED))).toBe(true);
+      expect(snapshotWith((m) => m.frame.setPresent(other(m), 0))).toBe(true);
+      // A base frame needs baseBack > 0 and is never the frame itself; with one, the same frame
+      // is a delta of nothing but its mask. The encoder masks the flags a record does not carry.
+      const m = new SnapshotParts();
+      m.hdr.serverTick = 5;
+      randomFrame(new Mulberry32(2), m.frame, 5, SNAP_SELF, 1);
+      expect(encodeSnapshot(newWriter(), m.hdr, m.frame, m.base, SNAP_SELF)).toBe(false);
+      m.hdr.baseBack = 1;
+      expect(encodeSnapshot(newWriter(), m.hdr, m.frame, m.frame, SNAP_SELF)).toBe(false);
+      for (let s = 0; s < FRAME_SLOTS; s++) copySlot(m.base, s, m.frame, s);
+      const unchanged = newWriter();
+      expect(encodeSnapshot(unchanged, m.hdr, m.frame, m.base, SNAP_SELF)).toBe(true);
+      expect(unchanged.bitLength).toBe(SNAP_HEADER_BITS + 8 + SNAP_ENTITY_COUNT_BITS);
+      expect(snapshotWith((p) => (p.frame.flags[other(p)] = 0x3ff))).toBe(true);
       const input = new InputMsg();
       expect(encodeInput(newWriter(), input)).toBe(false);
       input.count = 2;
@@ -322,51 +522,163 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
       expect(encodeCvars(newWriter(), cvars)).toBe(false);
     });
 
-    /** A valid snapshot's bytes with one field replaced (offset, width, raw value). */
-    function patchedSnapshot(offset: number, width: number, value: number): Uint8Array {
-      return patchBits(
-        encodedBy((w) => encodeSnapshot(w, new SnapshotMsg())),
-        offset,
-        width,
-        value,
-      );
+    /**
+     * A valid live snapshot of tick 1000 for receiver SNAP_SELF (9) with records 3, 20 and 40,
+     * every field 0: header 0–85 (type 0, serverTick 8, baseBack 40, flags 46, cvarHash 54, health
+     * 70, teleportSeq 78), local block 86–284 (origin 86/107/128, velocity 149/169/189, yaw 209,
+     * pitch 225, flags 241, groundEntity + 1 251, waterLevel 267, stamina 269), entityCount 285,
+     * then 213-bit records from 292.
+     */
+    function baseSnapshot(): Uint8Array {
+      const m = new SnapshotParts();
+      m.hdr.serverTick = 1000;
+      m.frame.clear();
+      m.frame.setPresent(SNAP_SELF, 1000);
+      for (const id of [3, 20, 40]) m.frame.setPresent(id, 1000);
+      return encodedBy((w) => encodeSnapshotParts(w, m));
+    }
+
+    /** Bit offsets of a record's fields (record k starts at 292 + 213 k). */
+    const REC = {
+      id: 0,
+      removed: 16,
+      isNew: 17,
+      originX: 18,
+      originZ: 60,
+      velX: 81,
+      velY: 97,
+      yaw: 129,
+      pitch: 145,
+      flags: 161,
+      team: 171,
+      teleportSeq: 173,
+      eventSeq: 181,
+      k0: 189,
+      v0: 193,
+      k1: 201,
+      v1: 205,
+    } as const;
+    const rec = (k: number, field: keyof typeof REC) => SNAP_FULL_FIXED_BITS + k * 213 + REC[field];
+
+    function decodesParts(bytes: Uint8Array, out = new SnapshotParts()): boolean {
+      return decodeSnapshotParts(readerOver(bytes), out);
     }
 
     it("decoders refuse out-of-range values the encoders never write", () => {
-      const out = new SnapshotMsg();
-      const ok = patchedSnapshot(0, 0, 0);
-      expect(decodeSnapshot(readerOver(ok), out)).toBe(true);
-      // Header: type 0–7, serverTick 8–39, baselineTick 40–71, lastProcessedCmdTick 72–103,
-      // health 104–111, cvarHash 112–127, flags 128–135; state from 136: origin 3×21, velocity
-      // 3×20, yaw, pitch, flags, groundEntity + 1, waterLevel, stamina.
-      const bad: [string, number, number, number][] = [
-        ["type", 0, 8, MSG_INPUT],
-        ["serverTick past TICK_MAX", 8, 32, TICK_MAX + 1],
-        ["non-zero baseline", 40, 32, 1],
-        ["lastProcessedCmdTick past TICK_MAX", 72, 32, 0xffffffff],
-        ["unknown flag", 128, 8, 4],
-        ["origin x past +16384", 136, 21, 524289],
-        ["origin z past −16384", 136 + 42, 21, (1 << 21) - 524289],
-        ["velocity −2^19", 136 + 63, 20, 1 << 19],
-        ["pitch past +16201", 136 + 123 + 16, 16, PITCH_LIMIT_U16 + 1],
-        ["pitch past −16201", 136 + 123 + 16, 16, 0x10000 - PITCH_LIMIT_U16 - 1],
-        ["groundEntity past ENTITY_WORLD", 136 + 155 + 10, 16, 32769],
+      const ok = baseSnapshot();
+      expect(decodesParts(ok)).toBe(true);
+      type Patch = [number, number, number];
+      const bad: [string, ...Patch[]][] = [
+        ["type", [0, 8, MSG_INPUT]],
+        ["serverTick 0", [8, 32, 0]],
+        ["serverTick past TICK_MAX", [8, 32, TICK_MAX + 1]],
+        ["a delta against a baseline without the receiver", [40, 6, 1]],
+        ["baseBack 63", [40, 6, 63]],
+        ["a baseline before tick 1", [8, 32, 10], [40, 6, 10]],
+        ["flag bit 1 (v1's teleport)", [46, 8, 2]],
+        ["DEFERRED with no deferred list", [46, 8, SNAP_FLAG_DEFERRED]],
+        ["spectator + deferred", [46, 8, SNAP_FLAG_SPECTATOR | SNAP_FLAG_DEFERRED]],
+        ["flag bits 4–7", [46, 8, 0xf0]],
+        ["spectator + starved", [46, 8, SNAP_FLAG_SPECTATOR | SNAP_FLAG_STARVED]],
+        ["local origin x past +16384", [86, 21, 524289]],
+        ["local origin z past −16384", [128, 21, (1 << 21) - 524289]],
+        ["local velocity −2^19", [149, 20, 1 << 19]],
+        ["local pitch past +16201", [225, 16, PITCH_LIMIT_U16 + 1]],
+        ["local pitch past −16201", [225, 16, 0x10000 - PITCH_LIMIT_U16 - 1]],
+        ["groundEntity past ENTITY_WORLD", [251, 16, 32769]],
+        ["count over the live cap", [285, 7, 64]],
+        ["count 127", [285, 7, 127]],
+        ["id ≥ 64", [rec(0, "id"), 16, 64]],
+        ["id 0xffff", [rec(2, "id"), 16, 0xffff]],
+        ["ids unsorted", [rec(0, "id"), 16, 30]],
+        ["a duplicate id", [rec(1, "id"), 16, 3]],
+        ["the receiver's own id", [rec(0, "id"), 16, SNAP_SELF]],
+        ["removed in a full snapshot", [rec(1, "removed"), 1, 1]],
+        ["a delta record in a full snapshot", [rec(1, "isNew"), 1, 0]],
+        ["origin x past +16384", [rec(0, "originX"), 21, 524289]],
+        ["origin z past −16384", [rec(2, "originZ"), 21, (1 << 21) - 524289]],
+        ["velocity −32768", [rec(1, "velY"), 16, 0x8000]],
+        ["pitch past +16201", [rec(0, "pitch"), 16, PITCH_LIMIT_U16 + 1]],
+        ["pitch past −16201", [rec(0, "pitch"), 16, 0x10000 - PITCH_LIMIT_U16 - 1]],
+        ["entity flag bit 5 (jump held)", [rec(0, "flags") + 5, 1, 1]],
+        ["entity flag bit 6 (crouch pressed in air)", [rec(2, "flags") + 6, 1, 1]],
+        ["team 3", [rec(1, "team"), 2, 3]],
+        ["event kind 4", [rec(0, "k0"), 4, 4]],
+        ["event kind 15", [rec(0, "k0"), 4, 15], [rec(0, "k1"), 4, 15]],
+        ["an empty first slot before a second", [rec(0, "k1"), 4, PMEV_STEP]],
+        ["a value in an empty slot", [rec(0, "v0"), 8, 1]],
+        ["a value in an empty second slot", [rec(0, "k0"), 4, PMEV_LAND], [rec(0, "v1"), 8, 9]],
+        ["JUMP with a value", [rec(1, "k0"), 4, PMEV_JUMP], [rec(1, "v0"), 8, 1]],
       ];
-      for (const [label, offset, width, value] of bad) {
-        expect(decodeSnapshot(readerOver(patchedSnapshot(offset, width, value)), out), label).toBe(
-          false,
-        );
+      for (const [label, ...patches] of bad) {
+        let bytes = ok;
+        for (const [offset, width, value] of patches)
+          bytes = patchBits(bytes, offset, width, value);
+        expect(decodesParts(bytes), label).toBe(false);
       }
       // The largest values that are in range still decode.
-      for (const [offset, width, value] of [
-        [136, 21, 524288],
-        [136 + 63, 20, (1 << 20) - 524287],
-        [136 + 123 + 16, 16, PITCH_LIMIT_U16],
-        [136 + 155 + 10, 16, 32768],
-      ] as const) {
-        expect(decodeSnapshot(readerOver(patchedSnapshot(offset, width, value)), out)).toBe(true);
+      const good: [string, ...Patch[]][] = [
+        ["local origin +16384", [86, 21, 524288]],
+        ["local velocity −(2^19 − 1)", [149, 20, (1 << 20) - 524287]],
+        ["local pitch +16201", [225, 16, PITCH_LIMIT_U16]],
+        ["groundEntity ENTITY_WORLD", [251, 16, 32768]],
+        ["origin −16384", [rec(0, "originX"), 21, (1 << 21) - 524288]],
+        ["velocity −32767", [rec(1, "velY"), 16, 0x8001]],
+        ["pitch −16201", [rec(2, "pitch"), 16, 0x10000 - PITCH_LIMIT_U16]],
+        ["every entity flag", [rec(0, "flags"), 10, ENTITY_FLAG_MASK]],
+        ["team 2", [rec(1, "team"), 2, 2]],
+        ["counters 255", [rec(2, "teleportSeq"), 8, 255], [rec(2, "eventSeq"), 8, 255]],
+        [
+          "LAND 255 then STEP 255",
+          [rec(0, "k0"), 4, PMEV_LAND],
+          [rec(0, "v0"), 8, 255],
+          [rec(0, "k1"), 4, PMEV_STEP],
+          [rec(0, "v1"), 8, 255],
+        ],
+        ["the receiver's id between two records", [rec(0, "id"), 16, SNAP_SELF - 1]],
+      ];
+      const out = new SnapshotParts();
+      for (const [label, ...patches] of good) {
+        let bytes = ok;
+        for (const [offset, width, value] of patches)
+          bytes = patchBits(bytes, offset, width, value);
+        expect(decodesParts(bytes, out), label).toBe(true);
       }
-      expect(out.state.groundEntity).toBe(32767);
+    });
+
+    it("SNAPSHOT decode refuses a live snapshot past 1100 B, as its encoder does", () => {
+      const w = newWriter();
+      const m = new SnapshotParts();
+      m.hdr.serverTick = 50;
+      randomFrame(new Mulberry32(4), m.frame, 50, SNAP_SELF, LIVE_FULL_MAX_OTHERS + 1);
+      // The encoder writes the whole packet before its size check refuses it.
+      expect(encodeSnapshotParts(w, m)).toBe(false);
+      expect(w.bitLength).toBe(SNAP_FULL_FIXED_BITS + (LIVE_FULL_MAX_OTHERS + 1) * ENTITY_NEW_BITS);
+      expect(w.byteLength).toBeGreaterThan(MAX_SNAPSHOT_BYTES);
+      expect(w.byteLength).toBeLessThanOrEqual(MAX_UNRELIABLE_BYTES);
+      expect(decodesParts(w.bytes.slice(0, w.byteLength))).toBe(false);
+      // One record fewer fits, and decodes.
+      m.frame.setAbsent(m.frame.present.indexOf(1, SNAP_SELF + 1));
+      w.reset();
+      expect(encodeSnapshotParts(w, m)).toBe(true);
+      expect(w.byteLength).toBeLessThanOrEqual(MAX_SNAPSHOT_BYTES);
+      expect(decodesParts(w.bytes.slice(0, w.byteLength))).toBe(true);
+    });
+
+    it("SNAPSHOT body decode needs a receiver id unless spectator, and a base frame only for a delta", () => {
+      const ok = baseSnapshot();
+      const hdr = new SnapshotHeader();
+      const f = new WorldFrame();
+      const body = (selfId: number, base: WorldFrame | null) => {
+        const r = readerOver(ok);
+        return decodeSnapshotHeader(r, hdr) && decodeSnapshotBody(r, hdr, base, selfId, f);
+      };
+      expect(body(SNAP_SELF, null)).toBe(true);
+      expect(body(-1, null)).toBe(false);
+      expect(body(64, null)).toBe(false);
+      // Receiver 3 is listed as a record: its own id.
+      expect(body(3, null)).toBe(false);
+      expect(body(SNAP_SELF, new WorldFrame())).toBe(false);
     });
 
     it("INPUT decode refuses a count outside 1–4, ticks out of order or below 0, and bad axes", () => {
@@ -452,16 +764,12 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
       expect(decodeInput(readerOver(patchBits(inBytes, 24, 32, 0xffffffff)), inOut)).toBe(false);
       expect(decodeInput(readerOver(patchBits(inBytes, 59, 32, 0xffffffff)), inOut)).toBe(false);
       expect([inOut.lastSnapshotTick, (inOut.cmds[0] as UserCmd).tick]).toEqual([0, 0]);
-      const snap = encodedBy((w) => encodeSnapshot(w, new SnapshotMsg()));
-      const snapOut = new SnapshotMsg();
-      for (const offset of [8, 40, 72]) {
-        expect(decodeSnapshot(readerOver(patchBits(snap, offset, 32, 0xffffffff)), snapOut)).toBe(
-          false,
-        );
-      }
-      expect([snapOut.serverTick, snapOut.baselineTick, snapOut.lastProcessedCmdTick]).toEqual([
-        0, 0, 0,
-      ]);
+      const snap = baseSnapshot();
+      const snapOut = new SnapshotHeader();
+      expect(decodeSnapshotHeader(readerOver(patchBits(snap, 8, 32, 0xffffffff)), snapOut)).toBe(
+        false,
+      );
+      expect(snapOut.serverTick).toBe(0);
       const pongOut = new PongMsg();
       const pong = encodedBy((w) => encodePong(w, new PongMsg()));
       expect(decodePong(readerOver(patchBits(pong, 24, 32, 0xffffffff)), pongOut)).toBe(false);
@@ -472,46 +780,179 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
       const hello = new HelloMsg();
       hello.buildHash = "abc";
       hello.nonce = 7;
-      const v1 = encodedBy((w) => encodeHello(w, hello));
-      // type 1, protocolVersion 1 (u16, LSB-first): pinned.
-      expect(hex(v1.subarray(0, 3))).toBe("010100");
-      expect(peekHelloVersion(v1, v1.length)).toBe(PROTOCOL_VERSION);
-      // A v2 HELLO with a field v1 doesn't know: v1's decoder refuses it, the peek still works.
+      const now = encodedBy((w) => encodeHello(w, hello));
+      // type 1, protocolVersion 2 (u16, LSB-first): pinned.
+      expect(hex(now.subarray(0, 3))).toBe("010200");
+      expect(peekHelloVersion(now, now.length)).toBe(PROTOCOL_VERSION);
+      // A v1 HELLO's first 3 B, which the server reads to KICK it with a reason.
+      hello.protocolVersion = 1;
+      expect(hex(encodedBy((w) => encodeHello(w, hello)).subarray(0, 3))).toBe("010100");
+      // A v3 HELLO with a field v2 doesn't know: v2's decoder refuses it, the peek still works.
       const w = newWriter();
-      hello.protocolVersion = 2;
+      hello.protocolVersion = 3;
       encodeHello(w, hello);
       w.writeBits(0xabcd, 16);
-      const v2 = w.bytes.slice(0, w.byteLength);
-      expect(decodeHello(readerOver(v2), new HelloMsg())).toBe(false);
-      expect(peekHelloVersion(v2, v2.length)).toBe(2);
-      expect(peekHelloVersion(v2, 2)).toBe(-1);
+      const v3 = w.bytes.slice(0, w.byteLength);
+      expect(decodeHello(readerOver(v3), new HelloMsg())).toBe(false);
+      expect(peekHelloVersion(v3, v3.length)).toBe(3);
+      expect(peekHelloVersion(v3, 2)).toBe(-1);
       expect(peekHelloVersion(encodedBy(encodeReady), 1)).toBe(-1);
       const ping = encodedBy((wr) => encodePing(wr, new PingMsg()));
       expect(peekHelloVersion(ping, ping.length)).toBe(-1);
     });
 
-    it.each(kinds)("%s: every truncation, an extra byte and dirty padding are refused", (_, k) => {
-      const rng = new Mulberry32(0x7a11 + k.type);
+    it.each(kinds)("%s: every truncation, an extra byte and dirty padding are refused", (_, k) =>
+      expectTruncationsRefused(k, FAST_FUZZ.truncations),
+    );
+  });
+
+  describe("EVENTS (D-043)", () => {
+    /** One JOIN of client 5 on team 2: the message the patches below start from. */
+    function oneJoin(): Uint8Array {
+      const m = new EventsMsg();
+      const e = m.add(EVK_PLAYER_JOIN);
+      if (e === null) throw new Error("full");
+      e.clientId = 5;
+      e.team = 2;
+      return encodedBy((w) => encodeEvents(w, m));
+    }
+
+    function oneStats(players: number): Uint8Array {
+      const m = new EventsMsg();
+      const e = m.add(EVK_SERVER_STATS);
+      if (e === null) throw new Error("full");
+      e.tickP50Us = 41;
+      e.tickP99Us = 115;
+      e.tickMaxUs = 0xffff;
+      e.players = players;
+      return encodedBy((w) => encodeEvents(w, m));
+    }
+
+    it("round-trips each kind field for field, in the documented widths", () => {
+      const m = new EventsMsg();
+      const join = m.add(EVK_PLAYER_JOIN);
+      const leave = m.add(EVK_PLAYER_LEAVE);
+      const stats = m.add(EVK_SERVER_STATS);
+      if (join === null || leave === null || stats === null) throw new Error("full");
+      join.clientId = 63;
+      join.team = TEAM_1;
+      leave.clientId = 0;
+      leave.reason = EV_LEAVE_TIMED_OUT;
+      stats.tickP50Us = 42;
+      stats.tickP99Us = 4000;
+      stats.tickMaxUs = 0xffff;
+      stats.players = 64;
       const w = newWriter();
-      for (let i = 0; i < 40; i++) {
-        const bytes = k.random(rng, w);
-        for (let len = 0; len < bytes.length; len++) {
-          expect(k.decode(readerOver(bytes, len)), `${len} of ${bytes.length}`).toBe(false);
-        }
-        const longer = new Uint8Array(bytes.length + 1);
-        longer.set(bytes);
-        expect(k.decode(readerOver(longer))).toBe(false);
-        // Set the first padding bit of the last byte, if the message has one.
-        w.reset();
-        expect(k.decode(readerOver(bytes))).toBe(true);
-        k.decodeAndReencode(readerOver(bytes), w);
-        const used = w.bitLength & 7;
-        if (used !== 0) {
-          const dirty = bytes.slice();
-          dirty[dirty.length - 1] = (dirty[dirty.length - 1] as number) | (1 << used);
-          expect(k.decode(readerOver(dirty))).toBe(false);
-        }
+      expect(encodeEvents(w, m)).toBe(true);
+      expect(eventBits(EVK_PLAYER_JOIN)).toBe(12);
+      expect(eventBits(EVK_PLAYER_LEAVE)).toBe(12);
+      expect(eventBits(EVK_SERVER_STATS)).toBe(59);
+      expect(eventBits(0)).toBe(0);
+      expect(w.bitLength).toBe(8 + 6 + 12 + 12 + 59);
+      const bytes = w.bytes.slice(0, w.byteLength);
+      expect(peekMessageType(bytes, bytes.length)).toBe(MSG_EVENTS);
+      const out = new EventsMsg();
+      expect(decodeEvents(readerOver(bytes), out)).toBe(true);
+      expect(out.count).toBe(3);
+      expect({ ...out.events[0] }).toEqual({ ...join });
+      expect({ ...out.events[1] }).toEqual({ ...leave });
+      expect({ ...out.events[2] }).toEqual({ ...stats });
+      // A decoded record carries only its kind's fields: the pooled record is cleared first.
+      out.events[1]?.clear();
+      (out.events[1] as { team: number }).team = 2;
+      expect(decodeEvents(readerOver(bytes), out)).toBe(true);
+      expect(out.events[1]?.team).toBe(0);
+    });
+
+    it("carries at most 63 events: the largest message is 63 SERVER_STATS, well under 16384 B", () => {
+      const m = new EventsMsg();
+      for (let i = 0; i < EVENTS_MAX_PER_MSG; i++) expect(m.add(EVK_SERVER_STATS)).not.toBeNull();
+      expect(m.add(EVK_PLAYER_JOIN)).toBeNull();
+      const w = newWriter();
+      expect(encodeEvents(w, m)).toBe(true);
+      expect(w.byteLength).toBe((8 + 6 + 63 * 59 + 7) >> 3);
+      expect(w.byteLength).toBeLessThanOrEqual(MAX_RELIABLE_BYTES);
+    });
+
+    it("the encoder refuses what the layout can't carry", () => {
+      /** One event of `kind` with `fields` set (a count of `count`), encoded. */
+      const encodes = (kind: number, fields: Partial<EventRecord>, count = 1) => {
+        const m = new EventsMsg();
+        const e = m.add(EVK_PLAYER_JOIN);
+        if (e === null) throw new Error("full");
+        Object.assign(e, { kind }, fields);
+        m.count = count;
+        return encodeEvents(newWriter(), m);
+      };
+      expect(encodes(EVK_PLAYER_JOIN, {})).toBe(true);
+      expect(encodes(EVK_PLAYER_JOIN, {}, 0)).toBe(false);
+      expect(encodes(EVK_PLAYER_JOIN, {}, 64)).toBe(false);
+      for (const kind of [0, 4, 15]) expect(encodes(kind, {})).toBe(false);
+      expect(encodes(EVK_PLAYER_JOIN, { clientId: 64 })).toBe(false);
+      expect(encodes(EVK_PLAYER_JOIN, { team: 3 })).toBe(false);
+      expect(encodes(EVK_PLAYER_LEAVE, { reason: EV_LEAVE_KICKED })).toBe(true);
+      expect(encodes(EVK_PLAYER_LEAVE, { reason: 3 })).toBe(false);
+      expect(encodes(EVK_SERVER_STATS, { players: 64 })).toBe(true);
+      expect(encodes(EVK_SERVER_STATS, { players: 65 })).toBe(false);
+      expect(encodes(EVK_SERVER_STATS, { tickMaxUs: 0x10000 })).toBe(false);
+      expect(encodes(EVK_SERVER_STATS, { tickP50Us: -1 })).toBe(false);
+    });
+
+    it("the decoder refuses a count of 0, kinds 0 and 4–15, team 3, reason 3 and players past 64", () => {
+      // type 0–7, count 8–13, then the first event: kind 14–17, JOIN id 18–23 and team 24–25;
+      // SERVER_STATS p50 18–33, p99 34–49, max 50–65, players 66–72.
+      const out = new EventsMsg();
+      const join = oneJoin();
+      expect(decodeEvents(readerOver(join), out)).toBe(true);
+      expect(decodeEvents(readerOver(patchBits(join, 8, 6, 0)), out)).toBe(false);
+      for (let kind = 0; kind < 16; kind++) {
+        const ok = decodeEvents(readerOver(patchBits(join, 14, 4, kind)), out);
+        // JOIN and LEAVE share a layout; SERVER_STATS is longer, so the JOIN's bits run short.
+        expect(ok, `kind ${kind}`).toBe(kind === EVK_PLAYER_JOIN || kind === EVK_PLAYER_LEAVE);
       }
+      expect(decodeEvents(readerOver(patchBits(join, 24, 2, 3)), out)).toBe(false);
+      const leave = patchBits(join, 14, 4, EVK_PLAYER_LEAVE);
+      expect(decodeEvents(readerOver(leave), out)).toBe(true);
+      expect(out.events[0]?.reason).toBe(2);
+      expect(decodeEvents(readerOver(patchBits(leave, 24, 2, 3)), out)).toBe(false);
+      // A 6-bit id can't name a slot past 63: the field's every value is a slot.
+      expect(decodeEvents(readerOver(patchBits(join, 18, 6, 63)), out)).toBe(true);
+      expect(out.events[0]?.clientId).toBe(63);
+      const stats = oneStats(64);
+      expect(decodeEvents(readerOver(stats), out)).toBe(true);
+      expect(out.events[0]?.tickMaxUs).toBe(0xffff);
+      for (const players of [65, 100, 127]) {
+        expect(decodeEvents(readerOver(patchBits(stats, 66, 7, players)), out)).toBe(false);
+      }
+      expect(decodeEvents(readerOver(patchBits(stats, 66, 7, 0)), out)).toBe(true);
+      // The kind check itself: in a SERVER_STATS-sized message only kind 3 fits, so a refused kind
+      // read with that layout would be accepted without it (JOIN and LEAVE leave bits over).
+      for (let kind = 0; kind < 16; kind++) {
+        const ok = decodeEvents(readerOver(patchBits(stats, 14, 4, kind)), out);
+        expect(ok, `kind ${kind} in a stats message`).toBe(kind === EVK_SERVER_STATS);
+      }
+      // The smallest count-0 message has no bits left over: only the count check refuses it.
+      expect(decodeEvents(readerOver(new Uint8Array([MSG_EVENTS, 0])), out)).toBe(false);
+    });
+
+    it("a tick's 64 roster events need two messages (63 + 1)", () => {
+      const m = new EventsMsg();
+      let sent = 0;
+      const messages: number[] = [];
+      for (let id = 0; id < 64; id++) {
+        let e = m.add(EVK_PLAYER_JOIN);
+        if (e === null) {
+          messages.push(m.count);
+          sent += m.count;
+          m.count = 0;
+          e = m.add(EVK_PLAYER_JOIN);
+        }
+        if (e === null) throw new Error("full");
+        e.clientId = id;
+      }
+      messages.push(m.count);
+      expect(messages).toEqual([63, 1]);
+      expect(sent + m.count).toBe(64);
     });
   });
 
@@ -534,49 +975,721 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
       expect(accepted).toBeLessThan(2000);
     });
 
-    it.each(kinds)("%s: every single-bit flip of valid messages", (_, k) => {
-      const rng = new Mulberry32(0xf1f + k.type);
-      const w = newWriter();
-      for (let i = 0; i < 12; i++) {
-        const bytes = k.random(rng, w);
-        // Long text and cvar messages: a seeded sample of bits instead of all of them.
-        const bits = bytes.length * 8;
-        const step = bits > 768 ? Math.ceil(bits / 768) : 1;
-        for (let bit = rng.nextInt(step); bit < bits; bit += step) {
-          const flipped = bytes.slice();
-          flipped[bit >> 3] = (flipped[bit >> 3] as number) ^ (1 << (bit & 7));
-          decodeEverywhere(flipped, flipped.length, w);
-        }
+    it.each(kinds)("%s: every single-bit flip of valid messages", (_, k) =>
+      expectBitFlipsSafe(k, FAST_FUZZ.bitFlips),
+    );
+
+    it("random multi-byte corruption of snapshots and inputs", () =>
+      expectCorruptionsSafe(FAST_FUZZ.corruptions));
+  });
+
+  describe("deltas (D-038)", () => {
+    const E_ORIGIN = 1;
+    const E_VELOCITY = 2;
+    const E_YAW = 4;
+    const E_PITCH = 8;
+    const E_FLAGS = 16;
+    const E_TEAM = 32;
+    const E_TELEPORT = 64;
+    const E_EVENTS = 128;
+    const L_ORIGIN = 1;
+    const L_VELOCITY = 2;
+    const L_YAW = 4;
+    const L_PITCH = 8;
+    const L_FLAGS = 16;
+    const L_GROUND = 32;
+    const L_WATER = 64;
+    const L_STAMINA = 128;
+
+    /**
+     * The baseline of the hand-written deltas: tick 990, the receiver SNAP_SELF and players 3, 20
+     * and 40 (serial 7), every field 0; 40 pending when asked, the receiver left out when asked.
+     */
+    function handBase(pending40 = false, withSelf = true): WorldFrame {
+      const f = new WorldFrame();
+      if (withSelf) f.setPresent(SNAP_SELF, 990);
+      for (const id of [3, 20, 40]) {
+        f.setPresent(id, 990);
+        f.serial[id] = 7;
       }
+      if (pending40) f.setPresent(40, 0);
+      return f;
+    }
+
+    /**
+     * A delta of tick `tick`, `baseBack` back (0: a full snapshot): the header (all 0 but `flags`),
+     * then what `body` writes.
+     */
+    function handDelta(
+      body: (w: BitWriter) => void,
+      tick = 1000,
+      baseBack = 10,
+      flags = 0,
+    ): Uint8Array {
+      const w = newWriter();
+      w.writeBits(MSG_SNAPSHOT, 8);
+      writeTick(w, tick);
+      w.writeBits(baseBack, 6);
+      w.writeBits(flags, 8);
+      zeros(w, 16 + 8 + 8);
+      body(w);
+      expect(w.error).toBe(false);
+      return w.bytes.slice(0, w.byteLength);
+    }
+
+    function zeros(w: BitWriter, bits: number): void {
+      for (let left = bits; left > 0; left -= 16) w.writeBits(0, Math.min(16, left));
+    }
+
+    /** A record's id, removed and new bits, and (for a delta body) its mask. */
+    function rec(w: BitWriter, id: number, removed: number, isNew = 0, mask = -1): void {
+      w.writeBits(id, 16);
+      w.writeBits(removed, 1);
+      if (removed === 1) return;
+      w.writeBits(isNew, 1);
+      if (mask >= 0) w.writeBits(mask, 8);
+    }
+
+    /** No local change, then `count` records. */
+    function records(count: number, body: (w: BitWriter) => void): (w: BitWriter) => void {
+      return (w) => {
+        w.writeBits(0, 8);
+        w.writeBits(count, 7);
+        body(w);
+      };
+    }
+
+    const decoded = new WorldFrame();
+    const hdr = new SnapshotHeader();
+    /** Decodes against `base` (null: full); an accepted packet must re-encode to the same bytes. */
+    function decodesAgainst(bytes: Uint8Array, base: WorldFrame | null): boolean {
+      const r = readerOver(bytes);
+      if (!decodeSnapshotHeader(r, hdr) || !decodeSnapshotBody(r, hdr, base, SNAP_SELF, decoded)) {
+        return false;
+      }
+      const w = newWriter();
+      expect(encodeSnapshot(w, hdr, decoded, base, SNAP_SELF)).toBe(true);
+      expect(hex(w.bytes.subarray(0, w.byteLength))).toBe(hex(bytes));
+      return true;
+    }
+
+    it("keeps unlisted players, drops removed ones, and re-sends a new incarnation in full", () => {
+      const base = handBase();
+      expect(decodesAgainst(handDelta(records(0, () => {})), base)).toBe(true);
+      expect([...[SNAP_SELF, 3, 20, 40].map((s) => decoded.stamp[s])]).toEqual([
+        1000, 1000, 1000, 1000,
+      ]);
+      expect([decoded.presentCount, decoded.serial[3]]).toEqual([4, 7]);
+      // 20 left, 3 turned, 40 holds another player: "new" sets the serial past the baseline's
+      // (the client reads none; it keeps re-encoding canonical), 50 joined.
+      const changes = records(4, (w) => {
+        rec(w, 3, 0, 0, E_YAW);
+        w.writeBits(5, 16);
+        rec(w, 20, 1);
+        rec(w, 40, 0, 1);
+        zeros(w, ENTITY_NEW_BITS - 18);
+        rec(w, 50, 0, 1);
+        zeros(w, ENTITY_NEW_BITS - 18);
+      });
+      expect(decodesAgainst(handDelta(changes), base)).toBe(true);
+      expect([decoded.present[20], decoded.yaw[3], decoded.serial[40], decoded.serial[50]]).toEqual(
+        [0, 5, 8, 0],
+      );
+      expect(decoded.presentCount).toBe(4);
+      // A pending baseline slot (D-046) may be removed or sent new, never left out or sent a delta.
+      const pending = handBase(true);
+      expect(decodesAgainst(handDelta(records(1, (w) => rec(w, 40, 1))), pending)).toBe(true);
+      const renew = records(1, (w) => {
+        rec(w, 40, 0, 1);
+        zeros(w, ENTITY_NEW_BITS - 18);
+      });
+      expect(decodesAgainst(handDelta(renew), pending)).toBe(true);
+      expect(decoded.serial[40]).toBe(0);
+      expect(decodesAgainst(handDelta(records(0, () => {})), pending)).toBe(false);
+      const deltaOfPending = records(1, (w) => {
+        rec(w, 40, 0, 0, E_YAW);
+        w.writeBits(5, 16);
+      });
+      expect(decodesAgainst(handDelta(deltaOfPending), pending)).toBe(false);
+      // A baseline holding the receiver as pending has no local state to code against.
+      const selfPending = handBase();
+      selfPending.setPresent(SNAP_SELF, 0);
+      expect(decodesAgainst(handDelta(records(0, () => {})), selfPending)).toBe(false);
     });
 
-    it("random multi-byte corruption of snapshots and inputs", () => {
-      const rng = new Mulberry32(0xc0de);
-      const w = newWriter();
-      for (const type of [MSG_SNAPSHOT, MSG_INPUT]) {
-        const k = kindOf(type);
-        for (let i = 0; i < 2000; i++) {
-          const bytes = k.random(rng, w);
-          const n = 1 + rng.nextInt(4);
-          for (let j = 0; j < n; j++) bytes[rng.nextInt(bytes.length)] = rng.nextInt(256);
-          decodeEverywhere(bytes, bytes.length, w);
-        }
+    it("sends a slot the baseline holds as pending in full, even with the same serial", () => {
+      const base = handBase(true);
+      const cur = new WorldFrame();
+      for (const id of [SNAP_SELF, 3, 20, 40]) {
+        cur.setPresent(id, 1000);
+        cur.serial[id] = id === SNAP_SELF ? 0 : 7;
       }
+      cur.yaw[40] = 5;
+      expect(entityRecordBits(cur, base, 40)).toBe(ENTITY_NEW_BITS);
+      const w = newWriter();
+      const h = new SnapshotHeader();
+      h.serverTick = 1000;
+      h.baseBack = 10;
+      expect(encodeSnapshot(w, h, cur, base, SNAP_SELF)).toBe(true);
+      // Header, no local change, count 1, then the record: id 40, removed 0, new 1.
+      expect(w.bitLength).toBe(86 + 8 + 7 + ENTITY_NEW_BITS);
+      const bytes = w.bytes.slice(0, w.byteLength);
+      expect(decodesAgainst(bytes, base)).toBe(true);
+      expect([decoded.yaw[40], decoded.stamp[40]]).toEqual([5, 1000]);
+    });
+
+    /** A deferred list of `ids` (count 6, ids u16), as written after the records. */
+    function deferredList(ids: readonly number[], count = ids.length): (w: BitWriter) => void {
+      return (w) => {
+        w.writeBits(count, SNAP_DEFERRED_COUNT_BITS);
+        for (const id of ids) w.writeBits(id, SNAP_DEFERRED_ID_BITS);
+      };
+    }
+
+    it("keeps a deferred player's baseline state and stamp, or marks it pending (D-046)", () => {
+      // Baseline 990: 3 and 20 hold state (3 as of tick 985, a deferred copy itself), 40 pending.
+      const base = handBase(true);
+      base.setPresent(3, 985);
+      base.yaw[3] = 9;
+      // 3 and 40 left out, 50 left out (absent in the baseline), 20 unchanged.
+      const left = deferredList([3, 40, 50]);
+      const body = records(0, left);
+      expect(decodesAgainst(handDelta(body, 1000, 10, SNAP_FLAG_DEFERRED), base)).toBe(true);
+      expect(hdr.deferred).toBe(3);
+      expect([3, 20, 40, 50].map((s) => [decoded.present[s], decoded.stamp[s]])).toEqual([
+        [1, 985],
+        [1, 1000],
+        [1, 0],
+        [1, 0],
+      ]);
+      expect([decoded.yaw[3], decoded.serial[3], decoded.pendingCount]).toEqual([9, 7, 2]);
+      // A frame that holds 3's copy is a baseline like any other: 3 unlisted is unchanged and
+      // fresh, 40 still pending must be listed again (or sent new, or removed).
+      const next = new WorldFrame();
+      for (let s = 0; s < FRAME_SLOTS; s++) copySlot(next, s, decoded, s);
+      expect(decodesAgainst(handDelta(records(0, deferredList([40, 50])), 1001, 1, 8), next)).toBe(
+        true,
+      );
+      expect([decoded.stamp[3], decoded.stamp[40], decoded.stamp[50]]).toEqual([1001, 0, 0]);
+      expect(decodesAgainst(handDelta(records(0, deferredList([40])), 1001, 1, 8), next)).toBe(
+        false,
+      );
+      // In a full snapshot every left-out player is pending.
+      const full = (w: BitWriter) => {
+        zeros(w, PLAYER_STATE_BITS);
+        w.writeBits(1, 7);
+        rec(w, 3, 0, 1);
+        zeros(w, ENTITY_NEW_BITS - 18);
+        deferredList([20, 40])(w);
+      };
+      expect(decodesAgainst(handDelta(full, 1000, 0, SNAP_FLAG_DEFERRED), null)).toBe(true);
+      expect([decoded.stamp[3], decoded.stamp[20], decoded.stamp[40]]).toEqual([1000, 0, 0]);
+      expect(decoded.pendingCount).toBe(2);
+    });
+
+    it("refuses a deferred list the encoder never writes (the NET-01 patched-field table, D-046)", () => {
+      const base = handBase();
+      const D = SNAP_FLAG_DEFERRED;
+      const removal3 = (w: BitWriter) => rec(w, 3, 1);
+      const refused: [string, Uint8Array][] = [
+        ["the flag with count 0", handDelta(records(0, deferredList([], 0)), 1000, 10, D)],
+        [
+          "the flag with no list",
+          handDelta(
+            records(0, () => {}),
+            1000,
+            10,
+            D,
+          ),
+        ],
+        ["a list without the flag", handDelta(records(0, deferredList([3])))],
+        ["ids unsorted", handDelta(records(0, deferredList([20, 3])), 1000, 10, D)],
+        ["a duplicate id", handDelta(records(0, deferredList([3, 3])), 1000, 10, D)],
+        ["the receiver's own id", handDelta(records(0, deferredList([SNAP_SELF])), 1000, 10, D)],
+        ["an id ≥ 64", handDelta(records(0, deferredList([64])), 1000, 10, D)],
+        ["id 0xffff", handDelta(records(0, deferredList([0xffff])), 1000, 10, D)],
+        [
+          "an id also in the records",
+          handDelta(
+            records(1, (w) => {
+              removal3(w);
+              deferredList([3])(w);
+            }),
+            1000,
+            10,
+            D,
+          ),
+        ],
+        ["a count past the ids", handDelta(records(0, deferredList([3, 20], 3)), 1000, 10, D)],
+      ];
+      for (const [label, bytes] of refused) expect(decodesAgainst(bytes, base), label).toBe(false);
+      expect(decodesAgainst(handDelta(records(0, deferredList([3, 20])), 1000, 10, D), base)).toBe(
+        true,
+      );
+    });
+
+    it("encodes a left-out player only as the receiver would rebuild it (D-046)", () => {
+      const base = handBase(true);
+      base.setPresent(3, 985);
+      const cur = new WorldFrame();
+      const h = new SnapshotHeader();
+      h.serverTick = 1000;
+      h.baseBack = 10;
+      const reset = () => {
+        cur.clear();
+        for (const s of [SNAP_SELF, 3, 20, 40]) {
+          copySlot(cur, s, base, s);
+          cur.setPresent(s, 1000);
+        }
+      };
+      const encodes = (): boolean => encodeSnapshot(newWriter(), h, cur, base, SNAP_SELF);
+      const cases: [string, () => void, boolean][] = [
+        ["a copy of the baseline's state and stamp", () => cur.setPresent(3, 985), true],
+        ["pending where the baseline is pending", () => cur.setPresent(40, 0), true],
+        ["pending where the baseline lacks the slot", () => cur.setPresent(50, 0), true],
+        ["pending where the baseline holds state", () => cur.setPresent(20, 0), false],
+        ["a copy with another stamp", () => cur.setPresent(3, 986), false],
+        [
+          "a copy whose fields differ",
+          () => {
+            cur.setPresent(3, 985);
+            cur.yaw[3] = 1;
+          },
+          false,
+        ],
+        [
+          "a copy of another incarnation",
+          () => {
+            cur.setPresent(3, 985);
+            cur.serial[3] = 8;
+          },
+          false,
+        ],
+        ["a copy where the baseline is pending", () => cur.setPresent(40, 985), false],
+        ["the receiver left out", () => cur.setPresent(SNAP_SELF, 990), false],
+      ];
+      for (const [label, edit, ok] of cases) {
+        reset();
+        edit();
+        expect(encodes(), label).toBe(ok);
+      }
+      // Two left out: the flag, a 6-bit count and two u16 ids after the records (40 still needs
+      // its full body otherwise).
+      reset();
+      cur.setPresent(3, 985);
+      cur.setPresent(40, 0);
+      const w = newWriter();
+      expect(encodeSnapshot(w, h, cur, base, SNAP_SELF)).toBe(true);
+      expect(w.bitLength).toBe(SNAP_HEADER_BITS + 8 + SNAP_ENTITY_COUNT_BITS + 6 + 2 * 16);
+      expect(decodesAgainst(w.bytes.slice(0, w.byteLength), base)).toBe(true);
+      expect(frameDigest(decoded, SNAP_SELF)).toBe(frameDigest(cur, SNAP_SELF));
+    });
+
+    it("refuses what the delta encoder never writes (the NET-01 patched-field table)", () => {
+      const base = handBase();
+      type Body = (w: BitWriter) => void;
+      const one = (id: number, mask: number, fields: Body): Body =>
+        records(1, (w) => {
+          rec(w, id, 0, 0, mask);
+          fields(w);
+        });
+      const origin = (c: number, width: number, v: number): Body =>
+        one(3, E_ORIGIN, (w) => {
+          w.writeBits(c, 2);
+          if (c !== 0) w.writeSigned(v, width);
+          w.writeBits(0, 4);
+        });
+      const velocity = (c: number, width: number, v: number): Body =>
+        one(3, E_VELOCITY, (w) => {
+          w.writeBits(c, 2);
+          if (c !== 0) w.writeSigned(v, width);
+          w.writeBits(0, 4);
+        });
+      const local =
+        (mask: number, fields: Body): Body =>
+        (w) => {
+          w.writeBits(mask, 8);
+          fields(w);
+          w.writeBits(0, 7);
+        };
+      const events = (seq: number, k0: number, v0: number): Body =>
+        one(3, E_EVENTS, (w) => {
+          w.writeBits(seq, 8);
+          w.writeBits(k0, 4);
+          w.writeBits(v0, 8);
+          w.writeBits(0, 12);
+        });
+      const accepted: [string, Body][] = [
+        ["origin +1 (class 1)", origin(1, 7, 1)],
+        ["origin −64 (class 1)", origin(1, 7, -64)],
+        ["origin 64 (class 2)", origin(2, 13, 64)],
+        ["origin −4096 (class 2)", origin(2, 13, -4096)],
+        ["origin 4096 (absolute)", origin(3, 21, 4096)],
+        ["origin −524288 (absolute)", origin(3, 21, -524288)],
+        ["velocity −32 (class 1)", velocity(1, 6, -32)],
+        ["velocity 32 (class 2)", velocity(2, 11, 32)],
+        ["velocity 1024 (absolute)", velocity(3, 16, 1024)],
+        ["velocity −32767", velocity(3, 16, -32767)],
+        ["team 2", one(3, E_TEAM, (w) => w.writeBits(2, 2))],
+        ["a teleport", one(3, E_TELEPORT, (w) => w.writeBits(1, 8))],
+        ["an event", events(1, PMEV_STEP, 3)],
+        ["every entity flag", one(3, E_FLAGS, (w) => w.writeBits(ENTITY_FLAG_MASK, 10))],
+        ["pitch −16201", one(3, E_PITCH, (w) => w.writeBits(-PITCH_LIMIT_U16 & 0xffff, 16))],
+        ["local yaw", local(L_YAW, (w) => w.writeBits(7, 16))],
+        ["local pitch", local(L_PITCH, (w) => w.writeBits(7, 16))],
+        ["local flags", local(L_FLAGS, (w) => w.writeBits(1, 10))],
+        ["local waterLevel", local(L_WATER, (w) => w.writeBits(3, 2))],
+        ["local stamina", local(L_STAMINA, (w) => w.writeBits(100, 16))],
+        ["local ground ENTITY_WORLD", local(L_GROUND, (w) => w.writeBits(32768, 16))],
+        [
+          "local velocity −524287 (absolute)",
+          local(L_VELOCITY, (w) => {
+            w.writeBits(3, 2);
+            w.writeSigned(-524287, 20);
+            w.writeBits(0, 4);
+          }),
+        ],
+      ];
+      for (const [label, body] of accepted) {
+        expect(decodesAgainst(handDelta(body), base), label).toBe(true);
+      }
+      const refused: [string, Body][] = [
+        ["mask 0", one(3, 0, () => {})],
+        ["an origin group of class 0 only", origin(0, 0, 0)],
+        ["origin class 1 of 0", origin(1, 7, 0)],
+        ["origin class 2 that fits i7", origin(2, 13, 63)],
+        ["origin class 2 of 0", origin(2, 13, 0)],
+        ["origin absolute that fits i13", origin(3, 21, 4095)],
+        ["origin absolute past +16384 u", origin(3, 21, 524289)],
+        ["a velocity group of class 0 only", velocity(0, 0, 0)],
+        ["velocity class 1 of 0", velocity(1, 6, 0)],
+        ["velocity class 2 that fits i6", velocity(2, 11, 31)],
+        ["velocity absolute that fits i11", velocity(3, 16, 1023)],
+        ["velocity −32768", velocity(3, 16, -32768)],
+        ["yaw equal to the baseline", one(3, E_YAW, (w) => w.writeBits(0, 16))],
+        ["pitch equal to the baseline", one(3, E_PITCH, (w) => w.writeBits(0, 16))],
+        ["pitch past +16201", one(3, E_PITCH, (w) => w.writeBits(PITCH_LIMIT_U16 + 1, 16))],
+        ["flags equal to the baseline", one(3, E_FLAGS, (w) => w.writeBits(0, 10))],
+        ["entity flag bit 5", one(3, E_FLAGS, (w) => w.writeBits(1 << 5, 10))],
+        ["team equal to the baseline", one(3, E_TEAM, (w) => w.writeBits(0, 2))],
+        ["team 3", one(3, E_TEAM, (w) => w.writeBits(3, 2))],
+        ["teleportSeq equal to the baseline", one(3, E_TELEPORT, (w) => w.writeBits(0, 8))],
+        ["events equal to the baseline", events(0, 0, 0)],
+        ["event kind 4", events(1, 4, 0)],
+        ["JUMP with a value", events(1, PMEV_JUMP, 1)],
+        ["a delta for a slot the baseline lacks", one(4, E_YAW, (w) => w.writeBits(5, 16))],
+        ["a removal of a slot the baseline lacks", records(1, (w) => rec(w, 4, 1))],
+        ["the receiver's own id", one(SNAP_SELF, E_YAW, (w) => w.writeBits(5, 16))],
+        [
+          "ids unsorted",
+          records(2, (w) => {
+            rec(w, 20, 1);
+            rec(w, 3, 1);
+          }),
+        ],
+        ["a local yaw equal to the baseline", local(L_YAW, (w) => w.writeBits(0, 16))],
+        ["a local pitch equal to the baseline", local(L_PITCH, (w) => w.writeBits(0, 16))],
+        ["local flags equal to the baseline", local(L_FLAGS, (w) => w.writeBits(0, 10))],
+        ["a local ground equal to the baseline", local(L_GROUND, (w) => w.writeBits(0, 16))],
+        ["a local waterLevel equal to the baseline", local(L_WATER, (w) => w.writeBits(0, 2))],
+        ["a local stamina equal to the baseline", local(L_STAMINA, (w) => w.writeBits(0, 16))],
+        ["a local origin group of class 0 only", local(L_ORIGIN, (w) => w.writeBits(0, 6))],
+        ["a local velocity group of class 0 only", local(L_VELOCITY, (w) => w.writeBits(0, 6))],
+        ["local ground past ENTITY_WORLD", local(L_GROUND, (w) => w.writeBits(32769, 16))],
+        [
+          "local velocity −2^19",
+          local(L_VELOCITY, (w) => {
+            w.writeBits(3, 2);
+            w.writeSigned(-524288, 20);
+            w.writeBits(0, 4);
+          }),
+        ],
+      ];
+      for (const [label, body] of refused) {
+        expect(decodesAgainst(handDelta(body), base), label).toBe(false);
+      }
+      // The header: a baseline before tick 1. The body: a baseline without the receiver.
+      expect(
+        decodesAgainst(
+          handDelta(
+            records(0, () => {}),
+            10,
+            10,
+          ),
+          base,
+        ),
+      ).toBe(false);
+      expect(
+        decodesAgainst(
+          handDelta(
+            records(0, () => {}),
+            11,
+            10,
+          ),
+          base,
+        ),
+      ).toBe(true);
+      expect(decodesAgainst(handDelta(records(0, () => {})), handBase(false, false))).toBe(false);
+    });
+
+    it("picks the smallest class at every boundary, and the size functions match the bytes", () => {
+      const base = handBase();
+      const cur = new WorldFrame();
+      const hdrOut = new SnapshotHeader();
+      hdrOut.serverTick = 1000;
+      hdrOut.baseBack = 10;
+      const w = newWriter();
+      const roundTrip = (label: string): number => {
+        w.reset();
+        expect(encodeSnapshot(w, hdrOut, cur, base, SNAP_SELF), label).toBe(true);
+        expect(decodesAgainst(w.bytes.slice(0, w.byteLength), base), label).toBe(true);
+        expect(frameDigest(decoded, SNAP_SELF), label).toBe(frameDigest(cur, SNAP_SELF));
+        const total =
+          SNAP_HEADER_BITS +
+          localBlockBits(cur, base, SNAP_SELF) +
+          SNAP_ENTITY_COUNT_BITS +
+          entityRecordBits(cur, base, 3);
+        expect(total, label).toBe(w.bitLength);
+        return w.bitLength;
+      };
+      const reset = () => {
+        for (let s = 0; s < FRAME_SLOTS; s++) copySlot(cur, s, base, s);
+        for (const s of [SNAP_SELF, 3, 20, 40]) cur.setPresent(s, 1000);
+      };
+      const fixed = SNAP_HEADER_BITS + 8 + SNAP_ENTITY_COUNT_BITS;
+      // [delta, payload bits] per class: i7 / i13 / absolute i21 for origins, i6 / i11 / i16 for
+      // entity velocities, i7 / i13 / i20 for the local velocity.
+      const originCases: [number, number][] = [
+        [1, 7],
+        [-1, 7],
+        [63, 7],
+        [-64, 7],
+        [64, 13],
+        [-65, 13],
+        [4095, 13],
+        [-4096, 13],
+        [4096, 21],
+        [-4097, 21],
+        [524288, 21],
+      ];
+      for (const [d, bits] of originCases) {
+        reset();
+        cur.originY[3] = d;
+        expect(roundTrip(`entity origin ${d}`)).toBe(fixed + 26 + 6 + bits);
+        reset();
+        cur.originZ[SNAP_SELF] = d;
+        expect(roundTrip(`local origin ${d}`)).toBe(fixed + 6 + bits);
+      }
+      const velocityCases: [number, number][] = [
+        [1, 6],
+        [31, 6],
+        [-32, 6],
+        [32, 11],
+        [-33, 11],
+        [1023, 11],
+        [-1024, 11],
+        [1024, 16],
+        [-32767, 16],
+      ];
+      for (const [d, bits] of velocityCases) {
+        reset();
+        cur.entVelX[3] = d;
+        expect(roundTrip(`entity velocity ${d}`)).toBe(fixed + 26 + 6 + bits);
+      }
+      const localVelocityCases: [number, number][] = [
+        [-64, 7],
+        [64, 13],
+        [4096, 20],
+        [-524287, 20],
+      ];
+      for (const [d, bits] of localVelocityCases) {
+        reset();
+        cur.vel16X[SNAP_SELF] = d;
+        expect(roundTrip(`local velocity ${d}`)).toBe(fixed + 6 + bits);
+      }
+      // Each other field alone, at its width.
+      const alone: [string, () => void, number][] = [
+        ["yaw", () => (cur.yaw[3] = 0xffff), 16],
+        ["pitch", () => (cur.pitch[3] = PITCH_LIMIT_U16), 16],
+        ["flags", () => (cur.flags[3] = 1), 10],
+        ["team", () => (cur.team[3] = TEAM_1), 2],
+        ["teleportSeq", () => (cur.teleportSeq[3] = 255), 8],
+        ["eventSeq", () => (cur.eventSeq[3] = 1), 32],
+        ["an event slot", () => (cur.evKind[6] = PMEV_JUMP), 32],
+      ];
+      for (const [label, set, bits] of alone) {
+        reset();
+        set();
+        expect(roundTrip(label)).toBe(fixed + 26 + bits);
+      }
+      // Flags the record does not carry change nothing; a new serial is a new body.
+      reset();
+      cur.flags[3] = 1 << 5;
+      expect(roundTrip("an owner-only flag")).toBe(fixed);
+      reset();
+      cur.serial[3] = 8;
+      expect(roundTrip("another incarnation")).toBe(fixed + ENTITY_NEW_BITS);
+      reset();
+      cur.setAbsent(3);
+      expect(roundTrip("a removal")).toBe(fixed + ENTITY_REMOVED_BITS);
+      // Every local field changed at once, each origin and velocity axis absolute: the worst.
+      reset();
+      cur.originX[SNAP_SELF] = 524288;
+      cur.originY[SNAP_SELF] = -524288;
+      cur.originZ[SNAP_SELF] = 5000;
+      cur.vel16X[SNAP_SELF] = 524287;
+      cur.vel16Y[SNAP_SELF] = -524287;
+      cur.vel16Z[SNAP_SELF] = 5000;
+      cur.yaw[SNAP_SELF] = 1;
+      cur.pitch[SNAP_SELF] = 1;
+      cur.flags[SNAP_SELF] = 1;
+      cur.ground1[SNAP_SELF] = 1;
+      cur.waterLevel[SNAP_SELF] = 1;
+      cur.stamina[SNAP_SELF] = 1;
+      expect(localBlockBits(cur, base, SNAP_SELF)).toBe(LOCAL_DELTA_MAX_BITS);
+      expect(roundTrip("every local field")).toBe(fixed - 8 + LOCAL_DELTA_MAX_BITS);
     });
   });
 
-  it("fits the M2 sizes: a snapshot in 42 B, an INPUT of 4 cmds in 55 B", () => {
+  it("fits the v2 sizes (M3 design §2.1 goldens): 862 B full at 32 players, an INPUT of 4 cmds in 55 B", () => {
     const w = newWriter();
-    const s = new SnapshotMsg();
-    s.state.origin[0] = -16384;
-    encodeSnapshot(w, s);
-    expect(w.bitLength).toBe(335);
-    expect(w.byteLength).toBe(42);
+    const m = new SnapshotParts();
+    const rng = new Mulberry32(0x512e);
+    const size = (others: number, spectator = false): [number, number] => {
+      m.hdr.serverTick = 600;
+      m.hdr.flags = spectator ? SNAP_FLAG_SPECTATOR : 0;
+      randomFrame(rng, m.frame, 600, spectator ? -1 : SNAP_SELF, others);
+      w.reset();
+      expect(encodeSnapshotParts(w, m), `${others} others`).toBe(true);
+      expect(decodeSnapshotParts(readerOver(w.bytes, w.byteLength), new SnapshotParts())).toBe(
+        true,
+      );
+      return [w.bitLength, w.byteLength];
+    };
+    expect(SNAP_HEADER_BITS).toBe(86);
+    expect(SNAP_SPECTATOR_HEADER_BITS).toBe(70);
+    expect(ENTITY_NEW_BITS).toBe(213);
+    // Alone: 86 + 199 + 7. The full snapshot of a 32-player match: + 31 × 213. 37 players (the
+    // cap until the scheduler, D-034): + 36 × 213. The most a live full snapshot holds: 39.
+    expect(size(0)).toEqual([292, 37]);
+    expect(size(15)).toEqual([3487, 436]);
+    expect(size(31)).toEqual([6895, 862]);
+    expect(size(36)).toEqual([7960, 995]);
+    expect(size(LIVE_FULL_MAX_OTHERS)).toEqual([8599, 1075]);
+    // 64 players unscheduled: 13711 bits, past the budget (the D-046 scheduler defers).
+    expect(SNAP_FULL_FIXED_BITS + 63 * ENTITY_NEW_BITS).toBe(13711);
+    // Spectator (demo files only): 70 + 7 + 213 per player, up to all 64, within 2048 B.
+    expect(size(0, true)).toEqual([77, 10]);
+    const allSpectated = size(64, true);
+    expect(allSpectated).toEqual([13709, 1714]);
+    expect(allSpectated[1]).toBeLessThanOrEqual(MAX_SPECTATOR_SNAPSHOT_BYTES);
     const input = new InputMsg();
     input.count = INPUT_MAX_CMDS;
     for (let i = 0; i < INPUT_MAX_CMDS; i++) (input.cmds[i] as UserCmd).tick = 100 - i;
     w.reset();
     expect(encodeInput(w, input)).toBe(true);
     expect([w.bitLength, w.byteLength]).toEqual([435, 55]);
+  });
+
+  it("fits the worst deltas (M3 design §2.1 goldens): 942 B at 32 players, 1088 B at 37 and scheduled at 64", () => {
+    const w = newWriter();
+    const m = new SnapshotParts();
+    /**
+     * The worst delta with `others` remotes and `removals` players gone since the baseline: every
+     * local and entity field changed, origins and velocities absolute (D-034's bound); the last
+     * `deferred` of the remotes left out (D-046), keeping the baseline's state.
+     */
+    const worst = (
+      others: number,
+      spectator = false,
+      removals = 0,
+      deferred = 0,
+    ): [number, number] => {
+      const h = m.hdr;
+      h.serverTick = 600;
+      h.baseBack = 10;
+      h.flags = spectator ? SNAP_FLAG_SPECTATOR : 0;
+      const base = m.base;
+      const cur = m.frame;
+      base.clear();
+      cur.clear();
+      const self = spectator ? -1 : SNAP_SELF;
+      if (!spectator) {
+        base.setPresent(SNAP_SELF, 590);
+        cur.setPresent(SNAP_SELF, 600);
+        cur.originX[SNAP_SELF] = 524288;
+        cur.originY[SNAP_SELF] = -524288;
+        cur.originZ[SNAP_SELF] = 524288;
+        cur.vel16X[SNAP_SELF] = 524287;
+        cur.vel16Y[SNAP_SELF] = -524287;
+        cur.vel16Z[SNAP_SELF] = 524287;
+        cur.yaw[SNAP_SELF] = 1;
+        cur.pitch[SNAP_SELF] = 1;
+        cur.flags[SNAP_SELF] = 1;
+        cur.ground1[SNAP_SELF] = 1;
+        cur.waterLevel[SNAP_SELF] = 1;
+        cur.stamina[SNAP_SELF] = 1;
+      }
+      let s = 0;
+      for (let n = 0; n < others + removals; n++, s++) {
+        if (s === self) s++;
+        base.setPresent(s, 590);
+        if (n >= others) continue;
+        if (n >= others - deferred) {
+          copySlot(cur, s, base, s);
+          continue;
+        }
+        cur.setPresent(s, 600);
+        cur.originX[s] = 524288;
+        cur.originY[s] = -524288;
+        cur.originZ[s] = 524288;
+        cur.entVelX[s] = 32767;
+        cur.entVelY[s] = -32767;
+        cur.entVelZ[s] = 32767;
+        cur.yaw[s] = 1;
+        cur.pitch[s] = 1;
+        cur.flags[s] = 1;
+        cur.team[s] = 1;
+        cur.teleportSeq[s] = 1;
+        cur.eventSeq[s] = 1;
+        cur.evKind[s * 2] = PMEV_STEP;
+        cur.evValue[s * 2] = 1;
+      }
+      w.reset();
+      if (!encodeSnapshotParts(w, m)) return [w.bitLength, -1];
+      const out = new SnapshotParts(m.base);
+      expect(decodeSnapshotParts(readerOver(w.bytes, w.byteLength), out)).toBe(true);
+      expect(frameDigest(out.frame, self)).toBe(frameDigest(cur, self));
+      return [w.bitLength, w.byteLength];
+    };
+    expect([LOCAL_DELTA_MAX_BITS, ENTITY_DELTA_MAX_BITS, ENTITY_REMOVED_BITS]).toEqual([
+      219, 233, 17,
+    ]);
+    expect(SNAP_DELTA_FIXED_BITS).toBe(312);
+    // The smallest delta record (docs/05 §3.6: 28–233 bits): id, removed, new, mask, a team.
+    const smallBase = new WorldFrame();
+    const small = new WorldFrame();
+    smallBase.setPresent(3, 590);
+    small.setPresent(3, 600);
+    small.team[3] = 1;
+    expect(entityRecordBits(small, smallBase, 3)).toBe(28);
+    // 86 + 219 + 7 + 31 × 233 at 32 players; + 36 × 233 at 37 (SNAP_FIT_MAX_PLAYERS: the cap
+    // until the scheduler, D-034), within 1100 B by construction.
+    expect(worst(31)).toEqual([7535, 942]);
+    expect(SNAP_FIT_MAX_PLAYERS).toBe(37);
+    expect(worst(SNAP_FIT_MAX_PLAYERS - 1)).toEqual([8700, 1088]);
+    // 36 remotes and 6 removals (43 → 37 players inside the ack window) are 8802 bits: past the
+    // budget, so the encoder refuses (the D-046 scheduler's case).
+    expect(worst(36, false, 6)).toEqual([8802, -1]);
+    // 63 remotes (64 players): 14991 bits unscheduled. The scheduler's worst: 34 records fit
+    // (SNAP_MIN_CAPACITY), 29 deferred ids: 86 + 219 + 7 + 6 + 34 × 233 + 29 × 16.
+    expect(worst(63)).toEqual([14991, -1]);
+    expect(worst(63, false, 0, 29)).toEqual([8704, 1088]);
+    expect([SNAP_MIN_CAPACITY, SNAP_MIN_CAPACITY_FULL, SNAP_MAX_STALENESS]).toEqual([34, 37, 2]);
+    // Spectator (demo files only): 70 + 7 + 233 per player.
+    expect(worst(32, true)).toEqual([7533, 942]);
+    const all = worst(64, true);
+    expect(all).toEqual([14989, 1874]);
+    expect(all[1]).toBeLessThanOrEqual(MAX_SPECTATOR_SNAPSHOT_BYTES);
   });
 });

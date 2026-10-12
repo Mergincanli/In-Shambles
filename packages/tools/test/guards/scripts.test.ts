@@ -156,6 +156,13 @@ describe("root scripts", () => {
     );
   });
 
+  it("run demo-info from the tools' replay CLI (D-044)", () => {
+    expect(rootScripts["demo-info"]).toBe("pnpm --filter @game/tools --fail-if-no-match demo-info");
+    expect(packageScripts.get("@game/tools")?.["demo-info"]).toBe(
+      "node --import tsx src/replay/cli.ts",
+    );
+  });
+
   it("never use a pnpm built-in command name (D-015)", () => {
     for (const name of Object.keys(rootScripts)) expect(PNPM_BUILTINS, name).not.toContain(name);
   });
@@ -226,19 +233,32 @@ describe("docs", () => {
 // `vitest run -t "^BAL-"` (and MV-, NET-) finds tests by their full name, which starts with the
 // top-level describe, and exits 0 if none match. So each bal-NN / mv-NN / net-NN *.test.ts file
 // must name its top-level describe after its ID (docs/10 §2), and the suite script must filter on
-// that prefix. The guard's own describe must not start with a prefix, or the suites would run it.
-const testFiles = readdirSync(fromRoot("packages"), { recursive: true, encoding: "utf8" })
-  .filter((file) => !file.includes("node_modules") && /\.test\.[cm]?[jt]sx?$/.test(file))
+// that prefix, in both tiers (D-032) once the long tier holds any of the prefix's tests. The
+// guard's own describe must not start with a prefix, or the suites would run it.
+const packageFiles = readdirSync(fromRoot("packages"), { recursive: true, encoding: "utf8" })
+  .filter((file) => !file.includes("node_modules"))
   .map((file) => join(fromRoot("packages"), file));
+const testFiles = packageFiles.filter((file) => /\.test\.[cm]?[jt]sx?$/.test(file));
+const longFiles = packageFiles.filter((file) => file.endsWith(".long.ts"));
+
+/** Whether `file` has a top-level describe (or describe.each) starting with `prefix`-NN. */
+function hasIdDescribe(file: string, prefix: string): boolean {
+  const source = readFileSync(file, "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  return new RegExp(`^describe(\\.each\\([^\\n]*\\))?\\(\\s*["'\`]${prefix}-\\d`, "m").test(source);
+}
 
 /**
  * prefix, root script, IDs that must have a file (NET-01 is a shared unit test, D-026, so it has no
- * net-01 file). acceptance-ids.test.ts checks the full docs/09 lists.
+ * net-01 file; NET-02's unit is one too, `shared/test/net/delta.test.ts`, with its real-store twin
+ * in `client/test/net/net-02-store.test.ts`, the match's rule in
+ * `server/test/match/match.test.ts` (a NET-02 describe) and its match legs in
+ * `tools/test/net/net-02-delta-match.test.ts` since M3 increment 9).
+ * acceptance-ids.test.ts checks the full docs/09 lists.
  */
 const ID_SUITES = [
   ["BAL", "test:balance", ["01"]],
   ["MV", "test:movement", ["01", "03", "04", "05", "06", "07", "08", "17", "18", "19"]],
-  ["NET", "test:net", ["03", "04"]],
+  ["NET", "test:net", ["02", "03", "04", "05", "08", "09", "12"]],
 ] as const;
 
 describe.each(ID_SUITES)("naming of the %s-NN test files", (prefix, script, required) => {
@@ -253,10 +273,20 @@ describe.each(ID_SUITES)("naming of the %s-NN test files", (prefix, script, requ
 
   // Pinned whole: a trailing `--project`, `--dir` or path would narrow the run to no ID test, and
   // vitest would still exit 0. Only the flag that shows the suites' printed reports may follow.
+  // With long tests of the prefix (D-032), the fast run is followed by the long config's with the
+  // same filter, so the suite runs every test of both tiers (`-t` matching nothing in one tier
+  // still exits 0 there, its files skipped).
   it.runIf(files.length > 0)(`run under pnpm ${script}`, () => {
-    expect(rootScripts[script]).toMatch(
-      new RegExp(`^vitest run -t "\\^${prefix}-"( --silent=false)?$`),
-    );
+    const fast = `vitest run -t "\\^${prefix}-"( --silent=false)?`;
+    const long = `vitest run --config vitest\\.long\\.config\\.ts -t "\\^${prefix}-"\\1`;
+    const tiered = longFiles.some((file) => hasIdDescribe(file, prefix));
+    expect(rootScripts[script]).toMatch(new RegExp(tiered ? `^${fast} && ${long}$` : `^${fast}$`));
+  });
+
+  it(`find ${prefix} long tests only in files named after their ID`, () => {
+    for (const file of longFiles.filter((f) => hasIdDescribe(f, prefix))) {
+      expect(basename(file), file).toMatch(pattern);
+    }
   });
 
   it.each(files.map((file) => [basename(file), file]))(

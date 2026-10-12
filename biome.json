@@ -38,6 +38,8 @@
       "includes": [
         "packages/shared/**",
         "packages/server/src/match/**",
+        "packages/server/src/node/**",
+        "packages/server/src/transport/**",
         "packages/client/src/net/**"
       ],
       "linter": {

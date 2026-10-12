@@ -6,7 +6,9 @@ import { registerViewCvars } from "../render/viewCvars";
  * The console's and HUD's client cvars (docs/06 §7, M2 design §4): ARCHIVE settings, saved per
  * player (app/settings.ts) and never replicated, so they shape only this client's input and
  * picture, never the simulation. The net code's and the view's own client cvars register beside
- * them (`registerClientCvars`).
+ * them (`registerClientCvars`). Third person and the debug views are CHEAT as well (D-042): they
+ * show what a player should not see in a match, so they work only while the server's `sv_cheats`
+ * is 1 (the Worker; a dedicated server's admin may set it).
  */
 export const CLIENT_CVARS = Object.freeze([
   Object.freeze({
@@ -50,24 +52,28 @@ export const CLIENT_CVARS = Object.freeze([
     type: "bool" as const,
     default: false,
     description: "Pull the camera 120 u behind the eye, so the hull and traces are visible",
+    cheat: true,
   }),
   Object.freeze({
     name: "r_debugHull",
     type: "bool" as const,
     default: false,
     description: "Draw the player's collision hull",
+    cheat: true,
   }),
   Object.freeze({
     name: "r_debugTraces",
     type: "bool" as const,
     default: false,
     description: "Draw pmove's traces (green: clear, red: hit, with the hit normal)",
+    cheat: true,
   }),
   Object.freeze({
     name: "r_debugGround",
     type: "bool" as const,
     default: false,
     description: "Draw the ground normal under the player",
+    cheat: true,
   }),
   Object.freeze({
     name: "r_stats",
@@ -77,7 +83,16 @@ export const CLIENT_CVARS = Object.freeze([
   }),
 ]);
 
-/** Registers every client cvar: the net code's, the view's and CLIENT_CVARS, all ARCHIVE. */
+/**
+ * The rcon password (D-042): what the console's `rcon` sends with each command. Never ARCHIVE:
+ * it stays in this page's memory only, never in settings storage, and the console never shows it.
+ */
+export const RCON_PASSWORD_CVAR = "rcon_password";
+
+/**
+ * Registers every client cvar: the net code's, the view's and CLIENT_CVARS, all ARCHIVE (the
+ * CHEAT ones too), and `rcon_password`, not archived.
+ */
 export function registerClientCvars(reg: CvarRegistry): void {
   registerClientNetCvars(reg);
   registerViewCvars(reg);
@@ -88,9 +103,16 @@ export function registerClientCvars(reg: CvarRegistry): void {
       default: c.default,
       ...("min" in c ? { min: c.min, max: c.max } : {}),
       description: c.description,
-      flags: CvarFlag.ARCHIVE,
+      flags: CvarFlag.ARCHIVE | ("cheat" in c ? CvarFlag.CHEAT : 0),
     });
   }
+  reg.register({
+    name: RCON_PASSWORD_CVAR,
+    type: "string",
+    default: "", // design (D-042): no password until the admin types one
+    description: "Password the console's rcon sends to the server (kept in memory only)",
+    flags: CvarFlag.NONE,
+  });
 }
 
 /** CLIENT_CVARS as plain fields, refreshed when the registry's version moves. */

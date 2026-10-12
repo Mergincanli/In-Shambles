@@ -1,5 +1,5 @@
 import { angleVectors, CMAP_VERTEX_FLOATS, degreesToU16, vec3 } from "@game/shared";
-import { Object3D, PerspectiveCamera, Vector3 } from "three";
+import { Matrix4, Object3D, PerspectiveCamera, Vector3 } from "three";
 import { describe, expect, it } from "vitest";
 import {
   convertVertices,
@@ -8,6 +8,14 @@ import {
   toSim,
   toThree,
   toThreeDir,
+  UPRIGHT_HEIGHT,
+  UPRIGHT_SLOTS,
+  UPRIGHT_X,
+  UPRIGHT_Y,
+  UPRIGHT_YAW,
+  UPRIGHT_Z,
+  unitsToMeters,
+  uprightToThree,
 } from "../../src/render/space";
 
 const v = (x: number, y: number, z: number) => new Vector3(x, y, z);
@@ -147,5 +155,31 @@ describe("render/space (docs/06 §7)", () => {
     expect(o.rotation.order).toBe("YXZ");
     const right = new Vector3(1, 0, 0).applyQuaternion(o.quaternion);
     expect(Math.abs(right.y)).toBeLessThan(1e-12);
+  });
+
+  it("places an upright body: feet at the sim position, local +X along the sim yaw, squashed up", () => {
+    const pose = new Float64Array(UPRIGHT_SLOTS);
+    const out = new Float32Array(32).fill(Number.NaN);
+    for (const yaw of [0, 90, 135, 270, 359]) {
+      pose[UPRIGHT_X] = 100;
+      pose[UPRIGHT_Y] = -200;
+      pose[UPRIGHT_Z] = 24;
+      pose[UPRIGHT_YAW] = yaw;
+      pose[UPRIGHT_HEIGHT] = 40 / 56;
+      uprightToThree(pose, out, 16);
+      expect(Number.isNaN(out[15] as number)).toBe(true);
+      const m = new Matrix4().fromArray(Array.from(out), 16);
+      // The local origin is the sim position.
+      expectClose(new Vector3().applyMatrix4(m), three(100, -200, 24), 1e-6);
+      // Local +X is the facing: sim (cos yaw, sin yaw, 0).
+      const r = (yaw * Math.PI) / 180;
+      const facing = new Vector3(1, 0, 0).transformDirection(m);
+      expectClose(facing, dir(Math.cos(r), Math.sin(r), 0), 1e-6);
+      // Up stays up, scaled; the matrix keeps handedness (a rotation times a scale).
+      const up = new Vector3(0, 1, 0).applyMatrix4(m).sub(new Vector3().applyMatrix4(m));
+      expectClose(up, dir(0, 0, 40 / 56), 1e-6);
+      expect(m.determinant()).toBeCloseTo(40 / 56, 6);
+    }
+    expect(unitsToMeters(56)).toBeCloseTo(56 * METERS_PER_UNIT, 12);
   });
 });

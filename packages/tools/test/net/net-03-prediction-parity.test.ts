@@ -11,6 +11,7 @@ import {
 } from "@game/shared";
 import { describe, expect, it } from "vitest";
 import { NetHarness } from "./harness";
+import { expectNoStrikes } from "./honest";
 
 // NET-03 (docs/05 §14, M2 design §5): prediction parity. The real Match and the real client net
 // code over a lossless loopback, a fake clock and frames at 144 Hz ± 1 ms: a 3600-tick mixed
@@ -54,6 +55,7 @@ function expectParity(h: NetHarness): void {
   expect(h.compared(h.finalPredicted)).toBeGreaterThanOrEqual(TICKS);
   expect(h.mismatches(h.finalPredicted)).toEqual([]);
   expect(h.unreconciled()).toEqual([]);
+  expectNoStrikes(h.match, [h.client]);
 }
 
 describe("NET-03: prediction parity on a lossless link", () => {

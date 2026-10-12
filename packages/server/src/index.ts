@@ -4,8 +4,15 @@
  * stays out of it, so importing this never pulls in Node APIs.
  */
 export * from "./match/commands";
+export * from "./match/demo";
+export * from "./match/history";
 export * from "./match/host";
 export * from "./match/inputQueue";
+export * from "./match/limits";
 export * from "./match/loop";
 export * from "./match/match";
+export * from "./match/mirror";
+export * from "./match/scheduler";
 export * from "./match/session";
+export * from "./match/spawns";
+export * from "./match/tickStats";

@@ -5,22 +5,40 @@ import {
   type NetProfile,
   CvarRegistry as Registry,
   registerPmoveCvars,
+  registerServerReplicatedCvars,
+  TEXT_MAX,
 } from "@game/shared";
 import { describe, expect, it } from "vitest";
+import { connectSearch, demoSearch } from "../../src/app/params";
 import { Binds } from "../../src/console/binds";
 import { registerClientCvars } from "../../src/console/clientCvars";
-import { CONSOLE_COMMANDS, type ConsoleHost, runConsoleCommand } from "../../src/console/commands";
+import {
+  CONSOLE_COMMANDS,
+  type ConsoleHost,
+  consoleEcho,
+  type DemoFollow,
+  runConsoleCommand,
+} from "../../src/console/commands";
 import { CorrectionLog } from "../../src/net/predictor";
 
-function host(connected = true, withNet = true, corrections: CorrectionLog | null = null) {
+function host(
+  connected = true,
+  withNet = true,
+  corrections: CorrectionLog | null = null,
+  demo: DemoFollow | null = null,
+) {
   const cvars: CvarRegistry = new Registry();
   registerPmoveCvars(cvars);
+  registerServerReplicatedCvars(cvars);
   registerClientCvars(cvars);
   const out: string[] = [];
   const sent: string[] = [];
   let profile: NetProfile = NET_PROFILE_LAN;
   let toggled = 0;
   let cleared = 0;
+  const connects: string[] = [];
+  const demos: string[] = [];
+  let disconnects = 0;
   const h: ConsoleHost = {
     cvars,
     binds: new Binds(),
@@ -41,6 +59,28 @@ function host(connected = true, withNet = true, corrections: CorrectionLog | nul
         }
       : null,
     corrections,
+    server: "the local server (Worker)",
+    connected: () => connected,
+    connect: (address) => {
+      // boot.ts's own step: the page query to reload with (here recorded instead).
+      const next = connectSearch(address, "?autotest=1&connect=ws://old:1/");
+      if (!next.ok) return next.error;
+      connects.push(next.search);
+      return null;
+    },
+    disconnect: () => {
+      if (!connected) return false;
+      connected = false;
+      disconnects++;
+      return true;
+    },
+    demo,
+    playDemo: (url) => {
+      const next = demoSearch(url, "?autotest=1&connect=ws://old:1/");
+      if (!next.ok) return next.error;
+      demos.push(next.search);
+      return null;
+    },
   };
   const run = (line: string) => {
     out.length = 0;
@@ -55,8 +95,73 @@ function host(connected = true, withNet = true, corrections: CorrectionLog | nul
     profile: () => profile,
     toggled: () => toggled,
     cleared: () => cleared,
+    connects,
+    demos,
+    disconnects: () => disconnects,
   };
 }
+
+/** A demo's follow camera over a set of present ids, as DemoPlayer steps it. */
+function follower(present: number[]): DemoFollow & { following: number } {
+  const step = (from: number, dir: number) => {
+    for (let k = 1; k <= 64; k++) {
+      const s = ((((from < 0 ? (dir > 0 ? -1 : 0) : from) + dir * k) % 64) + 64) % 64;
+      if (present.includes(s)) return s;
+    }
+    return -1;
+  };
+  const f = {
+    following: present.length > 0 ? Math.min(...present) : -1,
+    followNext: () => {
+      f.following = step(f.following, 1);
+      return f.following;
+    },
+    followPrev: () => {
+      f.following = step(f.following, -1);
+      return f.following;
+    },
+    follow: (id: number) => {
+      if (!present.includes(id)) return false;
+      f.following = id;
+      return true;
+    },
+  };
+  return f;
+}
+
+describe("demo console commands (D-044)", () => {
+  it("say they are for demo playback outside it", () => {
+    const t = host();
+    for (const line of ["follownext", "followprev", "follow 2"]) {
+      expect(t.run(line)).toEqual([`${line.split(" ")[0]}: only during demo playback`]);
+    }
+  });
+
+  it("step through present players, wrapping, and jump to one that is present", () => {
+    const demo = follower([1, 4, 9]);
+    const t = host(false, false, null, demo);
+    expect(demo.following).toBe(1);
+    expect(t.run("follownext")).toEqual(["following #4"]);
+    expect(t.run("follownext")).toEqual(["following #9"]);
+    expect(t.run("follownext")).toEqual(["following #1"]);
+    expect(t.run("followprev")).toEqual(["following #9"]);
+    expect(t.run("follow 4")).toEqual(["following #4"]);
+    expect(t.run("follow 5")).toEqual(["follow: player #5 is not in the demo now"]);
+    expect(demo.following).toBe(4);
+    expect(t.run("follow")).toEqual(["usage: follow <id>"]);
+    expect(t.run("follow x")).toEqual(["usage: follow <id>"]);
+    expect(host(false, false, null, follower([])).run("follownext")).toEqual([
+      "follownext: nobody to follow",
+    ]);
+  });
+
+  it("demo <url> reloads the page with ?demo= and without ?connect=", () => {
+    const t = host();
+    expect(t.run("demo")).toEqual(["usage: demo <url>"]);
+    expect(t.run("demo /demos/a.demo")).toEqual([]);
+    expect(t.demos).toEqual(["autotest=1&demo=%2Fdemos%2Fa.demo"]);
+  });
+});
 
 describe("console commands (M2 design §2)", () => {
   it("net_corrections prints the correction log with what differed", () => {
@@ -121,13 +226,113 @@ describe("console commands (M2 design §2)", () => {
     const t = host();
     const lines = t.run("cvarlist r_debug");
     expect(lines).toEqual([
-      "A---- r_debugGround false",
-      "A---- r_debugHull false",
-      "A---- r_debugTraces false",
+      "A-C-- r_debugGround false",
+      "A-C-- r_debugHull false",
+      "A-C-- r_debugTraces false",
       "3 cvars starting with r_debug",
     ]);
     expect(t.run("cvarlist pm_gravity")[0]).toBe("-R--- pm_gravity 800");
     expect(t.run("cvarlist").at(-1)).toMatch(/^\d+ cvars$/);
+  });
+
+  it("refuse CHEAT cvars while the server's sv_cheats is 0, and allow them at 1 (D-042)", () => {
+    const t = host();
+    for (const name of ["cl_thirdPerson", "r_debugHull", "r_debugTraces", "r_debugGround"]) {
+      expect(t.run(`set ${name} 1`)).toEqual([
+        `${name} is cheat protected: the server's sv_cheats is 0`,
+      ]);
+      expect(t.run(`toggle ${name}`)[0]).toMatch(/cheat protected/);
+      expect(t.cvars.get(name)).toBe(false);
+    }
+    // r_stats is no cheat: the renderer's own counters show nothing of the match.
+    expect(t.run("set r_stats 1")).toEqual(["r_stats = true"]);
+    // What ClientSim does with a block whose sv_cheats is 1, then 0.
+    t.cvars.setAllowCheats(true);
+    expect(t.run("set cl_thirdPerson 1")).toEqual(["cl_thirdPerson = true"]);
+    t.cvars.setAllowCheats(false);
+    expect(t.cvars.get("cl_thirdPerson")).toBe(false);
+    // sv_cheats itself is the server's: a set goes there.
+    expect(t.run("set sv_cheats 1")).toEqual([]);
+    expect(t.sent).toEqual(["set sv_cheats 1"]);
+  });
+
+  it("rcon sends the command with the password; the password is never printed (D-042)", () => {
+    const t = host();
+    expect(t.run("rcon set pm_gravity 400")).toEqual(["rcon: set rcon_password first"]);
+    expect(t.run("rcon")).toEqual(["usage: rcon <command…>"]);
+    expect(t.run("set rcon_password two words")).toEqual(["rcon_password set"]);
+    expect(t.run("rcon_password")[0]).toMatch(/^rcon_password = \(hidden\) \(default \): /);
+    expect(t.run("cvarlist rcon")[0]).toBe("----- rcon_password (hidden)");
+    expect(t.run('rcon  set sv_motd "a b"')).toEqual([]);
+    expect(t.run("RCON status")).toEqual([]);
+    expect(t.sent).toEqual(['rcon "two words" set sv_motd "a b"', 'rcon "two words" status']);
+    for (const bad of ['a"b', "€uro", "tab\there"]) {
+      t.cvars.set("rcon_password", bad);
+      expect(t.run("rcon status"), bad).toEqual([
+        "rcon: rcon_password must be printable ASCII without double quotes",
+      ]);
+    }
+    const off = host(false);
+    off.cvars.set("rcon_password", "pw");
+    expect(off.run("rcon status")).toEqual(["rcon: not connected"]);
+    // Open, but not welcomed yet (HELLO sent, no WELCOME): sendCommand refuses a line that fits.
+    t.cvars.set("rcon_password", "pw");
+    t.h.sendServer = () => false;
+    expect(t.run("rcon status")).toEqual([
+      "rcon: not connected yet (waiting for the server's WELCOME)",
+    ]);
+    // Connected, but the CMD does not encode (Connection.sendCommand returns false): the reason.
+    expect(t.run("rcon say €uro")).toEqual([
+      `rcon: the command does not fit one message (${TEXT_MAX} Latin-1 chars with the password)`,
+    ]);
+    t.cvars.set("rcon_password", "x".repeat(1100));
+    expect(t.run("rcon status")).toEqual([
+      `rcon: the command does not fit one message (${TEXT_MAX} Latin-1 chars with the password)`,
+    ]);
+  });
+
+  it("echo a line that sets rcon_password hidden and keep it out of the history", () => {
+    expect(consoleEcho("set rcon_password hunter2")).toEqual({
+      echo: "set rcon_password (hidden)",
+      history: null,
+    });
+    expect(consoleEcho('  SET RCON_PASSWORD "a b').history).toBeNull();
+    expect(consoleEcho('  SET RCON_PASSWORD "a b').echo).not.toContain("a b");
+    expect(consoleEcho("rcon_password hunter2")).toEqual({
+      echo: "rcon_password (hidden)",
+      history: null,
+    });
+    // Every spelling the tokenizer reads as setting it, quotes against the name included.
+    for (const line of [
+      '"set" rcon_password hunter2a',
+      'set "rcon_password"hunter2b',
+      'set rcon_password"hunter2c"',
+      "set\tRCON_PASSWORD\thunter2d",
+      'set rcon_password "hunter2 e"',
+    ]) {
+      const e = consoleEcho(line);
+      expect(e.history, line).toBeNull();
+      expect(e.echo, line).toMatch(/^set rcon_password \(hidden\)$/i);
+      const t = host();
+      expect(t.run(line), line).toEqual(["rcon_password set"]);
+    }
+    // A bind's command naming it: hidden here, and refused (binds are saved).
+    const bind = 'bind KeyP "set rcon_password hunter2"';
+    expect(consoleEcho(bind)).toEqual({ echo: "bind KeyP (hidden)", history: null });
+    const t = host();
+    expect(t.run(bind)).toEqual([
+      "bind: a bind cannot hold rcon_password: binds are saved, the password never is",
+    ]);
+    expect(t.h.binds.commandFor("KeyP")).toBeUndefined();
+    for (const line of [
+      "rcon_password",
+      "reset rcon_password",
+      "cvarlist rcon_password",
+      "rcon status",
+      "set sensitivity 3",
+    ]) {
+      expect(consoleEcho(line)).toEqual({ echo: line, history: line });
+    }
   });
 
   it("show a cvar by its bare name, mirror values included", () => {
@@ -179,6 +384,30 @@ describe("console commands (M2 design §2)", () => {
     expect(t.profile()).toBe(findNetProfile("wan-150-loss2"));
     expect(t.run("net_profile moon")[0]).toMatch(/^unknown profile moon/);
     expect(host(true, false).run("net_profile lan")[0]).toMatch(/no network simulator/);
+  });
+
+  it("connect shows the server or starts a session on another; disconnect leaves (D-031)", () => {
+    const t = host();
+    expect(t.run("connect")).toEqual(["playing on the local server (Worker)"]);
+    expect(t.run("connect ws://127.0.0.1:28700")).toEqual([]);
+    expect(t.run("connect localhost:28700")).toEqual([]);
+    // The page reloads with only `connect` replaced (`URLSearchParams` encodes the URL).
+    expect(t.connects).toEqual([
+      "autotest=1&connect=ws%3A%2F%2F127.0.0.1%3A28700%2F",
+      "autotest=1&connect=ws%3A%2F%2Flocalhost%3A28700%2F",
+    ]);
+    expect(new URLSearchParams(t.connects[0]).get("connect")).toBe("ws://127.0.0.1:28700/");
+    expect(t.run("connect wss://example.org")[0]).toMatch(/^connect: wss:\/\/ comes with/);
+    expect(t.run("connect http://example.org")[0]).toMatch(/starts with ws:\/\//);
+    expect(t.run("connect ws://h:1/?x=1")[0]).toMatch(/no query string/);
+    expect(t.connects).toHaveLength(2);
+    expect(t.run("disconnect")).toEqual([]);
+    expect(t.disconnects()).toBe(1);
+    // Once the session closed, `connect` alone no longer claims it plays there.
+    expect(t.run("connect")).toEqual(["not connected (last: the local server (Worker))"]);
+    expect(t.run("disconnect")).toEqual(["disconnect: not connected"]);
+    expect(t.disconnects()).toBe(1);
+    expect(host(false).run("disconnect")).toEqual(["disconnect: not connected"]);
   });
 
   it("clear, toggle the console, help, quotes", () => {

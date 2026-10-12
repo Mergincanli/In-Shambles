@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { CvarFlag } from "../../src/cvars/flags";
 import { type CvarDef, CvarRegistry } from "../../src/cvars/registry";
+import { registerServerReplicatedCvars } from "../../src/cvars/serverReplicated";
 import { BitWriter } from "../../src/net/bitstream";
 import {
   applyCvarBlock,
@@ -96,10 +97,16 @@ describe("replicated cvar block (D-027)", () => {
     expect(() => cvarHash16(-1)).toThrow(/valid block hash/);
   });
 
-  it("pins the hash of the default M2 movement cvars", () => {
+  it("pins the hash of the default replicated cvars", () => {
     const reg = new CvarRegistry();
     registerPmoveCvars(reg);
+    // The M2 movement defaults alone (D-027).
     expect(registryCvarHash(reg)).toBe(0x11df56b6);
+    // With sv_cheats (D-042): 0 on the dedicated server, 1 in the Worker.
+    registerServerReplicatedCvars(reg);
+    expect(registryCvarHash(reg)).toBe(0xb6e41a20);
+    reg.set("sv_cheats", 1);
+    expect(registryCvarHash(reg)).toBe(0x82394b41);
   });
 
   it("does not depend on registration order or on non-replicated cvars", () => {
@@ -388,21 +395,17 @@ describe("replicated cvar block (D-027)", () => {
       rejects(good, local, "not-replicated", "sv_fps");
     });
 
-    it("takes the server's CHEAT and LATCH values as sent, whatever the mirror's cheat setting", () => {
+    it("takes the server's LATCH values as sent, whatever the mirror's own LATCH rule", () => {
+      // No replicated cvar can be CHEAT (D-042): the mirror's cheat reset never touches them.
       const defs = smallDefs().map((d) =>
-        d.name === "pm_gravity"
-          ? { ...d, flags: R | CvarFlag.CHEAT }
-          : d.name === "sv_fps"
-            ? { ...d, flags: R | CvarFlag.LATCH }
-            : d,
+        d.name === "sv_fps" ? { ...d, flags: R | CvarFlag.LATCH } : d,
       );
       const server = registry(defs);
-      server.setAllowCheats(true);
       server.set("pm_gravity", 300);
       server.set("sv_fps", 120);
       server.applyLatched();
       const block = captureCvarBlock(server, new CvarBlock());
-      // The mirror's cheats are off and its own LATCH rule would hold sv_fps back: neither applies.
+      // The mirror's own LATCH rule would hold sv_fps back: it does not apply.
       const client = registry(defs);
       client.set("sv_fps", 30);
       expect(client.info("sv_fps")?.latched).toBe(30);

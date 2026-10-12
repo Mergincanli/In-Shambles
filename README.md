@@ -24,11 +24,13 @@ pnpm typecheck && pnpm lint && pnpm test
 | Command | What it does |
 |---|---|
 | `pnpm dev` | The game on http://localhost:5173: the client with the server in a Web Worker (offline loopback) |
-| `pnpm dev:server` | Dedicated server from source (stop with Ctrl+C) |
+| `pnpm dev:server` | Dedicated server from source on port 28700 (stop with Ctrl+C); JSON log lines on stdout |
 | `pnpm build` | Production client build and server bundle (`packages/server/dist/main.js`) |
-| `pnpm test` | All tests |
-| `pnpm test:movement` | Movement tests (MV-xx) on the greybox courses, each printing measured vs. target |
-| `pnpm test:net` | Netcode tests (NET-xx): codec checks, and the real match and client net code under the network profiles; NET-04 prints a summary line per profile |
+| `pnpm test` | The fast tests (about 40 s); the last line gives the run's wall and CPU time against its budget |
+| `pnpm test:long` | The long tier: long deterministic runs and full sweeps, the native-ESM allocation guards, the real-process smokes (server, bots, bench CLI) and the client production build; run it too when you change those entry points (CI runs both) |
+| `pnpm test:load` | The load tier: the built server, 16 bots and a headless Chromium player on real time, judged on NET-09 and the 16 bots + 1 human check, then a 63-bot match and 4 matches × 16 bots, reported only (about 10 min; `pnpm build` first, and a quiet machine: a leg fails when the 1-minute load is above 0.5 per core); summaries in `reports/load/` (git-ignored) |
+| `pnpm test:movement` | Movement tests (MV-xx) on the greybox courses, each printing measured vs. target; runs the fast tier, then the long tier's MV legs |
+| `pnpm test:net` | Netcode tests (NET-xx): codec checks, and the real match and client net code under the network profiles; NET-04 prints a summary line per profile; runs the fast tier, then the long tier's NET legs |
 | `pnpm test:balance` | Balance tests (BAL-xx) |
 | `pnpm test:browser` | Determinism, trace and pmove vectors in headless browsers (`BROWSERS=chromium,firefox,webkit`, default `chromium`), plus the client e2e smoke test in headless Chromium |
 | `pnpm typecheck` | Type-check all packages |
@@ -37,16 +39,18 @@ pnpm typecheck && pnpm lint && pnpm test
 | `pnpm greybox` | Recompile the greybox courses into `content/maps/` (commit the result) |
 | `pnpm bench` | Sim microbenchmarks against the `docs/10` §4.4 budgets (`--strict` exits 1 on a miss) |
 | `pnpm feel-report` | Base movement metrics vs. their targets on `movement_lab`; also writes `reports/feel.md` (git-ignored) |
+| `pnpm bots --count 16 --profile wan-100-loss1 --minutes 2` | Headless bots over real WebSockets on a server it starts (or `--server ws://host:port`, `/m/<name>` for a named match), then a JSON + markdown summary in `reports/bots/` (git-ignored) with PASS/FAIL against the `docs/10` §4 budgets, the prediction's health and the host's load before the run (`--strict` exits 1 on a FAIL and refuses builds older than their sources); `--human` adds a headless Chromium player on the production client build (`pnpm build` first). The bots and the browser run at nice 10 |
+| `pnpm demo-info <file> [--json]` | What a server demo (`demos/*.demo`) holds: header, duration, record counts, keyframes, snapshot sizes, players seen and cvar changes; `--json` prints one JSON object, and an invalid file exits 1 with the reason |
 
-`pnpm dev:server` runs under pnpm, which doesn't forward signals to the server. To stop it from a script or process manager, signal its process group (Ctrl+C does this), or run the bundle directly with `node packages/server/dist/main.js`.
+`pnpm dev:server` reads `packages/server/server.cfg` and takes flags such as `--port 0` (any free port), `--map movement_lab` and `--set <cvar>=<value>` (`docs/06` §8). It answers `GET /status` and `GET /metrics` with JSON on its port, logs a `metrics` line every 10 s (`sv_metricsInterval`), writes its metrics to a file at shutdown with `--metrics-out <file>` (relative paths in flags are relative to the directory you typed the command in) (`--metrics-discard <s>` leaves the first seconds out), and runs console commands typed on stdin (`set pm_gravity 400`, `metrics reset`). One process can run several matches: `--match <name>=<map>[:<maxClients>]` (repeatable) or `match_add` lines in `server.cfg` create them, and on stdin `matches` lists them, `match_add <name> <map> [maxClients]` and `match_remove <name>` add and remove one, and `@<name> <command>` sends a command to one match (`docs/06` §8). It runs under pnpm, which doesn't forward signals to the server. To stop it from a script or process manager, signal its process group (Ctrl+C does this), or run the bundle directly with `node packages/server/dist/main.js`.
 
 `pnpm test:browser` uses the Playwright browsers already on the machine. `pnpm exec playwright install chromium firefox webkit` downloads them (CI does this), and `CHROMIUM_PATH` points the Chromium run at another build.
 
-`pnpm dev` opens `movement_lab`. Add `?bot=circle` to the URL to watch the scripted strafe-jump circuit, `?autotest=1` to have the page report its status in `<html data-*>`, and `?cam=x,y,z,yaw,pitch` for a fixed camera (map units and degrees). `pnpm --filter @game/client screenshot <dir>` saves PNG screenshots of a few viewpoints from the production build (`--dev` uses the dev server); the bot's shots run at 640x360 (`--bot-width`, `--bot-height`), since software WebGL is too slow at full size for the bot to move.
+`pnpm dev` opens `movement_lab` on the in-browser server. With `pnpm dev:server` running, `?connect=ws://localhost:28700` plays on the dedicated server instead (its map, `arena_greybox` by default; `?connect=ws://localhost:28700/m/<name>` joins the match named `<name>`, the bare address the first one), and `?net_profile=wan-100-loss1` starts on a simulated link; the console's `connect <address>` and `disconnect` do the same from inside the game. A demo: `rcon record` (with `rcon_password` set and the server started with `SV_RCON_PASSWORD`), play, `rcon stoprecord`, then `?demo=<url>` replays it behind one player (under `pnpm dev` the URL of `demos/run.demo` is `/@fs/<absolute repository path>/demos/run.demo`); `]` and `[` switch players, the console's `follow <id>` picks one (`docs/06` §6). Add `?bot=circle` to the URL to watch the scripted strafe-jump circuit, `?autotest=1` to have the page report its status in `<html data-*>`, and `?cam=x,y,z,yaw,pitch` for a fixed camera (map units and degrees). `pnpm --filter @game/client screenshot <dir>` saves PNG screenshots of a few viewpoints from the production build (`--dev` uses the dev server); the bot's shots run at 640x360 (`--bot-width`, `--bot-height`), since software WebGL is too slow at full size for the bot to move.
 
 `pnpm --filter @game/client vectors-page <out.html>` builds the determinism vectors page as one self-contained HTML file: open it in any browser (a phone's Safari, say) and it replays every vector table there, showing PASS/FAIL per table. `pnpm dev` also serves it at http://localhost:5173/vectors.html.
 
-Commands for later milestones (`bots`, `balance-report`, `mapc`) already exist and print the milestone that adds them. `CLAUDE.md` has the full list.
+Commands for later milestones (`balance-report`, `mapc`) already exist and print the milestone that adds them. `CLAUDE.md` has the full list.
 
 ## Try it
 
@@ -59,6 +63,7 @@ Commands for later milestones (`bots`, `balance-report`, `mapc`) already exist a
    - `set cl_thirdPerson 1` with `set r_debugHull 1`, `set r_debugTraces 1` and `set r_debugGround 1`: the hull, pmove's traces and the ground normal.
    - `bind KeyQ +jump`, `unbind KeyQ`, `cvarlist cl_`.
 4. Settings (sensitivity, field of view, HUD toggles, binds) are saved in the browser.
+5. On a dedicated server: `pnpm dev:server` in one terminal, `pnpm dev` in another, then open http://localhost:5173/?connect=ws://localhost:28700 to play alone on `arena_greybox` over a real WebSocket.
 
 ## Layout
 

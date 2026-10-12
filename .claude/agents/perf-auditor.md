@@ -8,7 +8,7 @@ You audit performance against the budgets in `docs/10-testing-and-performance.md
 
 ## Procedure
 
-1. Run `pnpm bench`. Run `pnpm bots --count 16 --profile wan-100-loss1 --minutes 2` if networking or the server is involved. Collect the metrics.
+1. Run `pnpm bench` and `pnpm test:long` (the native-ESM allocation guards for the per-tick and per-frame paths). Run `pnpm bots --count 16 --profile wan-100-loss1 --minutes 2` if networking or the server is involved. Collect the metrics.
 2. Static scan of hot paths (`packages/shared/src/sim`, `combat`, `net`; `packages/server/src/match`; `packages/client/src/render`, `fx`, `hud`, `net`):
    - allocations inside per-tick or per-frame code (`new`, object/array literals, spread, closures, `map`/`filter`/`forEach`, string concatenation in loops)
    - polymorphic or megamorphic object shapes in hot structs; fields added after construction

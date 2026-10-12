@@ -1,12 +1,17 @@
 import {
   buildCollisionWorld,
+  type Cmap,
   CvarRegistry,
-  decodeCmap,
+  demoMapHash,
+  findNetProfile,
   NET_PROFILE_LAN,
   NetSimTransport,
   registerPmoveCvars,
+  registerServerReplicatedCvars,
+  type Transport,
+  VIEW_HEIGHT_STANDING,
+  validateDemo,
 } from "@game/shared";
-import mapUrl from "../../../../content/maps/movement_lab.cmap?url";
 import { Binds } from "../console/binds";
 import { registerClientCvars } from "../console/clientCvars";
 import { type ConsoleHost, runConsoleCommand } from "../console/commands";
@@ -20,32 +25,45 @@ import {
   ClientSim,
   type CmdSampler,
   createScriptedInput,
+  DeferredSocket,
+  DemoPlayer,
+  KEEPALIVE_INTERVAL_MS,
   NeutralInput,
   PortTransport,
+  WebSocketTransport,
 } from "../net";
 import { GameRenderer } from "../render/renderer";
 import type { WorkerOutMsg, WorkerStartMsg } from "../worker/messages";
+import { DemoGame } from "./demoGame";
 import { Game, type StatusSink } from "./game";
-import type { BootParams } from "./params";
-import { browserStorage, loadSettings, SettingsSaver } from "./settings";
+import { fetchMap, loadServerMap } from "./maps";
+import { type BootParams, connectSearch, demoSearch, parseServerUrl } from "./params";
+import { browserStorage, type HeldCheats, loadSettings, SettingsSaver } from "./settings";
 
 /** The net simulator's seed on the page: one fixed schedule per profile (D-028). */
 const NETSIM_SEED = 0x5eed;
+
+/** The local server's map (M2): the movement course. */
+const WORKER_MAP = "movement_lab";
 
 export interface Booted {
   readonly game: Game;
   readonly client: ClientSim;
   readonly renderer: GameRenderer | null;
-  readonly worker: Worker;
+  /** The local server, or null on a dedicated server (`?connect=`). */
+  readonly worker: Worker | null;
   readonly console: GameConsole;
 }
 
 /**
- * Starts the game on `canvas` (M2 design §1 app/boot.ts): fetches movement_lab (a `?url` asset,
- * so the build ships the file), decodes it, starts the server Worker with a copy of the bytes and
- * the server ends of two MessageChannels, connects the client over the page's ends (through the
- * net simulator, `lan` until `net_profile` picks another), builds the scene, the HUD, the console
- * and the input, and starts the frame loop. Autotest pages skip saved settings and pointer lock.
+ * Starts the game on `canvas` (M2 design §1 app/boot.ts, D-031). By default it fetches
+ * movement_lab (every map is a bundled `?url` asset, app/maps.ts), starts the server Worker with a
+ * copy of the bytes and the server ends of two MessageChannels, and connects over the page's
+ * ends. With `?connect=ws://…` it opens a WebSocket to that dedicated server instead and loads the
+ * map the server's WELCOME names (READY waits for it). Either link goes through the net
+ * simulator, at `?net_profile=` (else `lan`) until the `net_profile` command picks another. Then
+ * the scene, the HUD, the console and the input, and the frame loop. Autotest pages skip saved
+ * settings and pointer lock.
  */
 export async function boot(
   canvas: HTMLCanvasElement,
@@ -55,12 +73,236 @@ export async function boot(
   onError: (message: string) => void,
 ): Promise<Booted> {
   if (status !== null) status.state = "loading";
-  const res = await fetch(mapUrl);
-  if (!res.ok) throw new Error(`map download failed: ${res.status} ${res.statusText}`);
-  const bytes = new Uint8Array(await res.arrayBuffer());
-  const cmap = decodeCmap(bytes);
-  const world = buildCollisionWorld(cmap);
+  let profile = NET_PROFILE_LAN;
+  const profileWarning =
+    params.netProfile === null || findNetProfile(params.netProfile) !== undefined
+      ? null
+      : `unknown net_profile ${params.netProfile}; using lan`;
+  if (params.netProfile !== null) profile = findNetProfile(params.netProfile) ?? NET_PROFILE_LAN;
+  let base: Transport;
+  let worker: Worker | null = null;
+  let cmap: Cmap | null = null;
+  let server: string;
+  let socket: DeferredSocket | null = null;
+  if (params.connect !== null) {
+    const target = parseServerUrl(params.connect);
+    if (!target.ok) throw new Error(`?connect=${params.connect}: ${target.error}`);
+    server = target.url;
+    // Made at `connect()` below, after the startup work (DeferredSocket).
+    socket = new DeferredSocket(() => new WebSocket(target.url));
+    base = new WebSocketTransport(socket);
+  } else {
+    server = "the local server (Worker)";
+    const file = await fetchMap(WORKER_MAP);
+    cmap = file.cmap;
+    const started = startWorker(file.bytes, buildHash, onError);
+    worker = started.worker;
+    base = started.transport;
+  }
 
+  const cvars = new CvarRegistry();
+  registerPmoveCvars(cvars);
+  registerServerReplicatedCvars(cvars);
+  registerClientCvars(cvars);
+  const binds = new Binds();
+  const storage = params.autotest ? null : browserStorage();
+  // Cheats are off until the server's block says otherwise (D-042): saved CHEAT values wait.
+  const held: HeldCheats = {};
+  const settingWarnings = loadSettings(storage, cvars, binds, held);
+  const saver = new SettingsSaver(storage, cvars, binds, held);
+
+  const actions = new ActionState();
+  const look = new MouseLook();
+  let input: CmdSampler = new PlayerInput(actions, look);
+  let playerLook: MouseLook | null = look;
+  if (params.bot !== null) {
+    const bot = createScriptedInput(params.bot);
+    if (bot === null) console.warn(`unknown bot "${params.bot}"; standing still`);
+    input = bot ?? new NeutralInput();
+    playerLook = null;
+  }
+  /** The session ended: the error box says why, and the prompt and crosshair stay hidden. */
+  let closed = false;
+  // One pump callback for every wake (one per scheduled packet under a non-lan profile).
+  const pump = () => netsim.pump();
+  const netsim: NetSimTransport = new NetSimTransport(
+    base,
+    profile,
+    () => performance.now(),
+    NETSIM_SEED,
+    (at) => {
+      setTimeout(pump, Math.max(0, at - performance.now()));
+    },
+  );
+  const renderer = GameRenderer.create(canvas);
+  if (renderer === null) console.warn("WebGL 2 is unavailable: the game runs without a picture");
+  else if (cmap !== null) renderer.loadMap(cmap);
+  if (status !== null) status.webgl = renderer === null ? "0" : "1";
+  if (status !== null && cmap !== null) status.map = cmap.name;
+  // The simulated link (`?net_profile=`, then the console's `net_profile`), kept current by `run`.
+  if (status !== null) status.netProfile = profile.name;
+  const client: ClientSim = new ClientSim({
+    transport: netsim,
+    ...(cmap === null
+      ? { onMapRequest: (name, hash) => provideMap(name, hash) }
+      : { cmap, world: buildCollisionWorld(cmap) }),
+    buildHash,
+    clock: () => performance.now(),
+    cvars,
+    input,
+    webSocket: params.connect !== null,
+    onCheatsChanged: (allowed) => {
+      if (allowed) saver.restoreCheats();
+    },
+    log: (level, msg) => {
+      if (level === "error") console.error(msg);
+      else if (level === "warn") console.warn(msg);
+      else console.info(msg);
+    },
+    // Fires from a frame's poll, after boot returned (connect() is its last step), so the HUD
+    // and the prompt below exist by then.
+    onClosed: (reason) => {
+      closed = true;
+      onError(`disconnected: ${reason}`);
+      updatePrompt();
+      // Nothing rejoins the local server short of a reload: stop its match ticking for nobody.
+      worker?.terminate();
+    },
+  });
+  /** WELCOME named the server's map: fetch the bundled file, check its hash, hand it over. */
+  function provideMap(name: string, contentHash: string): void {
+    void loadServerMap(client, name, contentHash).then((map) => {
+      if (map === null) return;
+      renderer?.loadMap(map);
+      if (status !== null) status.map = map.name;
+    });
+  }
+
+  const app = canvas.parentElement ?? document.body;
+  const hud = new Hud(app, netsim, renderer);
+  const lock = new PointerLock(canvas, (locked) => {
+    if (!locked) router.releaseAll();
+    updatePrompt();
+  });
+  const host: ConsoleHost = {
+    cvars,
+    binds,
+    print: (text) => gameConsole.print(text),
+    clear: () => gameConsole.clear(),
+    toggleConsole: () => gameConsole.toggle(),
+    sendServer: (text) => client.sendCommand(text),
+    net: netsim,
+    corrections: client.predictor.corrections,
+    server,
+    connected: () => !client.closed,
+    connect: (address) => {
+      const next = connectSearch(address, location.search);
+      if (!next.ok) return next.error;
+      location.search = next.search;
+      return null;
+    },
+    disconnect: () => {
+      if (client.closed) return false;
+      client.disconnect("left the server");
+      return true;
+    },
+    demo: null,
+    playDemo: (url) => reloadWithDemo(url),
+  };
+  const run = (line: string) => {
+    runConsoleCommand(line, host);
+    saver.maybeSave();
+    if (status !== null) status.netProfile = netsim.profile().name;
+  };
+  const router = new KeyRouter(binds, actions, run);
+  const gameConsole = new GameConsole(app, {
+    binds,
+    run,
+    onToggle: (open) => {
+      router.releaseAll();
+      if (open) lock.exit();
+      else if (!params.autotest) lock.request();
+      updatePrompt();
+    },
+  });
+  function updatePrompt(): void {
+    hud.setPrompt(!closed && !params.autotest && !lock.locked && !gameConsole.open);
+    hud.setCrosshair(!closed && !gameConsole.open && (params.autotest || lock.locked));
+  }
+  updatePrompt();
+  attachKeyboard(window, router, {
+    consoleOpen: () => gameConsole.open,
+    closeConsole: () => gameConsole.setOpen(false),
+  });
+  attachMouse(document, look, () => lock.locked);
+  attachMouseButtons(canvas, lock, router, () => !params.autotest && !gameConsole.open);
+  gameConsole.print("In Shambles console: help lists the commands; Backquote or Escape closes it.");
+  gameConsole.print(`playing on ${server}`);
+  if (profileWarning !== null) {
+    console.warn(profileWarning);
+    gameConsole.print(profileWarning);
+  }
+  for (const w of settingWarnings) gameConsole.print(w);
+
+  const game = new Game({
+    client,
+    renderer,
+    status,
+    camera: params.camera,
+    look: playerLook,
+    hud,
+    // The server's PRINTs, then the join and leave notices from its EVENTS (D-043).
+    onFrame: () => {
+      const prints = client.prints;
+      const notices = client.notices;
+      if (prints.length === 0 && notices.length === 0) return;
+      for (const text of prints) gameConsole.print(text);
+      prints.length = 0;
+      for (const text of notices) gameConsole.print(text);
+      notices.length = 0;
+    },
+  });
+  // The socket opens only now, so the server's HELLO timeout (sv_helloTimeout, D-041) times the
+  // link and not this page's startup above (two WebGL contexts, the pmove primer).
+  socket?.open();
+  client.connect();
+  game.start();
+  keepAliveWhileHidden(client);
+  return { game, client, renderer, worker, console: gameConsole };
+}
+
+/**
+ * The hidden-tab keepalive (D-041, M3 design §2.13): a hidden page gets no animation frames, so
+ * while it is hidden a 1 s `setTimeout` chain calls `client.keepalive()` (reliable messages, one
+ * PING, the timeouts; snapshots dropped). The server meanwhile has the silent player stand still;
+ * when the page shows again the frames resume and resync it. The chain ends when the page shows
+ * or the session ends. Chrome throttles the timers of a page hidden for more than about 5 minutes
+ * to one a minute, so such a tab may still time out (docs/05 §2).
+ */
+function keepAliveWhileHidden(client: ClientSim): void {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const beat = () => {
+    timer = null;
+    if (client.closed || document.visibilityState !== "hidden") return;
+    client.keepalive();
+    timer = setTimeout(beat, KEEPALIVE_INTERVAL_MS);
+  };
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden" && timer === null && !client.closed) {
+      timer = setTimeout(beat, KEEPALIVE_INTERVAL_MS);
+    }
+  });
+}
+
+/**
+ * The local server (M2): a module Worker running the match on the map in `bytes`, given a copy of
+ * them and the server ends of two MessageChannels; the page talks over the other ends.
+ */
+function startWorker(
+  bytes: Uint8Array,
+  buildHash: string,
+  onError: (message: string) => void,
+): { worker: Worker; transport: PortTransport } {
   const worker = new Worker(new URL("../worker/serverWorker.ts", import.meta.url), {
     type: "module",
     name: "server",
@@ -97,126 +339,138 @@ export async function boot(
     reliable: reliable.port2,
   };
   worker.postMessage(start, [copy, unreliable.port2, reliable.port2]);
+  return { worker, transport: new PortTransport(unreliable.port1, reliable.port1) };
+}
+
+/** The console's `demo <url>` (D-044): the page reloads with `?demo=`. */
+function reloadWithDemo(url: string): string | null {
+  const next = demoSearch(url, location.search);
+  if (!next.ok) return next.error;
+  location.search = next.search;
+  return null;
+}
+
+export interface BootedDemo {
+  readonly game: DemoGame;
+  readonly demo: DemoPlayer;
+  readonly renderer: GameRenderer | null;
+  readonly console: GameConsole;
+}
+
+/**
+ * `?demo=<url>` (D-044, M3 design §2.12): downloads the demo, checks it whole (`validateDemo`),
+ * loads the bundled map its header names and checks the map's hash, then plays it at 1× with the
+ * camera behind the lowest present player: `]`/`[` (follownext/followprev) and the console's
+ * `follow <id>` switch players. The console and binds work as in play (saved settings load); no
+ * session, prediction or pointer lock. Throws (the page shows it) on a demo that is not valid.
+ */
+export async function bootDemo(
+  canvas: HTMLCanvasElement,
+  params: BootParams,
+  status: StatusSink | null,
+): Promise<BootedDemo> {
+  if (status !== null) status.state = "loading";
+  const source = params.demo ?? "";
+  const url = new URL(source, location.href).href;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`demo ${source}: download failed: ${res.status} ${res.statusText}`);
+  const bytes = new Uint8Array(await res.arrayBuffer());
+  const check = validateDemo(bytes);
+  if (!check.ok) throw new Error(`demo ${source}: ${check.error}`);
+  const header = check.header;
+  const map = (await fetchMap(header.mapName)).cmap;
+  const recorded = demoMapHash(header);
+  if (map.contentHash !== recorded) {
+    throw new Error(
+      `demo ${source}: recorded on map ${header.mapName} version ${recorded}, this client has ${map.contentHash}`,
+    );
+  }
+  const world = buildCollisionWorld(map);
 
   const cvars = new CvarRegistry();
   registerPmoveCvars(cvars);
+  registerServerReplicatedCvars(cvars);
   registerClientCvars(cvars);
   const binds = new Binds();
   const storage = params.autotest ? null : browserStorage();
-  const settingWarnings = loadSettings(storage, cvars, binds);
-  const saver = new SettingsSaver(storage, cvars, binds);
-
-  const actions = new ActionState();
-  const look = new MouseLook();
-  let input: CmdSampler = new PlayerInput(actions, look);
-  let playerLook: MouseLook | null = look;
-  if (params.bot !== null) {
-    const bot = createScriptedInput(params.bot);
-    if (bot === null) console.warn(`unknown bot "${params.bot}"; standing still`);
-    input = bot ?? new NeutralInput();
-    playerLook = null;
-  }
-  /** The session ended: the error box says why, and the prompt and crosshair stay hidden. */
-  let closed = false;
-  const port = new PortTransport(unreliable.port1, reliable.port1);
-  // One pump callback for every wake (one per scheduled packet under a non-lan profile).
-  const pump = () => netsim.pump();
-  const netsim: NetSimTransport = new NetSimTransport(
-    port,
-    NET_PROFILE_LAN,
-    () => performance.now(),
-    NETSIM_SEED,
-    (at) => {
-      setTimeout(pump, Math.max(0, at - performance.now()));
-    },
-  );
-  const client = new ClientSim({
-    transport: netsim,
-    cmap,
-    world,
-    buildHash,
-    clock: () => performance.now(),
-    cvars,
-    input,
-    log: (level, msg) => {
-      if (level === "error") console.error(msg);
-      else if (level === "warn") console.warn(msg);
-      else console.info(msg);
-    },
-    // Fires from a frame's poll, after boot returned (connect() is its last step), so the HUD
-    // and the prompt below exist by then.
-    onClosed: (reason) => {
-      closed = true;
-      onError(`disconnected: ${reason}`);
-      updatePrompt();
-    },
-  });
+  const held: HeldCheats = {};
+  const settingWarnings = loadSettings(storage, cvars, binds, held);
+  const saver = new SettingsSaver(storage, cvars, binds, held);
+  const demo = new DemoPlayer({ bytes, header, world, cvars, clock: () => performance.now() });
 
   const renderer = GameRenderer.create(canvas);
-  if (renderer === null) console.warn("WebGL 2 is unavailable: the game runs without a picture");
-  else renderer.loadMap(cmap);
-  if (status !== null) status.webgl = renderer === null ? "0" : "1";
-
+  if (renderer === null) console.warn("WebGL 2 is unavailable: the demo plays without a picture");
+  else renderer.loadMap(map);
+  if (status !== null) {
+    status.webgl = renderer === null ? "0" : "1";
+    status.map = map.name;
+  }
   const app = canvas.parentElement ?? document.body;
-  const hud = new Hud(app, netsim, renderer);
-  const lock = new PointerLock(canvas, (locked) => {
-    if (!locked) router.releaseAll();
-    updatePrompt();
-  });
+  const hud = new Hud(app, null, renderer);
+  // A spectator's camera aims nothing: playback shows only the "following #id" line.
+  hud.setCrosshair(false);
   const host: ConsoleHost = {
     cvars,
     binds,
     print: (text) => gameConsole.print(text),
     clear: () => gameConsole.clear(),
     toggleConsole: () => gameConsole.toggle(),
-    sendServer: (text) => client.sendCommand(text),
-    net: netsim,
-    corrections: client.predictor.corrections,
+    sendServer: () => false,
+    net: null,
+    corrections: null,
+    server: `the demo ${source}`,
+    connected: () => false,
+    connect: (address) => {
+      const next = connectSearch(address, location.search);
+      if (!next.ok) return next.error;
+      const q = new URLSearchParams(next.search);
+      q.delete("demo");
+      location.search = q.toString();
+      return null;
+    },
+    disconnect: () => false,
+    demo,
+    playDemo: (next) => reloadWithDemo(next),
   };
   const run = (line: string) => {
     runConsoleCommand(line, host);
     saver.maybeSave();
   };
+  const actions = new ActionState();
   const router = new KeyRouter(binds, actions, run);
   const gameConsole = new GameConsole(app, {
     binds,
     run,
-    onToggle: (open) => {
-      router.releaseAll();
-      if (open) lock.exit();
-      else if (!params.autotest) lock.request();
-      updatePrompt();
-    },
+    onToggle: () => router.releaseAll(),
   });
-  function updatePrompt(): void {
-    hud.setPrompt(!closed && !params.autotest && !lock.locked && !gameConsole.open);
-    hud.setCrosshair(!closed && !gameConsole.open && (params.autotest || lock.locked));
-  }
-  updatePrompt();
   attachKeyboard(window, router, {
     consoleOpen: () => gameConsole.open,
     closeConsole: () => gameConsole.setOpen(false),
   });
-  attachMouse(document, look, () => lock.locked);
-  attachMouseButtons(canvas, lock, router, () => !params.autotest && !gameConsole.open);
   gameConsole.print("In Shambles console: help lists the commands; Backquote or Escape closes it.");
+  gameConsole.print(
+    `playing the demo ${source}: map ${header.mapName}, ${check.summary.snapshots} ticks; ` +
+      "] and [ switch players, follow <id> picks one",
+  );
   for (const w of settingWarnings) gameConsole.print(w);
 
-  const game = new Game({
-    client,
+  // Until someone is followed, the camera stands at the map's first spawn point.
+  const spawn = map.entities.find((e) => e.classname === "info_player_start" && e.origin);
+  const at = spawn?.origin ?? [0, 0, 0];
+  const game = new DemoGame({
+    demo,
+    world,
     renderer,
     status,
-    camera: params.camera,
-    look: playerLook,
     hud,
+    idlePose: [at[0], at[1], at[2] + VIEW_HEIGHT_STANDING, spawn?.angles?.[1] ?? 0, 0],
     onFrame: () => {
-      const prints = client.prints;
-      if (prints.length === 0) return;
-      for (const text of prints) gameConsole.print(text);
-      prints.length = 0;
+      const notices = demo.notices;
+      if (notices.length === 0) return;
+      for (const text of notices) gameConsole.print(text);
+      notices.length = 0;
     },
   });
-  client.connect();
   game.start();
-  return { game, client, renderer, worker, console: gameConsole };
+  return { game, demo, renderer, console: gameConsole };
 }

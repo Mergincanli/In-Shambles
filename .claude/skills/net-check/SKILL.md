@@ -6,7 +6,7 @@ argument-hint: "[optional: profile name or 'all']"
 
 # Net check
 
-1. **Run the tests.** Run `pnpm test:net`. If it doesn't exist yet, say it's added in M2/M3 and stop.
+1. **Run the tests.** Run `pnpm test:net`: the fast NET smokes, then the long NET legs (the same as `pnpm test:long -t "^NET-"`). On a quiet host, also run `pnpm build && pnpm test:load` for NET-09 and the 16 bots + 1 human check (its host gate fails a busy host; D-045).
 2. **Run bot sessions**, one per profile. Use the profile named in `$ARGUMENTS`; otherwise use `wan-100-loss1` and `wan-150-loss2`:
    `pnpm bots --count 16 --profile <p> --minutes 2 --map arena_greybox`
 3. **Collect** from each bot summary:

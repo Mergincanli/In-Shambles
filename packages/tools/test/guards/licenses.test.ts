@@ -34,4 +34,17 @@ describe("third-party licenses (docs/08 ART-08)", () => {
     const config = readFileSync(fromRoot("packages/client/vite.config.ts"), "utf8");
     expect(config).toMatch(/license:\s*\{\s*fileName:\s*"third-party-licenses\.md"\s*\}/);
   });
+
+  it("the server build ships the notice of every library it bundles", () => {
+    // build.mjs bundles every runtime dependency of the server (none is external at run time).
+    const build = readFileSync(fromRoot("packages/server/build.mjs"), "utf8");
+    expect(build).toContain('"third-party-licenses.md"');
+    const pkg = JSON.parse(readFileSync(fromRoot("packages/server/package.json"), "utf8")) as {
+      dependencies: Record<string, string>;
+    };
+    for (const name of Object.keys(pkg.dependencies).filter((n) => !n.startsWith("@game/"))) {
+      expect(build, name).toContain(`resolve("${name}/package.json")`);
+      expect(build, name).toContain(`## ${name} (`);
+    }
+  });
 });

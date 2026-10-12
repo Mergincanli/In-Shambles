@@ -7,11 +7,13 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.load.json",
     "greybox": "node --import tsx src/greybox/cli.ts",
     "bench": "node --import tsx bench/run.ts",
     "vectors": "node --import tsx src/vectors/generate.ts",
-    "feel-report": "node --import tsx src/reports/cli.ts"
+    "feel-report": "node --import tsx src/reports/cli.ts",
+    "bots": "node --import tsx src/bots/cli.ts",
+    "demo-info": "node --import tsx src/replay/cli.ts"
   },
   "dependencies": {
     "@game/client": "workspace:*",

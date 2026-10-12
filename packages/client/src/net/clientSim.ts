@@ -7,18 +7,24 @@ import {
   CvarRegistry,
   type CvarsMsg,
   copyUserCmd,
+  createCollisionWorld,
   cvarBlockHash,
-  type PlayerState,
+  PlayerState,
   PmoveEvent,
+  PmoveParams,
+  primePmoveOnce,
+  refreshPmoveParams,
   registerPmoveCvars,
+  registerServerReplicatedCvars,
   SNAP_FLAG_STARVED,
-  SNAP_FLAG_TELEPORT,
-  type SnapshotMsg,
+  type SnapshotHeader,
+  slotToPlayerState,
   type Transport,
   UserCmd,
   type Vec3,
   vec3,
   type WelcomeMsg,
+  type WorldFrame,
 } from "@game/shared";
 import { ClientClock, TICK_MS } from "./clock";
 import {
@@ -36,27 +42,33 @@ import {
   SNAPSHOT_PARAMS_RESYNC,
   SNAPSHOT_STALE,
 } from "./predictor";
+import { RemoteInterpolator } from "./remotes";
+import { Roster } from "./roster";
 import { RenderOffset } from "./smoothing";
+import type { SnapshotStore } from "./snapshotStore";
 import {
   NetStats,
   STAT_CLOCK_ADJUSTMENTS,
   STAT_CORRECTION_DIST,
   STAT_CORRECTION_MAX,
   STAT_CORRECTIONS,
+  STAT_DILATION,
   STAT_HARD_RESYNCS,
   STAT_PARAM_RESYNCS,
   STAT_SNAPSHOTS,
   STAT_SNAPSHOTS_LOST,
   STAT_STARVED,
   STAT_STARVED_CORRECTIONS,
+  STAT_TELEPORTS,
 } from "./stats";
 
 /**
- * Prediction ticks one frame may run (docs/05 §8.1's catch-up cap, on the client; design). The
- * rest stays owed to later frames: the client's tick follows the server's clock, so time it drops
- * is lead lost for good.
+ * Prediction ticks one frame may run (docs/05 §8.1's catch-up cap, on the client; design,
+ * measured: D-039 raised it from 5, which a host at 8–12 fps could not keep up with). The rest
+ * stays owed to later frames: the client's tick follows the server's clock, so time it drops is
+ * lead lost for good.
  */
-export const MAX_TICKS_PER_FRAME = 5;
+export const MAX_TICKS_PER_FRAME = 8;
 /**
  * The clock never leads a snapshot by more than this many ticks (half the rings, and the server's
  * input queue horizon; design). The prediction also stops this far past the newest snapshot, so a
@@ -64,13 +76,21 @@ export const MAX_TICKS_PER_FRAME = 5;
  */
 export const MAX_LEAD_TICKS = 64;
 /**
- * A frame gap longer than this is a stall (a GC, a tab switch), not the frame rhythm (design):
- * the snapshots of the ticks it delayed are kept from the clock's buffer watch, since no buffer
- * the adaptive cap allows would cover a long one and growing for a one-off stall only adds
- * latency. Frames past 83 ms (MAX_TICKS_PER_FRAME ticks) cannot be sustained anyway, so 100 ms
- * leaves room for jitter at 12 fps and still counts a 120 ms GC pause as a stall.
+ * A frame gap longer than this is a stall (a GC, a tab switch), not the frame rhythm (design,
+ * measured: D-039 raised it from 100 ms with the tick cap): the snapshots of the ticks it delayed
+ * are kept from the clock's buffer watch, since no buffer the adaptive cap allows would cover a
+ * long one and growing for a one-off stall only adds latency. Frames past 133 ms
+ * (MAX_TICKS_PER_FRAME ticks) cannot be sustained anyway, so 150 ms leaves room for jitter at
+ * 8 fps and still counts a 200 ms GC pause as a stall.
  */
-export const HITCH_FRAME_MS = 100;
+export const HITCH_FRAME_MS = 150;
+/**
+ * How often the page calls `keepalive()` while hidden (D-041; design): one PING a second keeps
+ * the server's 5 s timeout far away.
+ */
+export const KEEPALIVE_INTERVAL_MS = 1000;
+/** `keepalive()` acts only this long after the last frame (design): frames that run do the work. */
+export const KEEPALIVE_IDLE_MS = 500;
 /** A snapshot cvar hash that stays different this long asks the server for the block (design). */
 export const CVAR_RESEND_AFTER_MS = 1000;
 
@@ -124,6 +144,17 @@ export interface CmdSampler {
   sample(cmd: UserCmd, ps: Readonly<PlayerState>): void;
 }
 
+/** The cmap `contentHash` (16 lowercase hex digits, high lane first) of WELCOME's two lanes. */
+export function welcomeMapHash(m: WelcomeMsg): string {
+  return (
+    (m.mapHashHi >>> 0).toString(16).padStart(8, "0") +
+    (m.mapHashLo >>> 0).toString(16).padStart(8, "0")
+  );
+}
+
+/** The collision world of a client that has no map yet: nothing to collide with. */
+const NO_WORLD = createCollisionWorld([]);
+
 /** Holds still, facing wherever the player faces. */
 export class NeutralInput implements CmdSampler {
   sample(cmd: UserCmd, ps: Readonly<PlayerState>): void {
@@ -141,25 +172,57 @@ export type ClientLog = (level: "info" | "warn" | "error", msg: string) => void;
 
 export interface ClientSimOptions {
   readonly transport: Transport;
-  /** The map this client has loaded; WELCOME must name it, with the same content hash. */
-  readonly cmap: Cmap;
+  /**
+   * The map this client has loaded; WELCOME must name it, with the same content hash. When
+   * absent, the client loads the map WELCOME names (D-031): `onMapRequest` asks for it and
+   * `provideMap` hands it over; READY waits for it.
+   */
+  readonly cmap?: Cmap;
   /** Built from `cmap` when absent. */
   readonly world?: CollisionWorld;
+  /**
+   * WELCOME named a map and no `cmap` was given: load `name` (its `contentHash` as the cmap
+   * writes it, 16 hex digits) and call `provideMap`. Called from a frame's poll.
+   */
+  readonly onMapRequest?: (name: string, contentHash: string) => void;
   /** Sent in HELLO; the server refuses another build. */
   readonly buildHash: string;
   /** Monotonic milliseconds: `performance.now` in the browser, a fake clock in tests. */
   readonly clock: () => number;
   /**
    * The client's registry: the mirror of the server's replicated cvars plus the client's own.
-   * A new one with the pmove and client net cvars when absent.
+   * A new one with the replicated set (`registerPmoveCvars`, `registerServerReplicatedCvars`) and
+   * the client net cvars when absent. Every server block sets its cheats-allowed state from the
+   * mirror's `sv_cheats` (D-042).
    */
   readonly cvars?: CvarRegistry;
+  /**
+   * The server's `sv_cheats` turned the client's CHEAT cvars on or off (D-042); off has already
+   * reset them to their defaults. Rare: called from a block apply.
+   */
+  readonly onCheatsChanged?: (allowed: boolean) => void;
   /** Neutral input when absent. */
   readonly input?: CmdSampler;
   readonly nonce?: number;
   readonly log?: ClientLog;
   /** The session ended (kicked, refused or closed); the page shows `reason` to the player. */
   readonly onClosed?: (reason: string) => void;
+  /**
+   * The transport is a WebSocket (a dedicated server): the stats count its framing too, so the
+   * netgraph's traffic is what the wire carries (D-036). False for the Worker's ports.
+   */
+  readonly webSocket?: boolean;
+  /**
+   * False keeps the clock's dilation at 0 (its steps stay): NET-07's control. Tests only; true by
+   * default.
+   */
+  readonly dilation?: boolean;
+  /**
+   * Run the pmove primer (D-040) at construction, once per module instance (default true), so
+   * prediction never meets a late pmove branch first in play. Unit helpers pass false to save its
+   * cost; it never changes a result.
+   */
+  readonly primer?: boolean;
 }
 
 function ignoreLog(): void {}
@@ -172,6 +235,8 @@ const MISMATCH_SINCE = 3;
 /** latestTick and the accumulator before this frame's clock step or re-anchor. */
 const PATH_TICK = 4;
 const PATH_ACC = 5;
+/** This frame's dilation gain in ticks, handed to the stats from its slot (`NetStats.addFrom`). */
+const GAIN_TICKS = 6;
 
 /**
  * The headless client (M2 design §1, §2): the connection, the clock, prediction and
@@ -184,10 +249,11 @@ const PATH_ACC = 5;
  *    position stays where it was and then glides (snapped instead past `cl_teleportDist` or on a
  *    teleport).
  * 2. A clock step the snapshots asked for: fast-forward k ticks now, or hold k tick periods.
- * 3. The tick accumulator: per tick, sample a cmd, predict it and send INPUT with the last four
+ * 3. The tick accumulator, which takes the frame's time × (1 + the clock's dilation δ, ±3%;
+ *    D-039) before the poll: per tick, sample a cmd, predict it and send INPUT with the last four
  *    cmds (at most MAX_TICKS_PER_FRAME ticks; the rest is owed to the next frames). A hard resync
  *    re-anchors once per poll, after the poll, from the newest snapshot.
- * 4. Pings and READY (the connection's handshake).
+ * 4. The connection's timeouts (D-041), pings and READY (its handshake).
  *
  * The drawn position is `renderOrigin`: the predicted states of the last two ticks interpolated by
  * the accumulator's fraction (docs/05 §1.3), plus the render offset.
@@ -196,19 +262,31 @@ export class ClientSim {
   /** [0] this frame's time (ms), shared with the clock, stats and render offset. */
   readonly now = new Float64Array(1);
   readonly cvars: CvarRegistry;
-  readonly world: CollisionWorld;
   readonly settings = new ClientNetSettings();
   readonly clock: ClientClock;
   readonly stats: NetStats;
   readonly offset: RenderOffset;
   readonly predictor: Predictor;
+  /** How long this instance's pmove primer took (clock ms); 0 when it skipped it (D-040). */
+  primerMs = 0;
   readonly connection: Connection;
+  /**
+   * The other players (D-037): every stored snapshot times its render clock as it arrives;
+   * whoever draws them (the page, a bot, a test) calls `updateRemotes` once per frame.
+   */
+  readonly remotes: RemoteInterpolator;
   input: CmdSampler;
   /** The last tick of the startup fill: snapshots up to it may be starved without harm. */
   startTick = -1;
   frames = 0;
   /** Messages from PRINT, oldest first; the caller drains it (the console, a test). */
   readonly prints: string[] = [];
+  /**
+   * Who is in the match and the server's tick times, from EVENTS (D-043); its join and leave
+   * notices go to `notices` (oldest first, at most NOTICES_MAX kept), which the page drains.
+   */
+  readonly roster = new Roster();
+  readonly notices: string[] = [];
   /** Movement events of this frame's first predictions (cleared at the start of each frame). */
   readonly events = new TickEvents();
   /**
@@ -218,14 +296,20 @@ export class ClientSim {
    */
   readonly pathShift = new Float64Array(1);
 
-  private readonly cmap: Cmap;
+  /** The loaded map, null until `provideMap` when the client loads the one WELCOME names. */
+  private cmap: Cmap | null;
+  private currentWorld: CollisionWorld;
+  /** The map WELCOME named (name and contentHash), once it arrived. */
+  private requested: { readonly name: string; readonly contentHash: string } | null = null;
+  private readonly onMapRequest: ((name: string, contentHash: string) => void) | null;
+  private readonly onCheatsChanged: ((allowed: boolean) => void) | null;
   private readonly clockFn: () => number;
   private readonly log: ClientLog;
   /**
    * [last frame time, tick accumulator, this frame's dt, cvar hash mismatch since, latestTick and
    * accumulator before the clock step].
    */
-  private readonly t = new Float64Array(6);
+  private readonly t = new Float64Array(7);
   private readonly cmd = new UserCmd();
   private readonly lastCmd = new UserCmd();
   private readonly fill = new UserCmd();
@@ -237,8 +321,10 @@ export class ClientSim {
   private readonly curOrigin = vec3();
   /** The predicted path changed during this frame's poll. */
   private changed = false;
-  /** A snapshot of this poll carried the teleport flag. */
+  /** A snapshot of this poll changed the local player's teleport counter (D-035). */
   private teleport = false;
+  /** The local player's state from the snapshot in hand (its frame's own slot). */
+  private readonly snapState = new PlayerState();
   /** Clock step asked for by this poll's snapshots (ticks; negative = hold). */
   private step = 0;
   /** The newest snapshot tick of this poll that needs a hard resync, −1 for none. */
@@ -248,14 +334,20 @@ export class ClientSim {
   /** This frame came more than HITCH_FRAME_MS after the last: a stall. */
   private hitch = false;
   private started = false;
+  private remotesShown = false;
 
   constructor(options: ClientSimOptions) {
-    this.cmap = options.cmap;
-    this.world = options.world ?? buildCollisionWorld(options.cmap);
+    this.cmap = options.cmap ?? null;
+    const cmap = options.cmap;
+    this.currentWorld =
+      options.world ?? (cmap === undefined ? NO_WORLD : buildCollisionWorld(cmap));
+    this.onMapRequest = options.onMapRequest ?? null;
+    this.onCheatsChanged = options.onCheatsChanged ?? null;
     let cvars = options.cvars;
     if (cvars === undefined) {
       cvars = new CvarRegistry();
       registerPmoveCvars(cvars);
+      registerServerReplicatedCvars(cvars);
       registerClientNetCvars(cvars);
     }
     this.cvars = cvars;
@@ -263,16 +355,31 @@ export class ClientSim {
     this.clockFn = options.clock;
     this.log = options.log ?? ignoreLog;
     this.input = options.input ?? new NeutralInput();
-    this.clock = new ClientClock(this.now);
+    this.clock = new ClientClock(this.now, { dilation: options.dilation ?? true });
     this.stats = new NetStats(this.now);
     this.offset = new RenderOffset(this.now);
-    this.predictor = new Predictor(this.world);
+    this.predictor = new Predictor(this.currentWorld);
+    // Synchronous and before `connect()` can send HELLO, so READY and the spawn always come
+    // after it (the READY gate on the primer, D-031, D-040, holds by construction).
+    if (options.primer ?? true) {
+      const start = this.clockFn();
+      // Parameters refreshed from a registry, as the predictor's are from WELCOME on: the same
+      // object shape, so code the primer optimizes is never deoptimized for a changed map.
+      const params = new PmoveParams();
+      refreshPmoveParams(cvars, params);
+      if (primePmoveOnce(params)) {
+        this.primerMs = this.clockFn() - start;
+        this.log("info", `pmove primer: ${Math.round(this.primerMs)} ms`);
+      }
+    }
     this.t[MISMATCH_SINCE] = Number.NaN;
     const onClosed = options.onClosed;
     const handler: ConnectionHandler = {
       onWelcome: (m) => this.onWelcome(m),
-      onSnapshot: (m) => this.onSnapshot(m),
+      mapReady: () => this.cmap !== null,
+      onSnapshot: (h, f) => this.onSnapshot(h, f),
       onCvars: (m) => this.onCvars(m),
+      onEvents: (m) => this.roster.apply(m, this.connection.clientId, this.notices),
       onPrint: (_level, text) => {
         this.prints.push(text);
       },
@@ -288,6 +395,15 @@ export class ClientSim {
       handler,
       options.buildHash,
       options.nonce ?? 0,
+      this.now,
+      options.webSocket ?? false,
+    );
+    this.remotes = new RemoteInterpolator(
+      this.connection.store,
+      this.now,
+      this.settings,
+      this.stats,
+      this.currentWorld,
     );
   }
 
@@ -301,8 +417,59 @@ export class ClientSim {
     return this.connection.state;
   }
 
+  /** The snapshots received, by tick (protocol v2's frames, D-033). */
+  get store(): SnapshotStore {
+    return this.connection.store;
+  }
+
+  /** The map's collision (an empty world until the map is loaded). */
+  get world(): CollisionWorld {
+    return this.currentWorld;
+  }
+
+  /** The loaded map, or null while the client waits for the one WELCOME named. */
+  get map(): Cmap | null {
+    return this.cmap;
+  }
+
+  /** The map WELCOME named (`name`, `contentHash`), or null before WELCOME. */
+  get mapRequest(): { readonly name: string; readonly contentHash: string } | null {
+    return this.requested;
+  }
+
+  /**
+   * Hands over the map the client loaded (D-031), synchronously: the one WELCOME named, with
+   * its content hash, or (before WELCOME) the one WELCOME will be checked against. Returns null,
+   * or why the map was refused; a refusal after WELCOME also ends the session with that reason.
+   */
+  provideMap(cmap: Cmap, world?: CollisionWorld): string | null {
+    if (this.cmap !== null) return `a map is already loaded (${this.cmap.name})`;
+    const want = this.requested;
+    if (want !== null && (cmap.name !== want.name || cmap.contentHash !== want.contentHash)) {
+      const why =
+        `server runs map ${want.name} (${want.contentHash}), ` +
+        `the client loaded ${cmap.name} (${cmap.contentHash})`;
+      this.connection.disconnect(why);
+      return why;
+    }
+    this.cmap = cmap;
+    this.currentWorld = world ?? buildCollisionWorld(cmap);
+    this.predictor.world = this.currentWorld;
+    this.remotes.world = this.currentWorld;
+    return null;
+  }
+
   get active(): boolean {
     return this.connection.state === CONN_ACTIVE;
+  }
+
+  /**
+   * The predicted path's time in ticks: latestTick − 1 + the accumulator in ticks, unclamped (the
+   * time `pathShift` measures jumps of). For tests and tools; it rises by (1 + δ) per tick of
+   * real time between steps.
+   */
+  get pathTicks(): number {
+    return this.predictor.latestTick - 1 + (this.t[ACC] as number) / TICK_MS;
   }
 
   /** The accumulator's fraction of a tick, 0..1: the interpolation weight of the newest tick. */
@@ -329,7 +496,14 @@ export class ClientSim {
     // the snapshot, as of now) consumes it.
     this.hitch = (t[DT] as number) > HITCH_FRAME_MS;
     if (wasActive) {
-      t[ACC] = (t[ACC] as number) + (t[DT] as number);
+      // Dilation (D-039): the prediction runs at (1 + δ) × real time. What it adds or takes away
+      // goes into the stats in ticks, except a stall's: most of a stall's time is dropped or
+      // re-anchored away, and its gain in one bucket would read as more than ±3% in the netgraph.
+      const gain = (t[DT] as number) * (this.clock.dil[0] as number);
+      t[ACC] = (t[ACC] as number) + (t[DT] as number) + gain;
+      t[GAIN_TICKS] = gain / TICK_MS;
+      // From the slot: a fractional double passed to a call the JIT leaves out of line boxes.
+      if (!this.hitch) this.stats.addFrom(STAT_DILATION, t, GAIN_TICKS);
       if (this.hitch) {
         // A stall: the ticks it owes go out in the next frames; their snapshots measure it alone.
         this.clock.skipHealthThrough(
@@ -376,6 +550,20 @@ export class ClientSim {
     conn.update();
   }
 
+  /**
+   * While the page is hidden and frames stop (D-041, M3 design §2.13): the connection's keepalive
+   * (reliable messages handled, snapshots dropped, one PING, the timeouts checked). Does nothing
+   * when a frame ran within the last KEEPALIVE_IDLE_MS, so a page whose frames still run
+   * (throttled, not stopped) loses no snapshot to it. Returns whether it ran.
+   */
+  keepalive(): boolean {
+    const now = this.clockFn();
+    if (this.started && now - (this.t[LAST_FRAME] as number) < KEEPALIVE_IDLE_MS) return false;
+    this.now[0] = now;
+    this.connection.keepalive();
+    return true;
+  }
+
   /** The drawn position of the local player: interpolated prediction plus the render offset. */
   renderOrigin(out: Vec3): void {
     this.renderBase(out);
@@ -393,6 +581,16 @@ export class ClientSim {
   renderTick(out: Float64Array, index: number): void {
     const a = Math.min(1, Math.max(0, (this.t[ACC] as number) / TICK_MS));
     out[index] = this.predictor.latestTick - 1 + a;
+  }
+
+  /**
+   * Interpolates the other players into `remotes.view` for this frame (after `frame`); while the
+   * session is not active they are hidden and the interpolation starts over.
+   */
+  updateRemotes(): void {
+    if (this.connection.state === CONN_ACTIVE) this.remotes.update(this.connection.clientId);
+    else if (this.remotesShown) this.remotes.clear();
+    this.remotesShown = this.connection.state === CONN_ACTIVE;
   }
 
   /** A console command for the server (CMD); false when there is no session or it doesn't fit. */
@@ -469,7 +667,7 @@ export class ClientSim {
     cmd.tick = tick;
     this.predictFirst(cmd);
     copyUserCmd(this.lastCmd, cmd);
-    this.connection.sendInput(p.cmds, tick, p.snapshotTick);
+    this.connection.sendInput(p.cmds, tick);
   }
 
   /** Predicts `cmd` for the first time and files its movement events under its tick. */
@@ -522,7 +720,7 @@ export class ClientSim {
     for (let t = tick + 1; t <= target; t++) {
       f.tick = t;
       this.predictFirst(f);
-      this.connection.sendInput(p.cmds, t, p.snapshotTick);
+      this.connection.sendInput(p.cmds, t);
     }
     this.jumping = false;
     copyUserCmd(this.lastCmd, f);
@@ -535,14 +733,22 @@ export class ClientSim {
 
   private onWelcome(m: WelcomeMsg): string | null {
     const cmap = this.cmap;
-    const hi = Number.parseInt(cmap.contentHash.slice(0, 8), 16);
-    const lo = Number.parseInt(cmap.contentHash.slice(8, 16), 16);
-    if (m.mapName !== cmap.name || m.mapHashHi !== hi || m.mapHashLo !== lo) {
+    const hash = welcomeMapHash(m);
+    if (cmap !== null && (m.mapName !== cmap.name || hash !== cmap.contentHash)) {
       return `server runs map ${m.mapName}, this client has ${cmap.name} (${cmap.contentHash})`;
     }
     const applied = applyCvarBlock(this.cvars, m.cvars);
     if (!applied.ok) return `server cvars refused (${applied.error} ${applied.name})`;
+    this.applyCheats();
     this.predictor.setParams(this.cvars, cvarBlockHash(m.cvars));
+    this.requested = { name: m.mapName, contentHash: hash };
+    if (cmap !== null || this.onMapRequest === null) return null;
+    // A host's loader that throws must not escape the transport's poll: it ends the session.
+    try {
+      this.onMapRequest(m.mapName, hash);
+    } catch (e) {
+      return `could not load map ${m.mapName}: ${e instanceof Error ? e.message : String(e)}`;
+    }
     return null;
   }
 
@@ -552,29 +758,55 @@ export class ClientSim {
       this.connection.disconnect(`server cvars refused (${applied.error} ${applied.name})`);
       return;
     }
+    this.applyCheats();
     this.predictor.setPendingParams(this.cvars, m.blockHash, m.effectiveTick);
     this.changed = true;
   }
 
-  private onSnapshot(m: SnapshotMsg): void {
+  /**
+   * The mirror's `sv_cheats` decides whether the client's CHEAT cvars (third person, the debug
+   * views) may be on (D-042): set on every block apply; turning them off resets them.
+   */
+  private applyCheats(): void {
+    const reg = this.cvars;
+    const allowed = reg.getNumber("sv_cheats", 0) === 1;
+    const was = reg.cheatsAllowed();
+    reg.setAllowCheats(allowed);
+    if (allowed !== was && this.onCheatsChanged !== null) this.onCheatsChanged(allowed);
+  }
+
+  private onSnapshot(h: SnapshotHeader, frame: WorldFrame): void {
     const p = this.predictor;
     const stats = this.stats;
+    const tick = h.serverTick;
+    const state = this.snapState;
+    // Prediction reads the local slot, bit for bit (M3 design §2.3).
+    slotToPlayerState(frame, this.connection.clientId, state);
+    this.remotes.onStored(tick);
     stats.add(STAT_SNAPSHOTS, 1);
     if (this.connection.state === CONN_SPAWNING) {
-      // The first snapshot is the spawn: adopted whole (it carries the teleport flag).
-      p.reset(m.serverTick, m.state);
-      this.anchor(m.serverTick, true);
+      // The first snapshot is the spawn: adopted whole, and its counter is the one to watch.
+      p.reset(tick, state);
+      p.teleportSeq = h.teleportSeq;
+      this.anchor(tick, true);
       this.connection.markActive();
       return;
     }
     const prevTick = p.snapshotTick;
-    const result = p.onSnapshot(m.serverTick, m.state, m.cvarHash);
+    const teleports = p.teleports;
+    const result = p.onSnapshot(tick, state, h.cvarHash, h.teleportSeq);
     if (result === SNAPSHOT_STALE) return;
-    if (m.serverTick > prevTick + 1) stats.add(STAT_SNAPSHOTS_LOST, m.serverTick - prevTick - 1);
-    if ((m.flags & SNAP_FLAG_STARVED) !== 0 && m.serverTick > this.startTick) {
+    if (tick > prevTick + 1) stats.add(STAT_SNAPSHOTS_LOST, tick - prevTick - 1);
+    if ((h.flags & SNAP_FLAG_STARVED) !== 0 && tick > this.startTick) {
       stats.add(STAT_STARVED, 1);
     }
-    if ((m.flags & SNAP_FLAG_TELEPORT) !== 0) this.teleport = true;
+    // A changed counter is a teleport even when the snapshot of the jump itself was lost; only
+    // snapshots newer than the last one move it (D-035). It drops the render offset.
+    if (p.teleports !== teleports) {
+      this.teleport = true;
+      this.changed = true;
+      stats.add(STAT_TELEPORTS, 1);
+    }
     const t = this.t;
     if (result === SNAPSHOT_PARAMS_RESYNC) {
       stats.add(STAT_PARAM_RESYNCS, 1);
@@ -593,19 +825,19 @@ export class ClientSim {
       stats.add(STAT_CORRECTIONS, 1);
       stats.add(STAT_CORRECTION_DIST, dist[0] as number);
       stats.add(STAT_CORRECTION_MAX, dist[0] as number);
-      if ((m.flags & SNAP_FLAG_STARVED) !== 0) stats.add(STAT_STARVED_CORRECTIONS, 1);
+      if ((h.flags & SNAP_FLAG_STARVED) !== 0) stats.add(STAT_STARVED_CORRECTIONS, 1);
       this.changed = true;
     } else if (result === SNAPSHOT_HARD_RESYNC) {
       // A backlog after a stall resyncs on every snapshot ahead of the last; it is one event,
       // re-anchored once after the poll from the newest.
       if (this.resyncTick < 0) stats.add(STAT_HARD_RESYNCS, 1);
-      this.resyncTick = m.serverTick;
+      this.resyncTick = tick;
       this.changed = true;
       return;
     }
     const step = this.clock.onSnapshotHealth(
-      m.inputBufferHealth,
-      m.serverTick,
+      h.inputBufferHealth,
+      tick,
       p.latestTick,
       this.settings.inputBuffer,
     );

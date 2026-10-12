@@ -32,13 +32,54 @@ export const STAT_STRIKES = 12;
  * cmd of ours that came late, so the prediction could not match (timing, not a misprediction).
  */
 export const STAT_STARVED_CORRECTIONS = 13;
-export const STAT_COUNT = 14;
+/**
+ * Snapshots whose teleport counter changed (a spawn or respawn, D-035): the state was adopted and
+ * the render offset dropped, not counted as corrections.
+ */
+export const STAT_TELEPORTS = 14;
+/** Remote players drawn, summed over frames (D-037): the base of the two shares below. */
+export const STAT_REMOTE_FRAMES = 15;
+/** Of those, drawn past their newest snapshot along their velocity (at most 2 ticks). */
+export const STAT_REMOTE_EXTRAPOLATED = 16;
+/** Of those, held where the extrapolation stopped (no newer snapshot yet). */
+export const STAT_REMOTE_HELD = 17;
+/** Render-clock snaps after the first (the first places the clock): a remote jumped in time. */
+export const STAT_RENDER_SNAPS = 18;
+/** Remote movement events surfaced, and those lost (more than 2 in one step of a slot). */
+export const STAT_REMOTE_EVENTS = 19;
+export const STAT_REMOTE_EVENTS_LOST = 20;
+/** Of the snapshots stored, those that were full (D-038: the first, and any without a baseline). */
+export const STAT_FULL_SNAPSHOTS = 21;
+/** Delta snapshots dropped because their baseline frame was not held (D-038; not struck). */
+export const STAT_BASELINE_DROPS = 22;
+/**
+ * Players the server's byte-budget scheduler left out of the snapshots stored (deferred ids,
+ * D-046), and the snapshots that left any out: 0 at 37 players or fewer.
+ */
+export const STAT_DEFERRED = 23;
+export const STAT_DEFERRED_SNAPSHOTS = 24;
+/**
+ * Ticks the clock's dilation added to the prediction (negative: took away; D-039), stall frames
+ * (ClientSim's HITCH_FRAME_MS) left out: over the last second, divided by TICK_RATE, about the
+ * mean δ, which the netgraph can show as a percentage.
+ */
+export const STAT_DILATION = 25;
+/** Bytes of the snapshots stored (their sum, and the largest: a max stat), for the netgraph. */
+export const STAT_SNAPSHOT_BYTES = 26;
+export const STAT_SNAPSHOT_BYTES_MAX = 27;
+/**
+ * WebSocket framing on top of the payload in `STAT_BYTES_IN`/`STAT_BYTES_OUT` (RFC 6455 headers,
+ * the client's 4 B mask; D-036's accounting): 0 on the Worker's ports, which have none.
+ */
+export const STAT_FRAMING_IN = 28;
+export const STAT_FRAMING_OUT = 29;
+export const STAT_COUNT = 30;
 
 const BUCKETS = 10;
 const BUCKET_MS = 100;
 
 function isMaxStat(stat: number): boolean {
-  return stat === STAT_CORRECTION_MAX;
+  return stat === STAT_CORRECTION_MAX || stat === STAT_SNAPSHOT_BYTES_MAX;
 }
 
 export class NetStats {
@@ -77,6 +118,21 @@ export class NetStats {
     } else {
       this.totals[stat] = (this.totals[stat] as number) + value;
       this.buckets[at] = (this.buckets[at] as number) + value;
+    }
+  }
+
+  /**
+   * `add(stat, src[index])` for a per-frame caller: the value stays in a typed array, so a
+   * fractional double never crosses the call boxed when it is not inlined (native ESM, D-041).
+   */
+  addFrom(stat: number, src: Float64Array, index: number): void {
+    const at = this.row * STAT_COUNT + stat;
+    if (isMaxStat(stat)) {
+      this.totals[stat] = Math.max(this.totals[stat] as number, src[index] as number);
+      this.buckets[at] = Math.max(this.buckets[at] as number, src[index] as number);
+    } else {
+      this.totals[stat] = (this.totals[stat] as number) + (src[index] as number);
+      this.buckets[at] = (this.buckets[at] as number) + (src[index] as number);
     }
   }
 
