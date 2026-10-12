@@ -11,7 +11,7 @@
 | M1 | Simulation core: tick, math, brush collision, greybox builder | ☑ done | [2026-10-06](handoffs/2026-10-06-M1-simulation-core.md) |
 | M2 | Base Q3 movement + client shell + Worker server + prediction | ☑ done | [2026-10-07](handoffs/2026-10-07-M2-movement-and-prediction.md) |
 | — | *Optional:* Style spike: toon material, hull outline, crease lines on greybox (`docs/08` §18) | ☐ | |
-| M3 | Real networking: dedicated server, protocol, snapshots, interpolation, bots | ☐ | |
+| M3 | Real networking: dedicated server, protocol, snapshots, interpolation, bots | ☑ done | [2026-10-12](handoffs/2026-10-12-M3-real-networking.md) |
 | M4 | UrT movement set (sprint/stamina, wall jumps, slide, ledge grab, …) | ☐ | |
 | M5 | TrenchBroom pipeline: game config, FGD, `.map` compiler, hot reload | ☐ | |
 | M6 | Combat core: hitboxes, lag comp, weapons, damage, armor, bleeding, loadouts | ☐ | |
