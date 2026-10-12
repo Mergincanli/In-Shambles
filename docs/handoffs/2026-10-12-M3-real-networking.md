@@ -51,7 +51,7 @@ Each of the 18 increments was built, reviewed from 5–6 angles and fixed before
     - EVENTS (join, leave with reason, server tick stats, D-043).
     - Every decoder returns false on bad input and allocates nothing.
   - `WorldFrame` (one tick of every player as typed arrays).
-  - The pmove primer: 20000 ticks over a built-in course, proven not to change results (D-040).
+  - The pmove primer: 36800 ticks over a built-in course, proven not to change results (D-040). The PR's first CI run on Node 24 showed the ladder and swim moves needed longer drills there; fixed before merge.
   - The demo format and `validateDemo` (D-044).
   - Replicated `sv_cheats`.
 - `server/`:

@@ -40,12 +40,14 @@ import { pmove } from "./pmove";
 /**
  * Ticks the primer runs (design value, measured; not an estimate of the original game, and it
  * changes no result). Enough for the script to repeat under the three pairings of events and trace
- * log that play uses, so each branch is met both before V8 optimizes pmove and after, and for the
- * ladder and swim moves to get the thousands of calls V8 wants before it optimizes them. On the
- * 4-vCPU cloud VM under tsx: about 160–190 ms in a fresh process, 50–60 ms warm (a primer tick is
- * collision-heavy), twice that on a loaded host, against the design's 45 ms estimate (D-040).
+ * log that play uses (about 2.8 passes), so each branch is met both before V8 optimizes pmove and
+ * after, and for the ladder and swim moves to get the calls V8 wants before it optimizes them:
+ * Node 24's V8 (13.6) keeps a move at its mid tier (Maglev, which boxes doubles) until about ten
+ * thousand calls, so the drills below are repeated (D-040). On the 4-vCPU cloud VM under tsx:
+ * about 200–320 ms in a fresh process (Node 24 / 22), 110–160 ms warm (a primer tick is
+ * collision-heavy), more on a loaded host, against the design's 45 ms estimate.
  */
-export const PMOVE_PRIMER_TICKS = 20_000;
+export const PMOVE_PRIMER_TICKS = 36_800;
 
 const NORTH = 16384;
 const SOUTH = 49152;
@@ -255,13 +257,24 @@ function seg(s: SegmentInit): PrimerSegment {
 const ONCE = 1 << 20;
 
 /**
- * A long stretch on the ladder's face, never touching the ground or the top: V8 optimizes a move
- * function only after some thousands of calls, so each mode needs its share of the ticks (the
- * ladder and the swim would otherwise stay in the slower tiers, boxing, until play reached them).
+ * Rounds of the ladder drill and of the swim drill (design values), each starting afresh at the
+ * ladder's foot or in the deep water: one round made longer than its dozen climbs drifts off the
+ * ladder, so more ladder ticks need more rounds. Sized so that on Node 24 the primed first-ladder
+ * window of the D-040 guard stays under 64 KB; with one round each, `ladderMove` stayed at Maglev
+ * there and the window grew 215–330 KB.
+ */
+const LADDER_DRILL_ROUNDS = 5;
+const SWIM_DRILL_ROUNDS = 2;
+
+/**
+ * Long stretches on the ladder's face, never touching the ground or the top: V8 optimizes a move
+ * function only after thousands of calls, so each mode needs its share of the ticks (the ladder
+ * and the swim would otherwise stay in the slower tiers, boxing, until play reached them).
  */
 function ladderDrill(): PrimerSegment[] {
-  const out = [seg({ at: [X_LADDER, LADDER_Y - 16, 60], ticks: 10, yaw: NORTH })];
-  for (let i = 0; i < 12; i++) {
+  const out: PrimerSegment[] = [];
+  for (let i = 0; i < 12 * LADDER_DRILL_ROUNDS; i++) {
+    if (i % 12 === 0) out.push(seg({ at: [X_LADDER, LADDER_Y - 16, 60], ticks: 10, yaw: NORTH }));
     out.push(seg({ ticks: 30, yaw: NORTH, forward: FWD }));
     out.push(seg({ ticks: 15, yaw: NORTH + 1024 * (i & 1), pitch: DIVE * ((i & 2) - 1) }));
     out.push(seg({ ticks: 30, yaw: NORTH, forward: BACK }));
@@ -271,10 +284,11 @@ function ladderDrill(): PrimerSegment[] {
   return out;
 }
 
-/** A long swim in the deep section: circles, rises, dives, sinks, strafes and back-pedals. */
+/** Long swims in the deep section: circles, rises, dives, sinks, strafes and back-pedals. */
 function swimDrill(): PrimerSegment[] {
-  const out = [seg({ at: [POOL_X1 - 128, 256, -100], ticks: 10, yaw: NORTH })];
-  for (let i = 0; i < 8; i++) {
+  const out: PrimerSegment[] = [];
+  for (let i = 0; i < 8 * SWIM_DRILL_ROUNDS; i++) {
+    if (i % 8 === 0) out.push(seg({ at: [POOL_X1 - 128, 256, -100], ticks: 10, yaw: NORTH }));
     const turn = 300 * ((i & 1) * 2 - 1);
     out.push(seg({ ticks: 40, yaw: NORTH, yawStep: turn, forward: FWD }));
     out.push(seg({ ticks: 20, yaw: EAST, buttons: BUTTON_JUMP }));
