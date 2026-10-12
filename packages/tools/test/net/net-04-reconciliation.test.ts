@@ -1,7 +1,28 @@
-import { MAX_ADAPTIVE_TICKS, MixedInput, StrafeCircuit } from "@game/client/net";
-import { NET_PROFILES } from "@game/shared";
+import {
+  MAX_ADAPTIVE_TICKS,
+  MixedInput,
+  SNAPSHOT_CORRECTED,
+  STAT_CORRECTIONS,
+  STAT_STARVED,
+  STAT_STARVED_CORRECTIONS,
+  StrafeCircuit,
+} from "@game/client/net";
+import {
+  BitReader,
+  type CloseHandler,
+  decodeSnapshotHeader,
+  type MessageHandler,
+  MSG_INPUT,
+  MSG_SNAPSHOT,
+  NET_PROFILES,
+  SNAP_FLAG_STARVED,
+  SnapshotHeader,
+  type Transport,
+  type TransportStats,
+} from "@game/shared";
 import { describe, expect, it } from "vitest";
 import { NetHarness } from "./harness";
+import { expectNoStrikes } from "./honest";
 import { setHarnessPrimerDefault } from "./multiHarness";
 import {
   BROWSER_LIKE_CASES,
@@ -39,6 +60,9 @@ import {
 // On every profile the prediction converges: at each snapshot the client reconciled with, its
 // standing prediction equals the server's recorded state (`NetHarness.unreconciled`), so a
 // predictor that stopped correcting fails here, not only in its unit tests.
+// - wan-100-loss1 with every snapshot of a starved tick lost (D-050): each starve still counts and
+//   its correction is a starved one, on the next snapshot, which carries no STARVED flag: no
+//   misprediction, where the one-snapshot flag called every one of them a misprediction.
 // One summary line per profile is printed. The full NET-04 (16 bots, every mechanic) comes with M3.
 // Tiers (D-032): this file runs one NetSim seed per profile and one browser-like case
 // (wan-100-loss1, browser hitches, seed 1) in `pnpm test`; the other lossy seeds, the other
@@ -176,6 +200,118 @@ describe("NET-04 (M2 basic): reconciliation on every profile", () => {
       expect(h.unreconciled()).toEqual([]);
     },
   );
+});
+
+/**
+ * The client's end of the link after NetSim (D-050's case): loses `dropInputs` INPUTs from when it
+ * is set (the cmds only they carry starve), and every SNAPSHOT flagged STARVED, whose ticks it
+ * keeps in `lost`.
+ */
+class StarvedSnapshotsLost implements Transport {
+  dropInputs = 0;
+  readonly lost: number[] = [];
+  private readonly reader = new BitReader();
+  private readonly header = new SnapshotHeader();
+  constructor(private readonly inner: Transport) {}
+  sendUnreliable(d: Uint8Array, len: number): void {
+    if (d[0] === MSG_INPUT && this.dropInputs > 0) this.dropInputs--;
+    else this.inner.sendUnreliable(d, len);
+  }
+  sendReliable(d: Uint8Array, len: number): void {
+    this.inner.sendReliable(d, len);
+  }
+  onMessage(cb: MessageHandler): void {
+    this.inner.onMessage((d, len, reliable) => {
+      if (!reliable && d[0] === MSG_SNAPSHOT) {
+        const r = this.reader;
+        r.reset(d, len);
+        const h = this.header;
+        if (decodeSnapshotHeader(r, h) && (h.flags & SNAP_FLAG_STARVED) !== 0) {
+          this.lost.push(h.serverTick);
+          return;
+        }
+      }
+      cb(d, len, reliable);
+    });
+  }
+  onClose(cb: CloseHandler): void {
+    this.inner.onClose(cb);
+  }
+  poll(): void {
+    this.inner.poll();
+  }
+  close(reason?: string): void {
+    this.inner.close(reason);
+  }
+  isOpen(): boolean {
+    return this.inner.isOpen();
+  }
+  stats(): TransportStats {
+    return this.inner.stats();
+  }
+}
+
+describe("NET-04: starves whose snapshots are lost (D-050)", () => {
+  it("wan-100-loss1: every starve counts and every correction is a starved one, no misprediction", () => {
+    // The M3 CI load job's failure: the snapshot of a starved tick lost (1% here), so the starve's
+    // correction lands on the next snapshot, without the flag, and counted as a misprediction.
+    // Here every flagged snapshot is lost, and bursts of 6 lost INPUTs (each losing the 3 cmds only
+    // they carried) make the server starve 3 ticks a burst, plus what the profile's loss starves.
+    let link: StarvedSnapshotsLost | null = null;
+    const h = new NetHarness({
+      input: new StrafeCircuit(),
+      profile: profile("wan-100-loss1"),
+      seed: SEED,
+      wrap: (t) => {
+        link = new StarvedSnapshotsLost(t);
+        return link;
+      },
+    });
+    const tap = link as unknown as StarvedSnapshotsLost;
+    h.runTicks(600);
+    const t = h.client.stats.totals;
+    const p = h.client.predictor;
+    const inner = p.onSnapshot.bind(p);
+    const corrected: number[] = [];
+    p.onSnapshot = (tick, s, hash16, teleportSeq) => {
+      const result = inner(tick, s, hash16, teleportSeq);
+      if (result === SNAPSHOT_CORRECTED) corrected.push(tick);
+      return result;
+    };
+    const starvedFrom = h.serverStarved.length;
+    const lostFrom = tap.lost.length;
+    const before = [t[STAT_STARVED], t[STAT_CORRECTIONS], t[STAT_STARVED_CORRECTIONS]] as number[];
+    for (let i = 0; i < 8; i++) {
+      tap.dropInputs = 6;
+      h.run(1000);
+    }
+    h.run(1000);
+    const starves = h.serverStarved.slice(starvedFrom);
+    const lost = tap.lost.slice(lostFrom);
+    const starved = (t[STAT_STARVED] as number) - (before[0] as number);
+    const corrections = (t[STAT_CORRECTIONS] as number) - (before[1] as number);
+    const starvedCorrections = (t[STAT_STARVED_CORRECTIONS] as number) - (before[2] as number);
+    console.log(
+      `NET-04 starved snapshots lost: ${starves.length} starves (${lost.length} flagged snapshots ` +
+        `lost here, the rest by the profile), ${corrections} corrections, ${starvedCorrections} ` +
+        `starved, ${starved} starves counted`,
+    );
+    expect(starves.length).toBeGreaterThanOrEqual(8 * 3);
+    // No flagged snapshot reached the client: the profile lost some before the tap saw them.
+    for (const tick of lost) expect(starves).toContain(tick);
+    // Every starve counted, though none of their snapshots arrived.
+    expect(starved).toBe(starves.length);
+    // Corrections on snapshots without the flag, each one excused by the counter: 0 mispredictions
+    // (the one-snapshot flag would have reported all of them).
+    expect(corrections).toBeGreaterThan(0);
+    expect(corrected.length).toBe(corrections);
+    for (const tick of corrected) expect(starves, `tick ${tick}`).not.toContain(tick);
+    expect(corrections - starvedCorrections).toBe(0);
+    expect(t[STAT_CORRECTIONS] as number).toBe(t[STAT_STARVED_CORRECTIONS] as number);
+    expect(h.totals().hardResyncs).toBe(0);
+    expect(h.unreconciled()).toEqual([]);
+    expectNoStrikes(h.match, [h.client]);
+  });
 });
 
 describe("NET-04 (M2 basic): browser-like frame timing", () => {

@@ -12,6 +12,7 @@ import {
   SNAP_BUDGET_BITS,
   SNAP_ENTITY_VELOCITY_D1,
   SNAP_ENTITY_VELOCITY_D2,
+  SNAP_FLAG_BITS,
   SNAP_FLAG_DEFERRED,
   SNAP_FLAG_MASK,
   SNAP_FLAG_SPECTATOR,
@@ -20,6 +21,7 @@ import {
   SNAP_LOCAL_VELOCITY_D2,
   SNAP_ORIGIN_D1,
   SNAP_ORIGIN_D2,
+  SNAP_STARVE_SEQ_BITS,
   SNAPSHOT_HISTORY,
 } from "./protocol";
 import {
@@ -33,24 +35,26 @@ import {
 } from "./worldFrame";
 
 /**
- * SNAPSHOT, protocol v2 (docs/05 §3.6, M3 design §2.1, D-033, D-038): a header, the receiver's
- * local block, then an entity record per other player that changed against the baseline (entity
- * id = client id), ids ascending. A full snapshot (`baseBack` 0) has no baseline: the full local
- * block and a "new" record per present player. A delta (`baseBack` 1–63) is coded against the
- * frame of tick serverTick − baseBack, which the receiver holds: a delta local block, and a record
- * only for a player that left (removed), appeared or came back as a new incarnation (new), or
- * changed (a delta body); a present player with no record is unchanged since the baseline. Above
- * 37 players the byte-budget scheduler (D-046) may leave players out: their ids follow the records
- * (the deferred list), and the receiver keeps what its baseline holds of them (state and stamp) or,
- * when it holds no state, marks them pending. The server encodes from its world frames (or a
- * client's mirror of what it was sent); the client decodes into a `WorldFrame` of its store.
+ * SNAPSHOT, protocol v3 (docs/05 §3.6, M3 design §2.1, D-033, D-038, D-050): a header, the
+ * receiver's local block, then an entity record per other player that changed against the
+ * baseline (entity id = client id), ids ascending. A full snapshot (`baseBack` 0) has no baseline:
+ * the full local block and a "new" record per present player. A delta (`baseBack` 1–63) is coded
+ * against the frame of tick serverTick − baseBack, which the receiver holds: a delta local block,
+ * and a record only for a player that left (removed), appeared or came back as a new incarnation
+ * (new), or changed (a delta body); a present player with no record is unchanged since the
+ * baseline. Above 37 players the byte-budget scheduler (D-046) may leave players out: their ids
+ * follow the records (the deferred list), and the receiver keeps what its baseline holds of them
+ * (state and stamp) or, when it holds no state, marks them pending. The server encodes from its
+ * world frames (or a client's mirror of what it was sent); the client decodes into a `WorldFrame`
+ * of its store.
  *
  * | Field | Bits |
  * |---|---|
  * | type | 8 (5) |
  * | serverTick | 32 (1…TICK_MAX) |
  * | baseBack | 6 (0 = full; 1–63 and at most serverTick − 1 = a delta) |
- * | flags | 8 (SNAP_FLAG_*; bit 1 and bits 4–7 refused, SPECTATOR with STARVED or DEFERRED refused) |
+ * | flags | 4 (SNAP_FLAG_*; bit 1 refused, SPECTATOR with STARVED or DEFERRED refused) |
+ * | starveSeq | 4 (flags byte bits 4–7: the receiver's starve counter, D-050; 0 when spectator) |
  * | cvarHash | 16 |
  * | inputBufferHealth | 8 (i8; not when spectator) |
  * | teleportSeq | 8 (not when spectator; D-035) |
@@ -179,8 +183,13 @@ export class SnapshotHeader {
   serverTick = 0;
   /** serverTick − the baseline's tick: 0 = full, 1–63 = a delta (D-038). */
   baseBack = 0;
-  /** SNAP_FLAG_* bits. */
+  /** SNAP_FLAG_* bits (the flags byte's low half). */
   flags = 0;
+  /**
+   * The receiver's starve counter, 0–15 (D-050; the flags byte's high half): the ticks the server
+   * starved this client, wrapping at 16. 0 in a spectator snapshot.
+   */
+  starveSeq = 0;
   /** Low 16 bits of the replicated cvar hash the tick was simulated with. */
   cvarHash = 0;
   /** Newest received cmd tick − the tick simulated, clamped to i8 (docs/05 §8.2). */
@@ -739,8 +748,8 @@ function deferrable(cur: WorldFrame, base: WorldFrame | null, s: number): boolea
  * is ignored). With SNAP_FLAG_SPECTATOR there is no receiver and every slot is a record. Returns
  * false (the writer's error flag) on anything the layout can't carry: a receiver absent from `cur`
  * (or without state in `base`), a left-out slot the receiver would not rebuild (`deferrable`), a
- * left-out slot in a spectator snapshot, a value out of range, or a live snapshot over
- * MAX_SNAPSHOT_BYTES.
+ * left-out slot in a spectator snapshot, a starve counter outside 0–15 or other than 0 in a
+ * spectator snapshot (D-050), a value out of range, or a live snapshot over MAX_SNAPSHOT_BYTES.
  */
 export function encodeSnapshot(
   w: BitWriter,
@@ -785,13 +794,18 @@ export function encodeSnapshot(
     count++;
   }
   const flags = (hdr.flags & ~SNAP_FLAG_DEFERRED) | (deferred > 0 ? SNAP_FLAG_DEFERRED : 0);
-  if ((flags & ~SNAP_FLAG_MASK) !== 0 || (spectator && (flags & SNAP_FLAG_STARVED) !== 0)) {
+  if (
+    (flags & ~SNAP_FLAG_MASK) !== 0 ||
+    (spectator && ((flags & SNAP_FLAG_STARVED) !== 0 || hdr.starveSeq !== 0))
+  ) {
     w.fail();
   }
   w.writeBits(MSG_SNAPSHOT, 8);
   writeTick(w, t);
   w.writeBits(back, 6);
-  w.writeBits(flags, 8);
+  w.writeBits(flags, SNAP_FLAG_BITS);
+  // The flags byte's high half; the writer refuses a counter outside 0–15.
+  w.writeBits(hdr.starveSeq, SNAP_STARVE_SEQ_BITS);
   w.writeBits(hdr.cvarHash, 16);
   if (!spectator) {
     if (cur.present[selfId] !== 1) {
@@ -836,21 +850,26 @@ export function encodeSnapshot(
 /**
  * Reads the fields before the local block (and health and teleportSeq) into `out`. False on a
  * short read, a tick of 0 or past TICK_MAX, a baseline before tick 1 (baseBack ≥ serverTick), or
- * flags the protocol refuses (bit 1, bits 4–7, SPECTATOR with STARVED or DEFERRED). `out` is then
- * partial.
+ * flags the protocol refuses (bit 1, SPECTATOR with STARVED or DEFERRED, SPECTATOR with a starve
+ * counter other than 0). Bits 4–7 of the flags byte are the starve counter (D-050): any value
+ * 0–15 on a live snapshot. `out` is then partial.
  */
 export function decodeSnapshotHeader(r: BitReader, out: SnapshotHeader): boolean {
   if (r.readBits(8) !== MSG_SNAPSHOT) return false;
   const t = readTick(r);
   const baseBack = r.readBits(6);
-  const flags = r.readBits(8);
+  const flags = r.readBits(SNAP_FLAG_BITS);
+  const starveSeq = r.readBits(SNAP_STARVE_SEQ_BITS);
   const cvarHash = r.readBits(16);
   const spectator = (flags & SNAP_FLAG_SPECTATOR) !== 0;
   if (t < 1 || baseBack >= t || (flags & ~SNAP_FLAG_MASK) !== 0) return false;
-  if (spectator && (flags & (SNAP_FLAG_STARVED | SNAP_FLAG_DEFERRED)) !== 0) return false;
+  if (spectator && ((flags & (SNAP_FLAG_STARVED | SNAP_FLAG_DEFERRED)) !== 0 || starveSeq !== 0)) {
+    return false;
+  }
   out.serverTick = t;
   out.baseBack = baseBack;
   out.flags = flags;
+  out.starveSeq = starveSeq;
   out.cvarHash = cvarHash;
   out.deferred = 0;
   if (spectator) {

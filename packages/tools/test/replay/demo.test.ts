@@ -86,7 +86,7 @@ describe("pnpm demo-info (D-044)", () => {
     expect(r.out).toBe(
       [
         "demo fixture.demo",
-        "format: demo version 1, protocol 2, 60 Hz",
+        "format: demo version 1, protocol 3, 60 Hz",
         "map: arena_greybox (990efb80e478cd6c)",
         "build: fixture-build",
         "start tick: 61",
@@ -113,7 +113,7 @@ describe("pnpm demo-info (D-044)", () => {
     expect(JSON.parse(r.out)).toEqual({
       header: {
         demoVersion: 1,
-        protocol: 2,
+        protocol: 3,
         tickRate: 60,
         map: "arena_greybox",
         mapHash: "990efb80e478cd6c",

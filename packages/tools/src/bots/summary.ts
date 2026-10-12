@@ -92,7 +92,10 @@ export interface BotNumbers {
   readonly correctionsPerS: number;
   readonly meanCorrection: number;
   readonly maxCorrection: number;
-  /** Corrections on snapshots the server did not flag starved: the sim disagreed (NET-03). */
+  /**
+   * Corrections with no starve since the previous snapshot received (the starve counter did not
+   * move, D-050): the sim disagreed (NET-03).
+   */
   readonly mispredictions: number;
   readonly starved: number;
   readonly hardResyncs: number;
@@ -179,7 +182,7 @@ export interface HumanNumbers {
   readonly longShare: number;
   readonly correctionsPerS: number;
   readonly meanCorrection: number;
-  /** Corrections on snapshots the server did not flag starved, since the page started. */
+  /** Corrections with no starve since the previous snapshot (D-050), since the page started. */
   readonly mispredictions: number;
   readonly starved: number;
   readonly hardResyncs: number;
@@ -313,8 +316,8 @@ export function aggregate(bots: readonly BotNumbers[]): SummaryAggregate {
  * PASS/FAIL against docs/10 §4: the server's tick p50/p99, GC pause and memory (§4.1, judged on
  * its run window; the window's peak heapUsed + external, RSS reported) and each client's down/up
  * bandwidth and snapshot size (§4.2, the worst bot); plus every bot joined and stayed, the
- * prediction's health (D-036): no strike on either side and no misprediction, a correction on a
- * snapshot the server did not flag starved (the e2e rule, docs/10 §1), and smooth remotes
+ * prediction's health (D-036): no strike on either side and no misprediction, a correction with
+ * no starve since the previous snapshot (D-050; the e2e rule, docs/10 §1), and smooth remotes
  * (D-037): no NET-05 violation in what the bots drew of each other. The §4.1 numbers of a run
  * window that began before the bots are reported, not judged. `serverMissing` says why there are
  * no server numbers, when there are none.
@@ -395,7 +398,7 @@ export function evaluateChecks(
   add("snapshot size", "≤ 1100 B", `${agg.snapshotBytes.max} B`, agg.snapshotBytes.max <= 1100);
   add("bot strikes", "0", `${agg.strikes}`, agg.strikes === 0);
   add(
-    "mispredictions (corrections not on a starved snapshot)",
+    "mispredictions (corrections with no starve since the previous snapshot)",
     "0",
     `${agg.mispredictions}`,
     agg.mispredictions === 0,

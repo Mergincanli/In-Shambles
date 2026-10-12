@@ -463,7 +463,7 @@ describe("client session", () => {
     expect(h.frames.offset.at(-1)).toBe(0);
   });
 
-  it("counts a correction on a starved snapshot apart: a late cmd, not a misprediction", () => {
+  it("counts a correction after a starve apart: a late cmd, not a misprediction (D-050)", () => {
     // wan-50: a 70 ms stall sends cmds past the input buffer, so the server repeats one it had
     // not received; the client already predicted that tick with the real cmd and is corrected.
     const h = new NetHarness({
@@ -479,7 +479,8 @@ describe("client session", () => {
     expect(t[STAT_STARVED]).toBeGreaterThan(0);
     expect(t[STAT_CORRECTIONS]).toBeGreaterThan(0);
     expect(t[STAT_STARVED_CORRECTIONS]).toBe(t[STAT_CORRECTIONS]);
-    // A server-side push the client could not predict is a correction on an on-time snapshot.
+    // A server-side push the client could not predict is a correction with no starve since the
+    // previous snapshot: a misprediction.
     const corrections = t[STAT_CORRECTIONS] as number;
     let push = true;
     h.beforeServerTick = () => {

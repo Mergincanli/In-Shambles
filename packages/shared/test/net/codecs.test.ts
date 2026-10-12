@@ -55,6 +55,7 @@ import {
   SNAP_FLAG_DEFERRED,
   SNAP_FLAG_SPECTATOR,
   SNAP_FLAG_STARVED,
+  SNAP_STARVE_SEQ_MASK,
 } from "../../src/net/protocol";
 import {
   decodeSnapshotBody,
@@ -178,12 +179,13 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
         expect(decodeSnapshotParts(readerOver(w.bytes, w.byteLength), out)).toBe(true);
         const h = m.hdr;
         const spectator = (h.flags & SNAP_FLAG_SPECTATOR) !== 0;
-        expect([out.hdr.serverTick, out.hdr.baseBack, out.hdr.flags, out.hdr.cvarHash]).toEqual([
-          h.serverTick,
-          h.baseBack,
-          h.flags,
-          h.cvarHash,
-        ]);
+        expect([
+          out.hdr.serverTick,
+          out.hdr.baseBack,
+          out.hdr.flags,
+          out.hdr.starveSeq,
+          out.hdr.cvarHash,
+        ]).toEqual([h.serverTick, h.baseBack, h.flags, h.starveSeq, h.cvarHash]);
         const self = m.selfId;
         if (h.baseBack > 0) deltas++;
         // The exact size functions add up to what the encoder wrote (M3 design §2.3), a left-out
@@ -236,6 +238,49 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
       }
       expect(deltas).toBeGreaterThan(500);
       expect(deferredSnapshots).toBeGreaterThan(200);
+    });
+
+    it("SNAPSHOT: the starve counter takes every value 0–15 in the flags byte's high half (D-050)", () => {
+      const w = newWriter();
+      const m = new SnapshotParts();
+      const out = new SnapshotParts();
+      m.hdr.serverTick = 1000;
+      randomFrame(new Mulberry32(0x57a7), m.frame, 1000, SNAP_SELF, 3);
+      for (const starved of [0, SNAP_FLAG_STARVED]) {
+        for (let seq = 0; seq <= SNAP_STARVE_SEQ_MASK; seq++) {
+          const label = `starveSeq ${seq}, flags ${starved}`;
+          m.hdr.flags = starved;
+          m.hdr.starveSeq = seq;
+          w.reset();
+          expect(encodeSnapshotParts(w, m), label).toBe(true);
+          // The flags byte is bits 46–53: the flags in its low half, the counter in its high one.
+          const r = readerOver(w.bytes, w.byteLength);
+          r.readBits(8);
+          r.readBits(32);
+          r.readBits(6);
+          expect(r.readBits(8), label).toBe(starved | (seq << 4));
+          expect(decodeSnapshotParts(readerOver(w.bytes, w.byteLength), out), label).toBe(true);
+          expect([out.hdr.flags, out.hdr.starveSeq], label).toEqual([starved, seq]);
+          expect(frameDigest(out.frame, SNAP_SELF), label).toBe(frameDigest(m.frame, SNAP_SELF));
+        }
+      }
+      // A spectator snapshot has no receiver, so no counter: 0 encodes and decodes, 1–15 neither.
+      const spec = new SnapshotParts();
+      spec.hdr.serverTick = 1000;
+      spec.hdr.flags = SNAP_FLAG_SPECTATOR;
+      randomFrame(new Mulberry32(0x57a8), spec.frame, 1000, -1, 3);
+      const ok = encodedBy((wr) => encodeSnapshotParts(wr, spec));
+      const hdr = new SnapshotHeader();
+      expect(decodeSnapshotHeader(readerOver(ok), hdr)).toBe(true);
+      expect([hdr.flags, hdr.starveSeq]).toEqual([SNAP_FLAG_SPECTATOR, 0]);
+      for (let seq = 1; seq <= SNAP_STARVE_SEQ_MASK; seq++) {
+        spec.hdr.starveSeq = seq;
+        expect(encodeSnapshotParts(newWriter(), spec), `spectator, starveSeq ${seq}`).toBe(false);
+        // The counter is bits 50–53: the decoder refuses the header before the body.
+        const patched = patchBits(ok, 50, 4, seq);
+        expect(decodeSnapshotHeader(readerOver(patched), hdr), `spectator ${seq}`).toBe(false);
+        expect(decodeSnapshotParts(readerOver(patched), out), `spectator ${seq}`).toBe(false);
+      }
     });
 
     it("SNAPSHOT: any quantized state with a sanitized pitch encodes, and decodes to itself", () => {
@@ -406,8 +451,19 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
         ["tick past TICK_MAX", (m) => (m.hdr.serverTick = TICK_MAX + 1)],
         ["health 128", (m) => (m.hdr.inputBufferHealth = 128)],
         ["v1's teleport bit", (m) => (m.hdr.flags = 1 << 1)],
+        // The flags field holds the low half of the byte; the counter is `starveSeq` (D-050).
         ["flag bit 7", (m) => (m.hdr.flags = 1 << 7)],
+        ["starve counter 16", (m) => (m.hdr.starveSeq = 16)],
+        ["starve counter −1", (m) => (m.hdr.starveSeq = -1)],
+        ["starve counter 1.5", (m) => (m.hdr.starveSeq = 1.5)],
         ["spectator + starved", (m) => (m.hdr.flags = SNAP_FLAG_SPECTATOR | SNAP_FLAG_STARVED)],
+        [
+          "spectator + a starve counter (D-050)",
+          (m) => {
+            m.hdr.flags = SNAP_FLAG_SPECTATOR;
+            m.hdr.starveSeq = 1;
+          },
+        ],
         ["receiver absent", (m) => m.frame.setAbsent(SNAP_SELF)],
         ["receiver's stamp not the tick", (m) => m.frame.setPresent(SNAP_SELF, 999)],
         [
@@ -524,10 +580,10 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
 
     /**
      * A valid live snapshot of tick 1000 for receiver SNAP_SELF (9) with records 3, 20 and 40,
-     * every field 0: header 0–85 (type 0, serverTick 8, baseBack 40, flags 46, cvarHash 54, health
-     * 70, teleportSeq 78), local block 86–284 (origin 86/107/128, velocity 149/169/189, yaw 209,
-     * pitch 225, flags 241, groundEntity + 1 251, waterLevel 267, stamina 269), entityCount 285,
-     * then 213-bit records from 292.
+     * every field 0: header 0–85 (type 0, serverTick 8, baseBack 40, flags 46, starveSeq 50,
+     * cvarHash 54, health 70, teleportSeq 78), local block 86–284 (origin 86/107/128, velocity
+     * 149/169/189, yaw 209, pitch 225, flags 241, groundEntity + 1 251, waterLevel 267, stamina
+     * 269), entityCount 285, then 213-bit records from 292.
      */
     function baseSnapshot(): Uint8Array {
       const m = new SnapshotParts();
@@ -578,8 +634,9 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
         ["flag bit 1 (v1's teleport)", [46, 8, 2]],
         ["DEFERRED with no deferred list", [46, 8, SNAP_FLAG_DEFERRED]],
         ["spectator + deferred", [46, 8, SNAP_FLAG_SPECTATOR | SNAP_FLAG_DEFERRED]],
-        ["flag bits 4–7", [46, 8, 0xf0]],
         ["spectator + starved", [46, 8, SNAP_FLAG_SPECTATOR | SNAP_FLAG_STARVED]],
+        // Spectator + a starve counter (D-050) is patched onto a real spectator snapshot in "the
+        // starve counter takes every value 0–15": on this live one SPECTATOR alone is refused.
         ["local origin x past +16384", [86, 21, 524289]],
         ["local origin z past −16384", [128, 21, (1 << 21) - 524289]],
         ["local velocity −2^19", [149, 20, 1 << 19]],
@@ -622,6 +679,10 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
         ["local velocity −(2^19 − 1)", [149, 20, (1 << 20) - 524287]],
         ["local pitch +16201", [225, 16, PITCH_LIMIT_U16]],
         ["groundEntity ENTITY_WORLD", [251, 16, 32768]],
+        // Bits 4–7 are the starve counter (D-050): any value, with or without STARVED.
+        ["starve counter 15", [50, 4, 15]],
+        ["starve counter 1 + starved", [46, 8, SNAP_FLAG_STARVED | (1 << 4)]],
+        ["starve counter 15 + starved", [46, 8, 0xf0 | SNAP_FLAG_STARVED]],
         ["origin −16384", [rec(0, "originX"), 21, (1 << 21) - 524288]],
         ["velocity −32767", [rec(1, "velY"), 16, 0x8001]],
         ["pitch −16201", [rec(2, "pitch"), 16, 0x10000 - PITCH_LIMIT_U16]],
@@ -781,21 +842,23 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
       hello.buildHash = "abc";
       hello.nonce = 7;
       const now = encodedBy((w) => encodeHello(w, hello));
-      // type 1, protocolVersion 2 (u16, LSB-first): pinned.
-      expect(hex(now.subarray(0, 3))).toBe("010200");
+      // type 1, protocolVersion 3 (u16, LSB-first; D-050): pinned.
+      expect(hex(now.subarray(0, 3))).toBe("010300");
       expect(peekHelloVersion(now, now.length)).toBe(PROTOCOL_VERSION);
-      // A v1 HELLO's first 3 B, which the server reads to KICK it with a reason.
+      // v1 and v2 HELLOs' first 3 B, which the server reads to KICK them with a reason.
       hello.protocolVersion = 1;
       expect(hex(encodedBy((w) => encodeHello(w, hello)).subarray(0, 3))).toBe("010100");
-      // A v3 HELLO with a field v2 doesn't know: v2's decoder refuses it, the peek still works.
+      hello.protocolVersion = 2;
+      expect(hex(encodedBy((w) => encodeHello(w, hello)).subarray(0, 3))).toBe("010200");
+      // A v4 HELLO with a field v3 doesn't know: v3's decoder refuses it, the peek still works.
       const w = newWriter();
-      hello.protocolVersion = 3;
+      hello.protocolVersion = 4;
       encodeHello(w, hello);
       w.writeBits(0xabcd, 16);
-      const v3 = w.bytes.slice(0, w.byteLength);
-      expect(decodeHello(readerOver(v3), new HelloMsg())).toBe(false);
-      expect(peekHelloVersion(v3, v3.length)).toBe(3);
-      expect(peekHelloVersion(v3, 2)).toBe(-1);
+      const v4 = w.bytes.slice(0, w.byteLength);
+      expect(decodeHello(readerOver(v4), new HelloMsg())).toBe(false);
+      expect(peekHelloVersion(v4, v4.length)).toBe(4);
+      expect(peekHelloVersion(v4, 2)).toBe(-1);
       expect(peekHelloVersion(encodedBy(encodeReady), 1)).toBe(-1);
       const ping = encodedBy((wr) => encodePing(wr, new PingMsg()));
       expect(peekHelloVersion(ping, ping.length)).toBe(-1);

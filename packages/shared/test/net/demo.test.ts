@@ -135,13 +135,13 @@ describe("demo file (D-044)", () => {
   it("has the header layout of M3 design §2.12 (golden)", () => {
     const h = header(0x01020304);
     const bytes = encodeDemoHeader(h) as Uint8Array;
-    // "ISDM", demoVersion 1, protocol 2, 60 Hz, startTick 0x01020304 (LE); mapName (u8 13 +
+    // "ISDM", demoVersion 1, protocol 3 (D-050), 60 Hz, startTick 0x01020304 (LE); mapName (u8 13 +
     // "arena_greybox"); the map hash lo then hi; buildHash (u8 7 + "abc1234"); the cvar block's
     // u16 length (24) and the encoded CVARS (type 8, effectiveTick 0, the block's hash, the block).
     expect(hex(bytes)).toBe(
       "4953444d" +
         "0100" +
-        "0200" +
+        "0300" +
         "3c" +
         "04030201" +
         "0d" +
@@ -153,7 +153,7 @@ describe("demo file (D-044)", () => {
         "1800" +
         "080000000033603996012473fb778c2e87e9730000000000",
     );
-    expect(PROTOCOL_VERSION).toBe(2);
+    expect(PROTOCOL_VERSION).toBe(3);
     expect(TICK_RATE).toBe(60);
     const back = new DemoHeader();
     expect(decodeDemoHeader(bytes, bytes.length, back)).toBeNull();
@@ -335,6 +335,13 @@ describe("demo file (D-044)", () => {
     const at = headerLength + DEMO_RECORD_HEADER_BYTES + (bit >> 3);
     live[at] = (live[at] as number) & ~(1 << (bit & 7));
     expect(refusal(validateDemo(live))).toMatch(/not a spectator snapshot/);
+    // A starve counter (the flags byte's high half, bits 50–53) in a spectator snapshot: it has
+    // no receiver, so the header does not decode (D-050).
+    const counted = bytes.slice();
+    const seqBit = 8 + 32 + 6 + 4;
+    const seqAt = headerLength + DEMO_RECORD_HEADER_BYTES + (seqBit >> 3);
+    counted[seqAt] = (counted[seqAt] as number) | (1 << (seqBit & 7));
+    expect(refusal(validateDemo(counted))).toMatch(/SNAPSHOT at byte \d+ does not decode/);
     // Without its keyframe the first delta has no baseline.
     const { bytes: two } = build(2, 3);
     const h = new DemoHeader();

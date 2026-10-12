@@ -19,9 +19,10 @@ import { loadCourse } from "../../src/scenarios/course";
 // ClientSim on Node's built-in WebSocket, wrapped in nothing (lan), against the Node server
 // started in-process on a free port. The client loads the map WELCOME names and plays the circle
 // bot for 3 s on real time, judged by the e2e prediction-health rule (packages/client/e2e/
-// health.ts): no correction on an on-time snapshot ever; at most one hard resync in an on-time
-// frame before the bot moves and none after; starved cmds, their corrections and other hard
-// resyncs only after frames longer than the input buffer (the test host's timer jitter).
+// health.ts): no misprediction (a correction with no starve since the previous snapshot, D-050)
+// ever; at most one hard resync in an on-time frame before the bot moves and none after; starved
+// cmds, their corrections and other hard resyncs only after frames longer than the input buffer
+// (the test host's timer jitter).
 
 const RUN_MS = 3000;
 

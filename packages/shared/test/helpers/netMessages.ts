@@ -55,6 +55,7 @@ import {
   SNAP_FLAG_DEFERRED,
   SNAP_FLAG_SPECTATOR,
   SNAP_FLAG_STARVED,
+  SNAP_STARVE_SEQ_MASK,
   SNAPSHOT_HISTORY,
 } from "../../src/net/protocol";
 import {
@@ -342,16 +343,18 @@ export function decodeSnapshotParts(r: BitReader, m: SnapshotParts): boolean {
 }
 
 /**
- * Random valid parts: live (starved or not) or spectator, full or (half the time) a delta against
- * a random baseline in `m.base`, up to the most records that fit. A third of the live ones with
- * at most 16 others carry the byte-budget scheduler's forms (D-046, `randomDeferrals`): a
- * baseline with pending slots and older stamps, and slots left out of the snapshot.
+ * Random valid parts: live (starved or not, with any starve counter, D-050) or spectator (counter
+ * 0), full or (half the time) a delta against a random baseline in `m.base`, up to the most
+ * records that fit. A third of the live ones with at most 16 others carry the byte-budget
+ * scheduler's forms (D-046, `randomDeferrals`): a baseline with pending slots and older stamps,
+ * and slots left out of the snapshot.
  */
 export function randomSnapshot(rng: Mulberry32, m: SnapshotParts): SnapshotParts {
   const h = m.hdr;
   h.serverTick = intIn(rng, 1, TICK_MAX);
   const kind = rng.nextInt(5);
   h.flags = kind === 0 ? SNAP_FLAG_SPECTATOR : kind === 1 ? SNAP_FLAG_STARVED : 0;
+  h.starveSeq = kind === 0 ? 0 : rng.nextInt(SNAP_STARVE_SEQ_MASK + 1);
   h.cvarHash = intIn(rng, 0, 0xffff);
   h.inputBufferHealth = intIn(rng, -128, 127);
   const spectator = kind === 0;

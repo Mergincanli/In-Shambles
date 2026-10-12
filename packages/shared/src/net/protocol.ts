@@ -1,14 +1,16 @@
 /**
- * Protocol constants (docs/05 §3.2–§3.6; v1 D-026, v2 D-033). Any change to a message layout bumps
- * PROTOCOL_VERSION and updates docs/05 §3.6 in the same change (.claude/rules/netcode.md).
+ * Protocol constants (docs/05 §3.2–§3.6; v1 D-026, v2 D-033, v3 D-050). Any change to a message
+ * layout bumps PROTOCOL_VERSION and updates docs/05 §3.6 in the same change
+ * (.claude/rules/netcode.md).
  */
 
 /**
  * u16 on the wire, in HELLO and WELCOME. v2 (D-033) changed SNAPSHOT: the player list and the
  * teleport counter. Its delta forms (D-038), deferred list (D-046) and the EVENTS message (D-043)
- * join within v2: nothing ships between those increments.
+ * joined within v2: nothing shipped between those increments. v3 (D-050) gives the high half of
+ * SNAPSHOT's flags byte to the receiver's starve counter; every other layout is v2's.
  */
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 
 /** The u8 type byte that leads every message. 0 is never a message, so a zeroed buffer is bad. */
 export const MSG_HELLO = 1;
@@ -96,10 +98,14 @@ export const INPUT_MAX_CMDS = 4;
 export const INPUT_TICK_BACK_MAX = 255;
 
 /**
- * SNAPSHOT flag bits (D-033). Bit 1 was v1's teleport flag; the header's teleport counter replaced
- * it (D-035), and it must be 0, like bits 4–7.
+ * SNAPSHOT flag bits (D-033): the low half of the flags byte (`SNAP_FLAG_BITS`); the high half is
+ * the starve counter (D-050). Bit 1 was v1's teleport flag; the header's teleport counter replaced
+ * it (D-035), and it must be 0.
  */
-/** The server repeated a cmd of this client's that had not arrived (docs/05 §8.1). */
+/**
+ * The server repeated a cmd of this client's that had not arrived, at this snapshot's tick
+ * (docs/05 §8.1). The starve counter counts every such tick, so a lost snapshot can't hide one.
+ */
 export const SNAP_FLAG_STARVED = 1 << 0;
 /** Every player, no local block: demo files only (D-044); a live connection drops it. */
 export const SNAP_FLAG_SPECTATOR = 1 << 2;
@@ -110,6 +116,18 @@ export const SNAP_FLAG_SPECTATOR = 1 << 2;
 export const SNAP_FLAG_DEFERRED = 1 << 3;
 /** The flags a snapshot may carry. */
 export const SNAP_FLAG_MASK = SNAP_FLAG_STARVED | SNAP_FLAG_SPECTATOR | SNAP_FLAG_DEFERRED;
+/** The flags' width on the wire: bits 0–3 of the flags byte. */
+export const SNAP_FLAG_BITS = 4;
+
+/**
+ * The starve counter (D-050): bits 4–7 of SNAPSHOT's flags byte, after the flag bits. The server
+ * steps a client's counter on every tick it starves that client (wrapping at 16) and writes it
+ * into every snapshot it sends that client, as D-035's teleport counter does for spawns, so a lost
+ * snapshot can't hide a starve: the client counts (new − last seen) & SNAP_STARVE_SEQ_MASK starves
+ * since the snapshot before. 0 in a spectator snapshot, which has no receiver.
+ */
+export const SNAP_STARVE_SEQ_BITS = 4;
+export const SNAP_STARVE_SEQ_MASK = (1 << SNAP_STARVE_SEQ_BITS) - 1;
 
 /** Snapshots each end keeps, and so the oldest baseline a delta may use (docs/05 §4.3). */
 export const SNAPSHOT_HISTORY = 64;

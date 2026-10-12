@@ -18,7 +18,7 @@
 | up per client | ≤ 8 KB/s | 3.65 KB/s | PASS |
 | snapshot size | ≤ 1100 B | 63 B | PASS |
 | bot strikes | 0 | 0 | PASS |
-| mispredictions (corrections not on a starved snapshot) | 0 | 0 | PASS |
+| mispredictions (corrections with no starve since the previous snapshot) | 0 | 0 | PASS |
 | remote jumps (NET-05 violations) | 0 | 0 | PASS |
 | human joined and stayed | players 3, remotes 2 | players 3, remotes 2 | PASS |
 | human corrections per s (NET-04) | < 1 | 0.017 | PASS |

@@ -252,7 +252,7 @@ describe("bots summary", () => {
     expect(failing([bot(0), bot(1)], { ...server, strikes: 1 })).toEqual(["server strikes"]);
     expect(failing([bot(0), bot(1, { strikes: 2 })])).toEqual(["bot strikes"]);
     expect(failing([bot(0), bot(1, { mispredictions: 1 })])).toEqual([
-      "mispredictions (corrections not on a starved snapshot)",
+      "mispredictions (corrections with no starve since the previous snapshot)",
     ]);
     expect(failing([bot(0), bot(1, { remoteJumps: 1 })])).toEqual([
       "remote jumps (NET-05 violations)",

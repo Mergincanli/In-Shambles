@@ -49,7 +49,7 @@ function expectParity(h: NetHarness): void {
   expect(t.corrections, "corrections").toBe(0);
   expect(t.paramResyncs, "parameter resyncs").toBe(0);
   expect(t.hardResyncs, "hard resyncs").toBe(0);
-  expect(t.starved, "starved snapshots after startup").toBe(0);
+  expect(t.starved, "starves after startup").toBe(0);
   expect(h.serverStarved.filter((tick) => tick > h.client.startTick)).toEqual([]);
   // Every tick the server simulated, from the spawn on, against the client's prediction.
   expect(h.compared(h.finalPredicted)).toBeGreaterThanOrEqual(TICKS);

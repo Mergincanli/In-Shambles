@@ -50,7 +50,11 @@ import {
   SNAP_ENTITY_VELOCITY_D1,
   SNAP_ENTITY_VELOCITY_D2,
   SNAP_FIT_MAX_PLAYERS,
+  SNAP_FLAG_BITS,
   SNAP_FLAG_DEFERRED,
+  SNAP_FLAG_MASK,
+  SNAP_FLAG_SPECTATOR,
+  SNAP_FLAG_STARVED,
   SNAP_FULL_FIXED_BITS,
   SNAP_HEADER_BITS,
   SNAP_LOCAL_VELOCITY_D1,
@@ -58,6 +62,8 @@ import {
   SNAP_MIN_CAPACITY,
   SNAP_ORIGIN_D1,
   SNAP_ORIGIN_D2,
+  SNAP_STARVE_SEQ_BITS,
+  SNAP_STARVE_SEQ_MASK,
   SnapshotHeader,
   TEXT_MAX,
   type UserCmd,
@@ -150,6 +156,35 @@ describe("docs/05 §3.6 protocol layout", () => {
     );
     expect(tableRow("**Deferred list**", "ids")).toContain(`count × ${SNAP_DEFERRED_ID_BITS}`);
     expect(SNAP_FLAG_DEFERRED).toBe(1 << 3);
+  });
+
+  it("splits the flags byte into the flags and the starve counter (D-050)", () => {
+    const flags = tableRow("**Snapshot header**", "flags");
+    const counter = tableRow("**Snapshot header**", "starveSeq");
+    expect(flags).toContain(
+      `flags | ${SNAP_FLAG_BITS} | bits 0–3 of the flags byte: bit 0 starved`,
+    );
+    expect(flags).toContain("bit 2 spectator");
+    expect(flags).toContain("bit 1 (v1's teleport flag) must be 0");
+    expect(flags).not.toContain("bits 4–7");
+    expect(counter).toContain(
+      `starveSeq | ${SNAP_STARVE_SEQ_BITS} | bits 4–7 of the flags byte: the receiver's starve ` +
+        `counter (D-050), 0–${SNAP_STARVE_SEQ_MASK}`,
+    );
+    expect(counter).toContain("0 when spectator");
+    // One byte between them, the flags in its low half.
+    expect(SNAP_FLAG_BITS + SNAP_STARVE_SEQ_BITS).toBe(8);
+    expect(SNAP_FLAG_MASK).toBeLessThan(1 << SNAP_FLAG_BITS);
+    expect([SNAP_FLAG_STARVED, SNAP_FLAG_SPECTATOR, SNAP_FLAG_DEFERRED]).toEqual([1, 4, 8]);
+    // The rows follow the codec's order: flags, then the counter, then cvarHash.
+    const rows = firstTable(layout.slice(layout.indexOf("**Snapshot header**"))).rows.map(
+      (r) => r[0],
+    );
+    expect(rows.slice(rows.indexOf("flags"), rows.indexOf("flags") + 3)).toEqual([
+      "flags",
+      "starveSeq",
+      "cvarHash",
+    ]);
   });
 
   it("gives the delta local block and delta record widths at their largest (D-038)", () => {

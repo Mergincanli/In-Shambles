@@ -55,7 +55,7 @@ export function loadMap(name: string): Cmap {
 
 export const TEST_BUILD = "test-build";
 
-/** A decoded v2 snapshot (D-033) as the receiver holds it: the header, the frame, its own state. */
+/** A decoded snapshot (D-033) as the receiver holds it: the header, the frame, its own state. */
 export class TestSnapshot {
   readonly header = new SnapshotHeader();
   readonly frame = new WorldFrame();
@@ -67,6 +67,10 @@ export class TestSnapshot {
   }
   get flags(): number {
     return this.header.flags;
+  }
+  /** The receiver's starve counter (D-050). */
+  get starveSeq(): number {
+    return this.header.starveSeq;
   }
   get inputBufferHealth(): number {
     return this.header.inputBufferHealth;

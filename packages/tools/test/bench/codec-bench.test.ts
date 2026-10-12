@@ -125,7 +125,7 @@ describe("codec bench verdict", () => {
       expect(meetsCodecBudget(ns)).toBe(verdict === "PASS");
       const report = formatCodecBench(fakeResult(ns, 2));
       expect(report).toContain(
-        `SNAPSHOT, v2 delta of 16 players (221 B) encode+decode: ${ns.toFixed(1)} ns, budget 30000 ns: ${verdict}`,
+        `SNAPSHOT, v3 delta of 16 players (221 B) encode+decode: ${ns.toFixed(1)} ns, budget 30000 ns: ${verdict}`,
       );
       expect(report).toContain("GCs during the codec loops: 2 (expect 0)");
     }

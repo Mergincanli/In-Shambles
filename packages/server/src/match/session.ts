@@ -102,8 +102,15 @@ export class Session implements SnapshotClient {
   readonly stats = new SessionStats();
   /** The tick the player spawned on (−1 before READY). */
   spawnTick = -1;
-  /** SNAP_FLAG_* bits for this tick's snapshot. */
+  /** SNAP_FLAG_* bits for this tick's snapshot: STARVED when this tick starved the client. */
   snapFlags = 0;
+  /**
+   * The starve counter (D-050): stepped on every tick that starves this client, wrapping at 16
+   * (`SNAP_STARVE_SEQ_MASK`), and carried by every snapshot it is sent, so the client counts
+   * every starve even when the snapshot of the starved tick is lost. Never reset: the client
+   * seeds its count from the spawn snapshot.
+   */
+  starveSeq = 0;
   /** The slot's connect counter when this client took it (u16, wrapping): the entity's serial. */
   serial = 0;
   /** TEAM_*: TEAM_NONE until READY assigns one (D-034; cosmetic until M7). */

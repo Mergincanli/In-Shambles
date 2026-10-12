@@ -402,6 +402,8 @@ class Bot {
     const t = this.client.stats.totals;
     const d = (stat: number) => (t[stat] as number) - (this.base[stat] as number);
     const corrections = d(STAT_CORRECTIONS);
+    // Corrections with no starve since the previous snapshot received (D-050): a starve's own
+    // correction counts as starved even when the snapshot of the starved tick was lost.
     const mispredictions = corrections - d(STAT_STARVED_CORRECTIONS);
     const sizes = this.tap.snapshotSizes.slice();
     for (let i = 0; i < sizes.length; i++)

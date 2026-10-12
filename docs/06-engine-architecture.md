@@ -83,9 +83,10 @@ packages/shared/src/
     messages.ts        message structs + encodeX/decodeX (docs/05 §3.6) but SNAPSHOT; readTick/writeTick
     events.ts          EVENTS: EventsMsg (63 pooled records), encodeEvents/decodeEvents, the
                        events' widths (D-043)
-    snapshot.ts        SNAPSHOT v2: SnapshotHeader, encodeSnapshot, decodeSnapshotHeader/Body, full and
-                       delta forms against a baseline frame, exact size functions localBlockBits and
-                       entityRecordBits, the size constants and their static checks (D-033, D-038)
+    snapshot.ts        SNAPSHOT v3: SnapshotHeader (with the receiver's starve counter, D-050),
+                       encodeSnapshot, decodeSnapshotHeader/Body, full and delta forms against a
+                       baseline frame, exact size functions localBlockBits and entityRecordBits, the
+                       size constants and their static checks (D-033, D-038)
     worldFrame.ts      WorldFrame (64 slots as typed arrays, stamps, masks), FrameRing (64 by tick),
                        slot ↔ PlayerState, copySlot, entityEquals, frameDigest (D-034)
     playerStateCodec.ts  the PlayerState bit layout and its decode-time range checks
@@ -107,7 +108,7 @@ packages/server/src/
                        yields to the host's I/O before catching up
     match.ts           Match: handshake, sv_maxClients, teams, spawns and respawns, per-tick order
                        (docs/05 §8.1), movement-event history, the world frame captured into the
-                       history and the v2 snapshots built from it (deltas against each client's
+                       history and the v3 snapshots built from it (deltas against each client's
                        acked tick, D-038; the byte-budget scheduler above 37 players, D-046), CVARS;
                        EVENTS after each snapshot: the roster burst, JOIN, LEAVE, SERVER_STATS from
                        the host's reportTickStats (D-043); the pmove primer at construction
