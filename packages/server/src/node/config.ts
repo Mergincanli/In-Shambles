@@ -4,6 +4,7 @@ import { tokenizeCommand } from "../match/commands";
 import { SessionLimits } from "../match/limits";
 import { AdmissionLimits, parseOrigins } from "../transport/wsListener";
 import { WsLimits } from "../transport/wsTransport";
+import { isReservedFileName, RESERVED_FILE_REASON } from "./fileNames";
 import { MATCH_NAME } from "./matchSet";
 
 /** A bad `server.cfg` line or command-line flag; the server refuses to start with it. */
@@ -59,8 +60,9 @@ export const METRICS_DISCARD_MAX_S = 86_400;
 const MAP_ID = /^[a-z0-9_]{1,63}$/;
 
 /**
- * Checks a match's name, map and player cap as typed (`maxClients` text, or null for
- * `sv_maxClients`): the spec, or the reason it is refused, prefixed with `source`.
+ * Checks a match's name, map (a map id, never a Windows device name: D-051) and player cap as
+ * typed (`maxClients` text, or null for `sv_maxClients`): the spec, or the reason it is refused,
+ * prefixed with `source`.
  */
 export function matchSpec(
   name: string,
@@ -72,6 +74,7 @@ export function matchSpec(
     return `${source}: "${name}" is not a match name (a-z, 0-9 and _, 1–32 chars)`;
   }
   if (!MAP_ID.test(map)) return `${source}: "${map}" is not a map id`;
+  if (isReservedFileName(map)) return `${source}: "${map}" ${RESERVED_FILE_REASON}`;
   let cap: number | null = null;
   if (maxClients !== null) {
     cap = /^\d{1,2}$/.test(maxClients) ? Number(maxClients) : Number.NaN;
@@ -109,7 +112,11 @@ export function parseCommandLine(args: readonly string[]): CommandLine {
   try {
     parsed = parseFlags(args);
   } catch (e) {
-    throw new ConfigError(e instanceof Error ? e.message : String(e));
+    // PowerShell passes an unquoted comma list as arguments of their own (D-051).
+    const positional = (e as { code?: unknown }).code === "ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL";
+    throw new ConfigError(
+      `${e instanceof Error ? e.message : String(e)}${positional ? COMMA_HINT : ""}`,
+    );
   }
   const v = parsed.values;
   const sets: CvarAssignment[] = [];
@@ -146,6 +153,10 @@ export function parseCommandLine(args: readonly string[]): CommandLine {
     matches,
   };
 }
+
+/** What a stray argument's error adds: PowerShell's comma operator splits an unquoted list. */
+const COMMA_HINT =
+  ' (in PowerShell, quote a value that holds commas: --set "sv_allowedOrigins=https://a,https://b")';
 
 function parseFlags(args: readonly string[]) {
   return parseArgs({
@@ -234,6 +245,10 @@ export function parseServerCfg(text: string, file: string): CfgEntry[] {
       out.push({ kind: "match_add", spec });
       continue;
     }
+    if (command === "quit") {
+      // D-051: the console's (stdin) alone; a cfg line would stop the server it configures.
+      throw new ConfigError(`${source}: quit is the console's (stdin) alone, not server.cfg's`);
+    }
     if (command !== "set") throw new ConfigError(`${source}: unknown command ${head}`);
     const name = tokens[1];
     if (name === undefined || tokens.length < 3) {
@@ -242,6 +257,23 @@ export function parseServerCfg(text: string, file: string): CfgEntry[] {
     out.push({ kind: "set", name, value: tokens.slice(2).join(" "), source });
   }
   return out;
+}
+
+/**
+ * A server.cfg's text from its bytes (D-051): UTF-8 (a BOM dropped), or UTF-16LE with its BOM,
+ * which Windows PowerShell 5.1's `>` and `Out-File` write. UTF-16BE, and NUL bytes without a BOM
+ * (UTF-16 that lost it), are a ConfigError that says to save the file as UTF-8. `file` names it.
+ */
+export function decodeServerCfg(bytes: Uint8Array, file: string): string {
+  const b = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (b[0] === 0xff && b[1] === 0xfe) return b.toString("utf16le", 2);
+  if (b[0] === 0xfe && b[1] === 0xff) {
+    throw new ConfigError(`${file}: UTF-16 BE text; save it as UTF-8`);
+  }
+  if (b.includes(0)) {
+    throw new ConfigError(`${file}: NUL bytes (UTF-16 without a BOM?); save it as UTF-8`);
+  }
+  return b.toString("utf8", b[0] === 0xef && b[1] === 0xbb && b[2] === 0xbf ? 3 : 0);
 }
 
 /**

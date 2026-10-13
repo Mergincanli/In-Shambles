@@ -14,16 +14,38 @@ export const HOST_GATE_LOAD_PER_CORE = 0.5;
 export const GENERATOR_NICE = 10;
 
 export interface HostGate {
-  readonly load1: number;
+  /** The 1-minute load average, or null where the host has none (Windows). */
+  readonly load1: number | null;
   readonly cpus: number;
-  readonly perCore: number;
+  readonly perCore: number | null;
   readonly pass: boolean;
+  /**
+   * False where there is no load average to judge (Windows, D-051): the check is reported, not
+   * judged, and never stops a `--strict` run.
+   */
+  readonly measured: boolean;
   /** What the summary and a refused strict run print. */
   readonly text: string;
 }
 
-/** The gate on a 1-minute load average over `cpus` cores: a FAIL with the numbers, never a skip. */
-export function hostGate(load1: number, cpus: number): HostGate {
+/** What the gate reads on a host without a load average (Windows, D-051). */
+export const HOST_GATE_NOT_MEASURED = "not measured (no load average on Windows)";
+
+/**
+ * The gate on a 1-minute load average over `cpus` cores: a FAIL with the numbers, never a skip.
+ * Without a load average (null: Windows, D-051) it is not measured: reported, not judged.
+ */
+export function hostGate(load1: number | null, cpus: number): HostGate {
+  if (load1 === null) {
+    return {
+      load1,
+      cpus,
+      perCore: null,
+      pass: true,
+      measured: false,
+      text: HOST_GATE_NOT_MEASURED,
+    };
+  }
   const perCore = cpus > 0 ? load1 / cpus : Number.POSITIVE_INFINITY;
   const pass = perCore <= HOST_GATE_LOAD_PER_CORE;
   // Two decimals, unless they would round across the gate (2.0001 on 4 CPUs is not "0.50 > 0.5").
@@ -32,7 +54,7 @@ export function hostGate(load1: number, cpus: number): HostGate {
   const text =
     `load ${load1.toFixed(2)} on ${cpus} CPUs = ${shown} per core ` +
     `${pass ? "≤" : ">"} ${HOST_GATE_LOAD_PER_CORE} before the run`;
-  return { load1, cpus, perCore, pass, text };
+  return { load1, cpus, perCore, pass, measured: true, text };
 }
 
 /** What `lowerPriority` touches, so a test can run it without changing its own priority. */
@@ -194,10 +216,11 @@ export function processNice(pid: number): number | null {
 
 /** The 1-minute load average and the core count, as the host gate reads them. */
 export interface HostLoad {
-  readonly load1: number;
+  /** Null on Windows, where `os.loadavg()` is always zeros (D-051). */
+  readonly load1: number | null;
   readonly cpus: number;
 }
 
-export function hostLoad(): HostLoad {
-  return { load1: loadavg()[0] as number, cpus: cpus().length };
+export function hostLoad(platform: NodeJS.Platform = process.platform): HostLoad {
+  return { load1: platform === "win32" ? null : (loadavg()[0] as number), cpus: cpus().length };
 }

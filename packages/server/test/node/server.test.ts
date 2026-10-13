@@ -41,6 +41,7 @@ async function start(
   args: string[] = [],
   console?: NodeJS.ReadableStream,
   rconPassword: string | null = "",
+  onQuit?: () => void,
 ) {
   const lines: Line[] = [];
   running = await startServer({
@@ -50,6 +51,7 @@ async function start(
     ...(console === undefined ? {} : { console }),
     primer: false,
     ...(rconPassword === null ? {} : { rconPassword }),
+    ...(onQuit === undefined ? {} : { onQuit }),
   });
   return { server: running, lines, port: running.listener.port };
 }
@@ -185,8 +187,83 @@ describe("Node server (in process, real WebSocket)", () => {
     const tick = server.matches.main?.match.serverTick;
     await new Promise((r) => setTimeout(r, 100));
     expect(server.matches.main?.match.serverTick).toBe(tick);
-    // The port is released and no new connection is accepted.
+    // The port is released and no new connection is accepted (a refused loopback connect takes
+    // 1–2 s on Windows, which retries it: hence the timeout).
+    expect(server.listener.http.listening).toBe(false);
     await expect(NodeWsClient.connect(`ws://127.0.0.1:${port}/`)).rejects.toThrow();
+  }, 10_000);
+
+  it("stops through its host on the stdin quit, which takes no prefix or argument (D-051)", async () => {
+    const input = new PassThrough();
+    const lines: Line[] = [];
+    let quits = 0;
+    running = await startServer({
+      args: ["--port", "0"],
+      cwd: serverDir,
+      write: (line) => lines.push(JSON.parse(line) as Line),
+      console: input,
+      primer: false,
+      rconPassword: "",
+      // main.ts stops the process here, as on SIGINT.
+      onQuit: () => {
+        quits++;
+      },
+    });
+    const replies = () => lines.filter((l) => l.ev === "console").map((l) => [l.lvl, l.text]);
+    input.write("@main quit\nquit now\nquit\n");
+    await until(() => replies().length === 3, "the three replies");
+    expect(replies()).toEqual([
+      ["error", "quit is a process command: no @<match> prefix"],
+      ["error", "usage: quit"],
+      ["info", "quit: shutting down"],
+    ]);
+    expect(quits).toBe(1);
+    await running.stop();
+    running = null;
+    // A server inside another program (no hook) says so and runs on.
+    const other = new PassThrough();
+    const { lines: otherLines, server } = await start([], other);
+    running = server;
+    other.write("quit\n");
+    await until(() => otherLines.some((l) => l.ev === "console"), "the reply");
+    expect(otherLines.find((l) => l.ev === "console")).toMatchObject({
+      lvl: "error",
+      text: "quit: this server runs inside another program, which stops it",
+    });
+    expect(server.loop.isRunning).toBe(true);
+  });
+
+  it("runs no console line that came in the same read as its quit (D-051)", async () => {
+    const demosDir = mkdtempSync(join(tmpdir(), "server-quit-"));
+    onTestFinished(() => rmSync(demosDir, { recursive: true, force: true }));
+    const input = new PassThrough();
+    const lines: Line[] = [];
+    running = await startServer({
+      args: ["--port", "0"],
+      cwd: serverDir,
+      write: (line) => lines.push(JSON.parse(line) as Line),
+      console: input,
+      primer: false,
+      rconPassword: "",
+      demosDir,
+      // main.ts's stop, as on SIGINT (the process exit aside).
+      onQuit: () => void running?.stop("quit"),
+    });
+    // One read, as a script's pipe delivers it: run after the shutdown, these lines would add a
+    // match and open a demo that never gets its END record.
+    input.write("quit\nquit\nmatch_add late movement_lab\nrecord after\n");
+    await until(() => lines.some((l) => l.ev === "shutdown"), "the shutdown");
+    await running.stop();
+    expect(lines.filter((l) => l.ev === "console").map((l) => l.text)).toEqual([
+      "quit: shutting down",
+    ]);
+    expect(lines.filter((l) => l.ev === "shutdown")).toEqual([
+      expect.objectContaining({ signal: "quit" }),
+    ]);
+    expect(lines.filter((l) => l.ev === "match_add" || l.ev === "demo_start")).toEqual([]);
+    expect(running.matches.late).toBeUndefined();
+    expect(readdirSync(demosDir)).toEqual([]);
+    running = null;
   });
 
   it("refuses an upgrade with 503 once it is shutting down", async () => {
@@ -279,7 +356,10 @@ describe("Node server (in process, real WebSocket)", () => {
 
   it("runs rcon as admin of the sender's match; a wrong password logs rcon_fail with the ip only (D-042)", async () => {
     const input = new PassThrough();
-    const { server, lines, port } = await start([], input, "open sesame");
+    let quits = 0;
+    const { server, lines, port } = await start([], input, "open sesame", () => {
+      quits++;
+    });
     const c = await client(port);
     c.hello(server.buildHash);
     await poll(c, () => c.welcomes.length === 1, "WELCOME");
@@ -323,6 +403,19 @@ describe("Node server (in process, real WebSocket)", () => {
     );
     const after = (await httpJson(port, "/metrics")).body as Run;
     expect(Math.abs(after.process.runS - after.matches.main.runS)).toBeLessThan(0.001);
+    // The process commands are never rcon's (D-042), even with the right password and a server
+    // that stdin could stop (D-051): neither the stop nor a new match.
+    c.cmd('rcon "open sesame" quit');
+    c.cmd('rcon "open sesame" match_add late movement_lab');
+    await poll(c, () => c.prints.length === 6, "the process commands' refusals");
+    expect(c.prints.slice(4).map((p) => p.text)).toEqual([
+      "quit: only the dedicated server's own console (stdin) stops it",
+      "unknown server command match_add",
+    ]);
+    expect(quits).toBe(0);
+    expect(server.loop.isRunning).toBe(true);
+    expect(server.matches.late).toBeUndefined();
+    expect(lines.filter((l) => l.ev === "shutdown" || l.ev === "match_add")).toEqual([]);
     const text = JSON.stringify(lines);
     expect(text).not.toContain("open sesame");
     expect(text).not.toContain("hunter2");
@@ -562,6 +655,28 @@ describe("Node server (in process, real WebSocket)", () => {
     expect(server.listener.limits).toMatchObject({ sendBufferDrop: 3000, sendBufferClose: 4096 });
   });
 
+  it("reads a server.cfg that Windows PowerShell 5.1 wrote (UTF-16LE with a BOM, D-051)", async () => {
+    // `"set pm_gravity 500" > my.cfg` in Windows PowerShell 5.1: UTF-16LE, a BOM, CRLF.
+    const dir = mkdtempSync(join(tmpdir(), "server-cfg-"));
+    onTestFinished(() => rmSync(dir, { recursive: true, force: true }));
+    const cfg = join(dir, "my.cfg");
+    const text = "set pm_gravity 500\r\nset sv_maxPerIp 5\r\n";
+    writeFileSync(cfg, Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(text, "utf16le")]));
+    const { server } = await start(["--cfg", cfg]);
+    expect(server.matches.main?.match.cvars.get("pm_gravity")).toBe(500);
+    expect(server.cvars.get("sv_maxPerIp")).toBe(5);
+    await server.stop();
+    running = null;
+    // UTF-16BE is refused with the fix.
+    writeFileSync(
+      cfg,
+      Buffer.concat([Buffer.from([0xfe, 0xff]), Buffer.from(text, "utf16le").swap16()]),
+    );
+    await expect(
+      startServer({ args: ["--port", "0", "--cfg", cfg], cwd: serverDir, primer: false }),
+    ).rejects.toThrow(`${cfg}: UTF-16 BE text; save it as UTF-8`);
+  });
+
   it("refuses to start on a bad setting or map", async () => {
     await expect(
       startServer({ args: ["--port", "0", "--set", "sv_nope=1"], cwd: serverDir }),
@@ -572,6 +687,10 @@ describe("Node server (in process, real WebSocket)", () => {
     await expect(
       startServer({ args: ["--port", "0", "--map", "nope"], cwd: serverDir }),
     ).rejects.toThrow(/cannot read/);
+    // D-051: on Windows `con.cmap` would be the console, not a file.
+    await expect(
+      startServer({ args: ["--port", "0", "--map", "con"], cwd: serverDir }),
+    ).rejects.toThrow('map name "con" is a reserved file name (a device on Windows)');
     await expect(
       startServer({ args: ["--port", "0", "--cfg", "missing.cfg"], cwd: serverDir }),
     ).rejects.toThrow(/no such file/);
@@ -787,6 +906,11 @@ describe("several matches per process (D-047): the fast smoke", () => {
     writeFileSync(join(dir, "y.cfg"), "@main set sv_port 1\n");
     await expect(run(["--cfg", join(dir, "y.cfg")])).rejects.toThrow(
       /y\.cfg:1: unknown cvar sv_port$/,
+    );
+    // D-051: `quit` is stdin's alone, through a match line too.
+    writeFileSync(join(dir, "z.cfg"), "@main quit\n");
+    await expect(run(["--cfg", join(dir, "z.cfg")])).rejects.toThrow(
+      /z\.cfg:1: quit: only the dedicated server's own console \(stdin\) stops it$/,
     );
   });
 });

@@ -231,4 +231,30 @@ describe("startConsole", () => {
     await new Promise((r) => setTimeout(r, 20));
     expect(lines).toEqual(["set pm_gravity 400", "status"]);
   });
+
+  it("runs no line read with the one that stopped it (D-051: nothing after a quit)", async () => {
+    const input = new PassThrough();
+    const lines: string[] = [];
+    const stop = startConsole(input, (l) => {
+      lines.push(l);
+      if (l === "quit") stop();
+    });
+    // One read, as a script's pipe delivers it: readline has split all four lines already.
+    input.write("status\nquit\nrecord after\nmatch_add late movement_lab\n");
+    await until(() => lines.length >= 2, "two lines");
+    await new Promise((r) => setTimeout(r, 20));
+    expect(lines).toEqual(["status", "quit"]);
+  });
+
+  it("ends on a read error as at the input's end, the error going no further (D-051)", async () => {
+    const input = new PassThrough();
+    const lines: string[] = [];
+    startConsole(input, (l) => lines.push(l));
+    input.write("status\n");
+    await until(() => lines.length === 1, "the line");
+    // A console window closing on Windows: unhandled, the error would end the server (exit 1).
+    input.destroy(new Error("EIO"));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(lines).toEqual(["status"]);
+  });
 });

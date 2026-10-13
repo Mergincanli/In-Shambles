@@ -17,6 +17,7 @@ import {
   registerPmoveCvars,
   registerServerReplicatedCvars,
   SNAP_FLAG_STARVED,
+  SNAP_STARVE_SEQ_MASK,
   type SnapshotHeader,
   slotToPlayerState,
   type Transport,
@@ -278,6 +279,11 @@ export class ClientSim {
   input: CmdSampler;
   /** The last tick of the startup fill: snapshots up to it may be starved without harm. */
   startTick = -1;
+  /**
+   * The newest snapshot's starve counter (D-050), 0–15: seeded by the spawn snapshot, then moved
+   * only by snapshots newer than the newest one (as the teleport counter is, D-035).
+   */
+  starveSeq = 0;
   frames = 0;
   /** Messages from PRINT, oldest first; the caller drains it (the console, a test). */
   readonly prints: string[] = [];
@@ -417,7 +423,7 @@ export class ClientSim {
     return this.connection.state;
   }
 
-  /** The snapshots received, by tick (protocol v2's frames, D-033). */
+  /** The snapshots received, by tick (protocol v3's frames, D-033, D-050). */
   get store(): SnapshotStore {
     return this.connection.store;
   }
@@ -785,9 +791,10 @@ export class ClientSim {
     this.remotes.onStored(tick);
     stats.add(STAT_SNAPSHOTS, 1);
     if (this.connection.state === CONN_SPAWNING) {
-      // The first snapshot is the spawn: adopted whole, and its counter is the one to watch.
+      // The first snapshot is the spawn: adopted whole, and its counters are the ones to watch.
       p.reset(tick, state);
       p.teleportSeq = h.teleportSeq;
+      this.starveSeq = h.starveSeq;
       this.anchor(tick, true);
       this.connection.markActive();
       return;
@@ -797,9 +804,16 @@ export class ClientSim {
     const result = p.onSnapshot(tick, state, h.cvarHash, h.teleportSeq);
     if (result === SNAPSHOT_STALE) return;
     if (tick > prevTick + 1) stats.add(STAT_SNAPSHOTS_LOST, tick - prevTick - 1);
-    if ((h.flags & SNAP_FLAG_STARVED) !== 0 && tick > this.startTick) {
-      stats.add(STAT_STARVED, 1);
-    }
+    // The server's starves of this client at the ticks after the previous snapshot received, up to
+    // this one (D-050): the counter steps on every starve and rides in every snapshot, so a lost
+    // snapshot hides none (exact while fewer than 16 fall between two received snapshots). A
+    // counter back where it was on a snapshot flagged starved at its own tick has wrapped: 16 at
+    // least. Only newer snapshots get here, so a reordered older one never moves the counter; a
+    // hard resync moves it too (its starves count, as the backlog of a stall's were before).
+    let starves = (h.starveSeq - this.starveSeq) & SNAP_STARVE_SEQ_MASK;
+    if (starves === 0 && (h.flags & SNAP_FLAG_STARVED) !== 0) starves = SNAP_STARVE_SEQ_MASK + 1;
+    this.starveSeq = h.starveSeq;
+    if (starves > 0 && tick > this.startTick) stats.add(STAT_STARVED, starves);
     // A changed counter is a teleport even when the snapshot of the jump itself was lost; only
     // snapshots newer than the last one move it (D-035). It drops the render offset.
     if (p.teleports !== teleports) {
@@ -825,7 +839,17 @@ export class ClientSim {
       stats.add(STAT_CORRECTIONS, 1);
       stats.add(STAT_CORRECTION_DIST, dist[0] as number);
       stats.add(STAT_CORRECTION_MAX, dist[0] as number);
-      if ((h.flags & SNAP_FLAG_STARVED) !== 0) stats.add(STAT_STARVED_CORRECTIONS, 1);
+      // A starve since the previous snapshot received explains the correction (timing, not a
+      // misprediction; D-050). Its divergence always shows first in the first snapshot received
+      // at or after the starved tick T: the server simulated T with a repeated cmd the client
+      // never predicted with, so its state at T already differs (when the repeat differs at all),
+      // and every later state it sends is simulated from that one. Nothing else hides it: the
+      // sim is deterministic from quantized state and every simulated field is replicated, so an
+      // earlier snapshot that matched the prediction leaves the client exactly where the server
+      // was until T, and one at or after T that still matches means the starve changed nothing
+      // (both sides go on from the same state with the same cmds). So the snapshot that sees a
+      // starve's divergence is the one whose counter moved, whatever was lost in between.
+      if (starves > 0) stats.add(STAT_STARVED_CORRECTIONS, 1);
       this.changed = true;
     } else if (result === SNAPSHOT_HARD_RESYNC) {
       // A backlog after a stall resyncs on every snapshot ahead of the last; it is one event,

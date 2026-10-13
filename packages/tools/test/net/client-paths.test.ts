@@ -5,8 +5,12 @@ import {
   MAX_TICKS_PER_FRAME,
   MixedInput,
   NeutralInput,
+  SNAPSHOT_CORRECTED,
   SNAPSHOT_STALE,
   SNAPSHOT_TELEPORT,
+  STAT_CORRECTIONS,
+  STAT_STARVED,
+  STAT_STARVED_CORRECTIONS,
   StrafeCircuit,
 } from "@game/client/net";
 import { SESSION_ACTIVE, type Session } from "@game/server";
@@ -17,6 +21,7 @@ import {
   type CloseHandler,
   CmdMsg,
   decodeCmd,
+  decodeSnapshotHeader,
   findNetProfile,
   MAX_QUEUED_UNRELIABLE,
   MAX_UNRELIABLE_BYTES,
@@ -28,6 +33,9 @@ import {
   type NetProfile,
   type NetSimTransport,
   PlayerState,
+  SNAP_FLAG_STARVED,
+  SNAP_STARVE_SEQ_MASK,
+  SnapshotHeader,
   type Transport,
   type TransportStats,
   type UserCmd,
@@ -38,7 +46,8 @@ import { HandSnapshot } from "./snapshots";
 
 // The ClientSim paths the NET acceptance runs rarely reach (M2 design §2): the render offset at a
 // visible size and its snaps, the hard resync after a long stall, the CVARS re-request, the
-// per-frame tick cap and the lead cap while no snapshot arrives.
+// per-frame tick cap and the lead cap while no snapshot arrives, and the starve counter's
+// accounting when snapshots are lost or reordered (D-050).
 
 /**
  * Lets a test watch and rewrite what the client sends and receives. Its INPUTs ack tick 0, so the
@@ -406,6 +415,273 @@ describe("respawns (D-035)", () => {
     expect(frame).toBeGreaterThan(0);
     expect(h.frames.offset[frame - 1]).toBeGreaterThan(5);
     expect(h.frames.offset[frame]).toBe(0);
+  });
+});
+
+describe("the starve counter (D-050)", () => {
+  /** The client's counters the starve counter feeds: [starved, corrections, starved ones]. */
+  function counts(h: NetHarness): number[] {
+    const t = h.client.stats.totals;
+    return [
+      t[STAT_STARVED] as number,
+      t[STAT_CORRECTIONS] as number,
+      t[STAT_STARVED_CORRECTIONS] as number,
+    ];
+  }
+
+  /** `b − a`, element by element. */
+  function grew(a: readonly number[], b: readonly number[]): number[] {
+    return b.map((v, i) => v - (a[i] as number));
+  }
+
+  it("(a) a starve whose snapshot is lost still counts, and its correction on the next snapshot is a starved one", () => {
+    // Six bursts of 6 lost INPUTs: each loses the 3 cmds only they carried (4 per INPUT), so the
+    // server starves them, and every snapshot it flags STARVED is lost too. The corrections then
+    // land on snapshots without the flag, which the one-snapshot flag counted as mispredictions.
+    const { h, tap } = tapped(new StrafeCircuit());
+    h.runTicks(300);
+    const results = watchResults(h);
+    const r = new BitReader();
+    const hdr = new SnapshotHeader();
+    const lost: number[] = [];
+    let dropInputs = 0;
+    tap.uplink = (d, _len, reliable) => {
+      if (reliable || d[0] !== MSG_INPUT || dropInputs === 0) return true;
+      dropInputs--;
+      return false;
+    };
+    tap.receive = (d, len, reliable) => {
+      if (reliable || d[0] !== MSG_SNAPSHOT) return d;
+      r.reset(d, len);
+      if (!decodeSnapshotHeader(r, hdr) || (hdr.flags & SNAP_FLAG_STARVED) === 0) return d;
+      lost.push(hdr.serverTick);
+      return null;
+    };
+    const before = counts(h);
+    const starvedFrom = h.serverStarved.length;
+    for (let i = 0; i < 6; i++) {
+      dropInputs = 6;
+      h.run(500);
+    }
+    h.run(500);
+    const starves = h.serverStarved.slice(starvedFrom);
+    expect(starves.length).toBeGreaterThanOrEqual(6 * 3);
+    // Every starved tick's snapshot was lost, and the client counted every starve anyway.
+    expect(lost).toEqual(starves);
+    const [starved, corrections, starvedCorrections] = grew(before, counts(h));
+    expect(starved).toBe(starves.length);
+    // Each correction is a starved one: none is a misprediction.
+    expect(corrections).toBeGreaterThan(0);
+    expect(starvedCorrections).toBe(corrections);
+    // And each came on the first snapshot after a lost starved one, which carried no flag (the
+    // one-snapshot flag would have called all of them mispredictions).
+    const corrected = results.filter(([, res]) => res === SNAPSHOT_CORRECTED).map(([t]) => t);
+    expect(corrected.length).toBe(corrections);
+    for (const tick of corrected) {
+      expect(lost, `tick ${tick}`).toContain(tick - 1);
+      expect(lost, `tick ${tick}`).not.toContain(tick);
+    }
+    expect(h.unreconciled()).toEqual([]);
+  });
+
+  it("(b) a divergence with no starve is still a misprediction, its snapshot lost or not", () => {
+    // A server-side push the client could not predict: no starve, so the counter does not move.
+    const { h, tap } = tapped(new NeutralInput());
+    h.runTicks(120);
+    const before = counts(h);
+    bump(h, 20);
+    h.run(500);
+    expect(grew(before, counts(h))).toEqual([0, 1, 0]);
+    // The same with the bumped tick's snapshot lost: the next snapshot corrects, still unexcused.
+    const r = new BitReader();
+    const hdr = new SnapshotHeader();
+    const tick = bump(h, 20);
+    tap.receive = (d, len, reliable) => {
+      if (reliable || d[0] !== MSG_SNAPSHOT) return d;
+      r.reset(d, len);
+      return decodeSnapshotHeader(r, hdr) && hdr.serverTick === tick ? null : d;
+    };
+    h.run(500);
+    expect(grew(before, counts(h))).toEqual([0, 2, 0]);
+    const log = h.client.predictor.corrections;
+    expect(log.at(log.count - 1).tick).toBe(tick + 1);
+  });
+
+  /**
+   * From tick `from` on, rewrites each snapshot's starve counter to the server's + `add(tick)`
+   * (wrapping at 16) and sets STARVED where `flag(tick)` says: starves the client sees with no
+   * divergence (NeutralInput, so a repeat equals the cmd). `edit` sees each rewritten snapshot's
+   * tick and bytes and returns what to deliver, null to drop it.
+   */
+  function rewriteStarves(
+    add: (tick: number) => number,
+    flag: (tick: number) => boolean = () => false,
+    edit: (tick: number, d: Uint8Array) => Uint8Array | null = (_, d) => d,
+  ) {
+    const { h, tap } = tapped(new NeutralInput());
+    h.runTicks(120);
+    const results = watchResults(h);
+    const from = h.match.serverTick + 1;
+    const r = new BitReader();
+    const w = new BitWriter(MAX_UNRELIABLE_BYTES);
+    const m = new HandSnapshot(0);
+    tap.receive = (d, len, reliable) => {
+      if (reliable || d[0] !== MSG_SNAPSHOT) return d;
+      r.reset(d, len);
+      if (!m.decode(r)) return d;
+      const t = m.header.serverTick;
+      if (t < from) return edit(t, d.slice(0, len));
+      m.header.starveSeq = (m.header.starveSeq + add(t)) & SNAP_STARVE_SEQ_MASK;
+      if (flag(t)) m.header.flags |= SNAP_FLAG_STARVED;
+      m.encode(w);
+      return edit(t, w.bytes.slice(0, w.byteLength));
+    };
+    return { h, tap, from, results, before: counts(h) };
+  }
+
+  it("(c) a stale or reordered snapshot never moves the counter", () => {
+    // One starve at `from`; the snapshot of the tick before arrives right after it, stale to the
+    // prediction. Had it moved the counter back, the next snapshot would count the starve again.
+    let held: Uint8Array | null = null;
+    let heldStored = false;
+    const ctx = rewriteStarves(
+      () => 1,
+      () => false,
+      (t, d) => {
+        if (t === ctx.from - 1) {
+          held = d;
+          return null;
+        }
+        if (t === ctx.from && held !== null) {
+          ctx.tap.inject(d);
+          const counter = ctx.h.client.starveSeq;
+          const stored = ctx.h.client.store.stored;
+          ctx.tap.inject(held);
+          heldStored = ctx.h.client.store.stored === stored + 1;
+          // The older snapshot left the counter where the newer one put it.
+          expect(ctx.h.client.starveSeq).toBe(counter);
+          return null;
+        }
+        return d;
+      },
+    );
+    const { h, from, results, before } = ctx;
+    h.run(600);
+    expect(heldStored).toBe(true);
+    const at = results.findIndex(([t]) => t === from);
+    expect(results[at + 1]).toEqual([from - 1, SNAPSHOT_STALE]);
+    expect(grew(before, counts(h))).toEqual([1, 0, 0]);
+    const server = h.match.session(0) as Session;
+    expect(h.client.starveSeq).toBe((server.starveSeq + 1) & SNAP_STARVE_SEQ_MASK);
+  });
+
+  it("(d) counts across the wrap at 16, lost snapshots in between, and 16 at once only when flagged", () => {
+    // The counter steps 7, then 9 (to 16, wrapping, on a lost snapshot), 6 more, then 9 more (31,
+    // wrapping again): each received snapshot counts its difference mod 16, 31 in all.
+    const steps = [7, 16, 22, 31];
+    const ctx = rewriteStarves(
+      (t) => {
+        const k = t - ctx.from;
+        if (k < steps.length) return steps[k] as number;
+        // 16 more at once: on a snapshot flagged starved at its own tick (the counter back where
+        // it was means it wrapped: 16 at least), then 16 more on one that is not (read as 0: the
+        // limit, which needs at least 16 snapshots lost in a row with a starve on each of their
+        // ticks).
+        if (k < 10) return 31;
+        if (k < 20) return 47;
+        return 63;
+      },
+      (t) => t - ctx.from === 10,
+      (t, d) => (t - ctx.from === 1 ? null : d),
+    );
+    const { h, from, before } = ctx;
+    // A real divergence on the snapshot whose 16 read as 0 (D-050's limit): its correction then
+    // reads as a misprediction, the count's alias showing up in the classification.
+    h.beforeServerTick = () => {
+      if (h.match.serverTick + 1 !== from + 20) return;
+      const p = h.match.session(0)?.player as PlayerState;
+      p.origin[2] = (p.origin[2] as number) + 20;
+      h.beforeServerTick = null;
+    };
+    h.run(300);
+    expect(grew(before, counts(h))).toEqual([31 + 16, 0, 0]);
+    h.run(400);
+    expect(grew(before, counts(h))).toEqual([31 + 16, 1, 0]);
+    const log = h.client.predictor.corrections;
+    expect(log.at(log.count - 1).tick).toBe(from + 20);
+  });
+
+  it("(e) the spawn snapshot seeds the counter: only the starves after it count", () => {
+    // Every snapshot from the spawn on carries the server's counter + 9, and those after the
+    // spawn up to the end of the startup fill are lost, so the first snapshot the client counts
+    // compares its counter with the spawn's. Seeded, it counts the server's starves since the
+    // spawn (the fill's included, D-050's straddling gap); unseeded (0), 9 more mod 16.
+    const { h, tap } = tapped(new NeutralInput());
+    const r = new BitReader();
+    const w = new BitWriter(MAX_UNRELIABLE_BYTES);
+    const m = new HandSnapshot(0);
+    let spawnTick = -1;
+    let seeded = -1;
+    let dropped = 0;
+    tap.receive = (d, len, reliable) => {
+      if (reliable || d[0] !== MSG_SNAPSHOT) return d;
+      r.reset(d, len);
+      if (!m.decode(r)) return d;
+      const t = m.header.serverTick;
+      if (spawnTick >= 0 && t <= h.client.startTick) {
+        dropped++;
+        return null;
+      }
+      m.header.starveSeq = (m.header.starveSeq + 9) & SNAP_STARVE_SEQ_MASK;
+      expect(m.encode(w)).toBe(true);
+      if (spawnTick < 0) {
+        spawnTick = t;
+        seeded = m.header.starveSeq;
+      }
+      return w.bytes.slice(0, w.byteLength);
+    };
+    h.run(1000);
+    expect(spawnTick).toBeGreaterThan(0);
+    expect(dropped).toBeGreaterThan(0);
+    expect(seeded).toBe(9);
+    const server = h.match.session(0) as Session;
+    expect(h.client.starveSeq).toBe((server.starveSeq + 9) & SNAP_STARVE_SEQ_MASK);
+    const sinceSpawn = h.serverStarved.filter((t) => t > spawnTick).length;
+    expect(sinceSpawn).toBeLessThan(16);
+    expect(h.client.stats.totals[STAT_STARVED]).toBe(sinceSpawn);
+    expect(h.totals().corrections).toBe(0);
+  });
+
+  it("(f) a hard resync takes the counter: a stall's starves count once, a later push still a misprediction", () => {
+    // A 3 s stall: the server starves every tick, and the backlog arrives in one poll, every
+    // snapshot newer than the one before and ahead of the prediction (a hard resync). Each takes
+    // its counter, so each starve counts once, as the flag counted each starved snapshot.
+    const h = new NetHarness({ input: new NeutralInput(), primer: false });
+    h.runTicks(300);
+    const c = h.client;
+    const before = counts(h);
+    const starvedFrom = h.serverStarved.length;
+    const hardBefore = h.totals().hardResyncs;
+    h.hitch(3000);
+    const resumeAt = h.now + 3000;
+    h.run(3000 - 1);
+    while (h.now < resumeAt + 10 && h.totals().hardResyncs === hardBefore) h.run(1);
+    expect(h.totals().hardResyncs).toBe(hardBefore + 1);
+    const newest = c.predictor.snapshotTick;
+    const stalled = h.serverStarved.slice(starvedFrom).filter((t) => t <= newest).length;
+    expect(stalled).toBeGreaterThan(150);
+    expect(grew(before, counts(h))).toEqual([stalled, 0, 0]);
+    // Back in step: the client's counter is the server's, and a push it could not predict, with
+    // no starve since, is a misprediction (a resync that left the counter behind would excuse it
+    // on the first snapshot after, or count the stall's starves again).
+    h.run(1000);
+    const server = h.match.session(0) as Session;
+    expect(c.starveSeq).toBe(server.starveSeq);
+    const mid = counts(h);
+    bump(h, 20);
+    h.run(500);
+    expect(grew(mid, counts(h))).toEqual([0, 1, 0]);
+    expect(h.unreconciled()).toEqual([]);
   });
 });
 

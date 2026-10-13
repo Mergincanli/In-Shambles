@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type Cmap, decodeCmap } from "@game/shared";
+import { isReservedFileName, RESERVED_FILE_REASON } from "./fileNames";
 
 /** Map names the server loads: the greybox and compiled map ids (`snake_case`), no path parts. */
 const MAP_NAME = /^[a-z0-9_]{1,63}$/;
@@ -28,9 +29,13 @@ export function defaultMapsDir(cwd: string): string | null {
   return findMapsDir(dirname(fileURLToPath(import.meta.url))) ?? findMapsDir(cwd);
 }
 
-/** Loads and verifies `<dir>/<name>.cmap` (its content hash included). Throws with the path. */
+/**
+ * Loads and verifies `<dir>/<name>.cmap` (its content hash included). Throws with the path, and
+ * for a name that is not a map id or is a Windows device name (`con`, `com1`, …; D-051).
+ */
 export function loadMap(name: string, dir: string): Cmap {
   if (!MAP_NAME.test(name)) throw new Error(`map name "${name}" is not a map id`);
+  if (isReservedFileName(name)) throw new Error(`map name "${name}" ${RESERVED_FILE_REASON}`);
   const path = join(dir, `${name}.cmap`);
   let bytes: Uint8Array;
   try {

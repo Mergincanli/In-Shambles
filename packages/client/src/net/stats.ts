@@ -17,7 +17,10 @@ export const STAT_CORRECTIONS = 5;
 export const STAT_CORRECTION_DIST = 6;
 /** Largest correction distance, u (a maximum, not a sum). */
 export const STAT_CORRECTION_MAX = 7;
-/** Snapshots the server flagged starved: it repeated a cmd of ours that had not arrived. */
+/**
+ * Ticks the server starved us (repeated a cmd of ours that had not arrived), after the startup
+ * fill: from the snapshots' starve counter (D-050), so a lost snapshot hides none.
+ */
 export const STAT_STARVED = 8;
 /** Fast-forward and hold steps of the clock (M2 design §2 "Client clock"). */
 export const STAT_CLOCK_ADJUSTMENTS = 9;
@@ -28,8 +31,9 @@ export const STAT_HARD_RESYNCS = 11;
 /** Packets that did not decode or did not fit the connection's state. */
 export const STAT_STRIKES = 12;
 /**
- * Of the corrections, those on a snapshot the server flagged starved: it simulated a repeat of a
- * cmd of ours that came late, so the prediction could not match (timing, not a misprediction).
+ * Of the corrections, those with a starve since the previous snapshot received (its starve counter
+ * moved, D-050): the server simulated a repeat of a cmd of ours that came late, so the prediction
+ * could not match (timing, not a misprediction). The rest are mispredictions.
  */
 export const STAT_STARVED_CORRECTIONS = 13;
 /**

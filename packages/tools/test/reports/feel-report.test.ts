@@ -75,7 +75,8 @@ describe("feel report", () => {
       expect(readFileSync(out, "utf8")).toBe(text);
       expect(run.stdout).toContain(text);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      // Retried: on Windows a virus scanner may still hold the file the CLI just wrote.
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
   }, 30_000);
 });

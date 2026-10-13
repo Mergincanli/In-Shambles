@@ -146,8 +146,10 @@ import {
   registerPmoveCvars,
   rotatedBoxPlanes,
   SNAP_FLAG_DEFERRED,
+  SNAP_FLAG_SPECTATOR,
   SNAP_FLAG_STARVED,
   SNAP_FULL_FIXED_BITS,
+  SNAP_STARVE_SEQ_MASK,
   SnapshotHeader,
   SURF_LADDER,
   sanitizeUserCmd,
@@ -615,20 +617,21 @@ const pongGot = new PongMsg();
  * bytes behind an INPUT, SNAPSHOT or PONG type byte, and valid messages with a u32 tick set to
  * 2^32 − 1 (a value that would box if a decoder stored it before checking it) or, for SNAPSHOT,
  * one field inside an entity record set out of range, so the decoder refuses it after reading
- * whole records: an id past 63, then a later record's team 3, pitch past ±16201 or event kind 15.
- * Built once.
+ * whole records: an id past 63, then a later record's team 3, pitch past ±16201 or event kind 15;
+ * or a header the protocol refuses: a spectator flag with a starve counter (D-050). Built once.
  */
 const HOSTILE_COUNT = 64;
 const hostile: Uint8Array[] = [];
 const hostileTypes = [MSG_INPUT, MSG_SNAPSHOT, MSG_PONG];
 /** Bit offset of field `field` in entity record `k` (docs/05 §3.6: records start at 292). */
 const recordBit = (k: number, field: number) => SNAP_FULL_FIXED_BITS + k * ENTITY_NEW_BITS + field;
-/** [bit offset, width, value] of each record-level SNAPSHOT corruption, in turn. */
+/** [bit offset, width, value] of each SNAPSHOT corruption, in turn: record-level, then the header. */
 const SNAPSHOT_CORRUPTIONS: readonly (readonly [number, number, number])[] = [
   [recordBit(0, 0), 16, 0xffff], // id
   [recordBit(7, 171), 2, 3], // team
   [recordBit(11, 145), 16, 0x7fff], // pitch
   [recordBit(14, 189), 4, 15], // first event kind
+  [46, 8, SNAP_FLAG_SPECTATOR | (1 << 4)], // the flags byte: spectator with a starve counter
 ];
 let snapshotCorruption = 0;
 /** Overwrites `width` bits at bit `offset` of `bytes` with `value` (LSB-first, as BitWriter). */
@@ -725,13 +728,13 @@ const hostileEvents: Uint8Array[] = [];
 const HOSTILE_EVENTS = hostileEvents.length;
 
 /**
- * The per-tick messages (D-026, D-033): SNAPSHOT (a full v2 snapshot of a 16-player frame whose
+ * The per-tick messages (D-026, D-033): SNAPSHOT (a full v3 snapshot of a 16-player frame whose
  * players take quantized states with fractional origin and velocity, written into the frame as the
- * match captures them, for a rotating receiver; decoded header then body as the client's store
- * does), INPUT with 1–4 cmds, PING and PONG, each encoded, dispatched on its type byte and
- * decoded, then one hostile packet, which must be refused without allocating either. Outcomes:
- * snapshots (the receiver's state back exactly), inputs, pings and pongs that came back equal;
- * `codecRejected` counts the refusals.
+ * match captures them, for a rotating receiver, with every starve counter value in turn (D-050);
+ * decoded header then body as the client's store does), INPUT with 1–4 cmds, PING and PONG, each
+ * encoded, dispatched on its type byte and decoded, then one hostile packet, which must be refused
+ * without allocating either. Outcomes: snapshots (the receiver's state back exactly), inputs,
+ * pings and pongs that came back equal; `codecRejected` counts the refusals.
  */
 function runCodec(n: number): void {
   const w = codecWriter;
@@ -766,6 +769,7 @@ function runCodec(n: number): void {
       snapHeader.inputBufferHealth = (i & 15) - 8;
       snapHeader.cvarHash = i & 0xffff;
       snapHeader.flags = i & 1;
+      snapHeader.starveSeq = (i >> 2) & SNAP_STARVE_SEQ_MASK;
       encodeSnapshot(w, snapHeader, snapFrame, null, self);
     } else if (kind === 1) {
       inputSent.packetSeq = i & 0xffff;

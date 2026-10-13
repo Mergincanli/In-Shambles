@@ -44,6 +44,26 @@ const cmap = loadMap("movement_lab");
 const world = buildCollisionWorld(cmap);
 const dirs: string[] = [];
 
+/**
+ * Whether this account may make a file symlink (D-051): Windows needs a privilege or Developer
+ * Mode for one, which an elevated shell (and CI's runner) has and a normal account does not; a
+ * directory junction needs neither. POSIX always may.
+ */
+const canSymlink = (() => {
+  const d = mkdtempSync(join(tmpdir(), "demo-writer-probe-"));
+  try {
+    writeFileSync(join(d, "target"), "");
+    symlinkSync(join(d, "target"), join(d, "link"));
+    return true;
+  } catch (e) {
+    if (process.platform === "win32" && (e as NodeJS.ErrnoException).code === "EPERM") return false;
+    throw e;
+  } finally {
+    // Retried: a scanner holding the fresh file must not fail every test of this file (EBUSY).
+    rmSync(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+})();
+
 afterEach(() => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
@@ -88,6 +108,31 @@ describe("demo writer (D-044)", () => {
     expect(check.ok && check.summary.snapshots).toBe(30);
   });
 
+  it("refuses a Windows device name on every platform, and only those (D-051)", () => {
+    const root = tempDir();
+    const demos = join(root, "demos");
+    const writer = new DemoWriter(demos, log, "main");
+    const match = matchWith(writer);
+    for (const name of ["con", "prn", "aux", "nul", "com0", "com9", "lpt0", "lpt9"]) {
+      expect(writer.open(name, "movement_lab"), name).toBe(
+        `"${name}" is a reserved file name (a device on Windows)`,
+      );
+    }
+    expect(match.runAdminCommand("record nul")).toMatchObject({
+      level: PRINT_ERROR,
+      text: 'record: "nul" is a reserved file name (a device on Windows)',
+    });
+    expect(existsSync(demos)).toBe(false);
+    // A longer or suffixed name is a plain file, and so is a default name.
+    const names = ["con_1", "nul-2", "com10", "lpt", "auxx"];
+    for (const name of names) {
+      const opened = writer.open(name, "movement_lab");
+      if (typeof opened === "string") throw new Error(opened);
+      opened.sink.close();
+    }
+    expect(readdirSync(demos).sort()).toEqual(names.map((n) => `${n}.demo`).sort());
+  });
+
   it("records from the stdin console too (as admin of the match)", async () => {
     const root = tempDir();
     const writer = new DemoWriter(join(root, "demos"), log, "main");
@@ -114,7 +159,10 @@ describe("demo writer (D-044)", () => {
     writeFileSync(join(demos, "keep.demo"), "old");
     const outside = join(root, "outside.txt");
     writeFileSync(outside, "outside");
-    symlinkSync(outside, join(demos, "keep-2.demo"));
+    // Where this account may not make a file symlink (Windows, unelevated), a plain file stands
+    // in for it: the suffix must skip it all the same.
+    if (canSymlink) symlinkSync(outside, join(demos, "keep-2.demo"));
+    else writeFileSync(join(demos, "keep-2.demo"), "planted");
     const writer = new DemoWriter(demos, log, "main");
     const opened = writer.open("keep", "movement_lab");
     if (typeof opened === "string") throw new Error(opened);
@@ -122,13 +170,17 @@ describe("demo writer (D-044)", () => {
     opened.sink.close();
     expect(readFileSync(join(demos, "keep.demo"), "utf8")).toBe("old");
     expect(readFileSync(outside, "utf8")).toBe("outside");
+    expect(readFileSync(join(demos, "keep-2.demo"), "utf8")).toBe(
+      canSymlink ? "outside" : "planted",
+    );
   });
 
   it("confines to the folder's real path and names a default demo <match>-<map>-<utc> (D-047)", () => {
     const root = tempDir();
     const real = join(root, "real");
     mkdirSync(real);
-    symlinkSync(real, join(root, "demos"));
+    // A junction on Windows (no privilege needed, and a symlink to Node); POSIX ignores the type.
+    symlinkSync(real, join(root, "demos"), "junction");
     const at = new Date(Date.UTC(2026, 9, 11, 7, 5, 9));
     expect(utcStamp(at)).toBe("20261011-070509");
     const writer = new DemoWriter(join(root, "demos"), log, "main", () => at);

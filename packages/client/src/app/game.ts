@@ -226,7 +226,7 @@ export class Game {
    */
   linkGaps = 0;
   /**
-   * Starved flags (and starved corrections) taken by the frame that ended a link gap or within
+   * Starves (and starved corrections) counted by the frame that ended a link gap or within
    * the gap's length plus the round trip and twice the input buffer after it: the cmds that link
    * stall held. The e2e excuses only these, never the rest of its window.
    */

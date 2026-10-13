@@ -163,6 +163,13 @@ describe("root scripts", () => {
     );
   });
 
+  it("run dev:server under plain node with the tsx loader: no relaying parent (D-051)", () => {
+    // The tsx CLI would be a parent that relays Ctrl+C to the server, and on Windows can end it
+    // before its handler runs (no shutdown, no demo END, no --metrics-out).
+    expect(rootScripts["dev:server"]).toBe("pnpm --filter @game/server --fail-if-no-match start");
+    expect(packageScripts.get("@game/server")?.start).toBe("node --import tsx src/node/main.ts");
+  });
+
   it("never use a pnpm built-in command name (D-015)", () => {
     for (const name of Object.keys(rootScripts)) expect(PNPM_BUILTINS, name).not.toContain(name);
   });

@@ -77,6 +77,7 @@ import {
   registryCvarHash,
   SNAP_FIT_MAX_PLAYERS,
   SNAP_FLAG_STARVED,
+  SNAP_STARVE_SEQ_MASK,
   SnapshotHeader,
   sanitizeUserCmd,
   TEAM_1,
@@ -317,10 +318,11 @@ function freeClientId(sessions: readonly Session[], cap: number): number {
  *    tick is not simulated: its spawn state is its state at T.
  * 6. Capture the world frame of T into the 64-tick world history every client's baseline comes
  *    from: every active player's state, serial, team, teleport counter and event history.
- * 7. Per active client: the SNAPSHOT of T (protocol v2, D-033, D-038): a delta against the frame of
+ * 7. Per active client: the SNAPSHOT of T (protocol v3, D-033, D-038): a delta against the frame of
  *    the newest valid tick the client acked (`lastSnapshotTick` of its INPUTs), or a full one when
  *    none is usable; its own state as the local block, every other active player as an entity
- *    record, inputBufferHealth = newest cmd tick received − T (clamped to i8), flagged STARVED.
+ *    record, inputBufferHealth = newest cmd tick received − T (clamped to i8), flagged STARVED
+ *    when step 5 starved the client at T, with the client's starve counter (D-050).
  *    When its worst case is past 1100 B the byte-budget scheduler (D-046, `scheduler.ts`) leaves
  *    some players out, never one two ticks in a row; the tick counts as sent only once it encoded.
  *    Then its EVENTS (D-043): the roster changes since its last flush (its JOIN burst when it has
@@ -1218,6 +1220,8 @@ export class Match implements MatchAdmin {
       cmd.tick = t;
       s.stats.starved++;
       s.snapFlags |= SNAP_FLAG_STARVED;
+      // Every later snapshot carries the step, so losing this tick's hides no starve (D-050).
+      s.starveSeq = (s.starveSeq + 1) & SNAP_STARVE_SEQ_MASK;
       this.metrics.starved++;
     }
     sanitizeUserCmd(cmd);
@@ -1327,6 +1331,7 @@ export class Match implements MatchAdmin {
   private sendSnapshot(s: Session, t: number): void {
     const h = this.snapHeader;
     h.flags = s.snapFlags;
+    h.starveSeq = s.starveSeq;
     h.cvarHash = this.blockHash16;
     h.inputBufferHealth = Math.max(-128, Math.min(127, s.queue.newestTick - t));
     const w = this.writer;

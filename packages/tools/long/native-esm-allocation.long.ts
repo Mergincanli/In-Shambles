@@ -127,7 +127,7 @@ describe.concurrent("per-tick paths under native ES modules", () => {
     expect(r.clean, r.attempts.join("; ")).toBe(true);
   }, 30_000);
 
-  it("the INPUT, SNAPSHOT (full v2, 16 players), PING, PONG and EVENTS codecs allocate nothing, refusals included (D-026, D-033, D-043)", async ({
+  it("the INPUT, SNAPSHOT (full v3, 16 players), PING, PONG and EVENTS codecs allocate nothing, refusals included (D-026, D-033, D-043, D-050)", async ({
     expect,
   }) => {
     const r = await runChild("codec");

@@ -5,6 +5,7 @@ import {
   admissionLimits,
   applyAssignments,
   ConfigError,
+  decodeServerCfg,
   parseCommandLine,
   parseServerCfg,
   sendLimits,
@@ -75,6 +76,8 @@ describe("parseServerCfg", () => {
       'a.cfg:1: "Duel" is not a match name (a-z, 0-9 and _, 1–32 chars)',
     ],
     ["match_add duel ../x", 'a.cfg:1: "../x" is not a map id'],
+    // D-051: a Windows device name is no map, on every platform.
+    ["match_add duel com1", 'a.cfg:1: "com1" is a reserved file name (a device on Windows)'],
     ["match_add duel movement_lab 65", "a.cfg:1: maxClients 65: expected 1 to 64"],
     ["match_add duel movement_lab 0", "a.cfg:1: maxClients 0: expected 1 to 64"],
     ["match_add duel movement_lab 1.5", "a.cfg:1: maxClients 1.5: expected 1 to 64"],
@@ -82,6 +85,8 @@ describe("parseServerCfg", () => {
     ["@ status", 'a.cfg:1: "" is not a match name'],
     ["@m/x status", 'a.cfg:1: "m/x" is not a match name'],
     ["@duel status // x", "a.cfg:1: a comment must be on a line of its own"],
+    // D-051: the stdin console's alone.
+    ["quit", "a.cfg:1: quit is the console's (stdin) alone, not server.cfg's"],
   ])("refuses %j", (line, message) => {
     expect(() => parseServerCfg(line, "a.cfg")).toThrow(new ConfigError(message));
   });
@@ -102,6 +107,39 @@ describe("parseServerCfg", () => {
     expect(server.list().map((i) => [i.def.name, i.value])).toEqual(defaults);
     expect(match.list().map((i) => [i.def.name, i.value])).toEqual(matchDefaults);
     expect(text).toMatch(/^set sv_cheats 0$/m);
+  });
+});
+
+describe("decodeServerCfg (D-051)", () => {
+  const text = "set pm_gravity 500\r\nset sv_maxPerIp 5\r\n";
+  const bytes = (...parts: Buffer[]) => new Uint8Array(Buffer.concat(parts));
+
+  it("reads UTF-8 with or without a BOM, and UTF-16LE with its BOM (PowerShell 5.1's >)", () => {
+    expect(decodeServerCfg(bytes(Buffer.from(text)), "a.cfg")).toBe(text);
+    expect(
+      decodeServerCfg(bytes(Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(text)), "a.cfg"),
+    ).toBe(text);
+    const utf16 = bytes(Buffer.from([0xff, 0xfe]), Buffer.from(text, "utf16le"));
+    expect(decodeServerCfg(utf16, "a.cfg")).toBe(text);
+    expect(parseServerCfg(decodeServerCfg(utf16, "a.cfg"), "a.cfg")).toEqual([
+      { kind: "set", name: "pm_gravity", value: "500", source: "a.cfg:1" },
+      { kind: "set", name: "sv_maxPerIp", value: "5", source: "a.cfg:2" },
+    ]);
+    // Not UTF-8 decoded: its first line would read "unknown command \ufffd\ufffds".
+    expect(() => parseServerCfg(Buffer.from(utf16).toString("utf8"), "a.cfg")).toThrow(
+      /a\.cfg:1: unknown command/,
+    );
+    expect(decodeServerCfg(new Uint8Array(0), "a.cfg")).toBe("");
+  });
+
+  it("refuses UTF-16BE and UTF-16 without a BOM, saying how to save the file", () => {
+    const be = Buffer.from(text, "utf16le").swap16();
+    expect(() => decodeServerCfg(bytes(Buffer.from([0xfe, 0xff]), be), "a.cfg")).toThrow(
+      new ConfigError("a.cfg: UTF-16 BE text; save it as UTF-8"),
+    );
+    expect(() => decodeServerCfg(bytes(Buffer.from(text, "utf16le")), "a.cfg")).toThrow(
+      new ConfigError("a.cfg: NUL bytes (UTF-16 without a BOM?); save it as UTF-8"),
+    );
   });
 });
 
@@ -164,6 +202,14 @@ describe("parseCommandLine", () => {
     );
   });
 
+  it("hints at PowerShell's comma splitting on a stray argument (D-051)", () => {
+    // `--set sv_allowedOrigins=https://a,https://b` unquoted in PowerShell arrives as two.
+    expect(() => parseCommandLine(["--set", "sv_allowedOrigins=https://a", "https://b"])).toThrow(
+      /^Unexpected argument 'https:\/\/b'.* \(in PowerShell, quote a value that holds commas: --set "sv_allowedOrigins=https:\/\/a,https:\/\/b"\)$/,
+    );
+    expect(() => parseCommandLine(["--bogus"])).not.toThrow(/PowerShell/);
+  });
+
   it.each([
     [["--bogus"]],
     [["--port"]],
@@ -181,6 +227,7 @@ describe("parseCommandLine", () => {
     [["--match", "lab=movement_lab:"]],
     [["--match", "lab=movement_lab:65"]],
     [["--match", "lab=a/b"]],
+    [["--match", "lab=nul"]],
     [["--match", `${"x".repeat(33)}=movement_lab`]],
   ])("refuses %j", (args) => {
     expect(() => parseCommandLine(args)).toThrow(ConfigError);

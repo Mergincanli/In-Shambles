@@ -45,6 +45,7 @@ import {
   registryCvarHash,
   SNAP_FIT_MAX_PLAYERS,
   SNAP_FLAG_STARVED,
+  SNAP_STARVE_SEQ_MASK,
   sanitizeUserCmd,
   TEAM_1,
   TEAM_2,
@@ -85,7 +86,12 @@ import {
   Match,
   SPAWN_STAMINA,
 } from "../../src/match/match";
-import { SESSION_ACTIVE, SESSION_CONNECTING, SESSION_WELCOMED } from "../../src/match/session";
+import {
+  SESSION_ACTIVE,
+  SESSION_CONNECTING,
+  SESSION_WELCOMED,
+  type Session,
+} from "../../src/match/session";
 import { loadMap, TEST_BUILD, TestClient } from "./fixtures";
 
 const cmap = loadMap("movement_lab");
@@ -576,6 +582,48 @@ describe("match spawn and simulation", () => {
     client.input([cmdAt(t0 + 4, 50)]);
     run(match, client, 1);
     expect(s?.queue.late).toBe(1);
+  });
+
+  it("steps the starve counter on every starved tick, wrapping at 16, in every later snapshot (D-050)", () => {
+    const match = newMatch();
+    const client = joined(match);
+    const s = match.session(0) as Session;
+    const t0 = client.lastSnapshot().serverTick;
+    // The spawn snapshot: no starve yet.
+    expect([client.lastSnapshot().flags, client.lastSnapshot().starveSeq]).toEqual([0, 0]);
+    // 20 ticks with no cmd: each starves, so each snapshot is flagged and carries the next count,
+    // wrapping from 15 to 0.
+    const from = client.snapshots.length;
+    run(match, client, 20);
+    const seen = client.snapshots.slice(from).map((m) => [m.flags, m.starveSeq]);
+    expect(seen).toEqual(
+      Array.from({ length: 20 }, (_, i) => [SNAP_FLAG_STARVED, (i + 1) & SNAP_STARVE_SEQ_MASK]),
+    );
+    expect(s.starveSeq).toBe(20 & SNAP_STARVE_SEQ_MASK);
+    expect(s.stats.starved).toBe(20);
+    // Cmds in time: no flag, and the counter stays where the last starve left it.
+    const t = t0 + 20;
+    for (let i = 1; i <= 5; i++) {
+      client.input([cmdAt(t + i, 127)]);
+      run(match, client, 1);
+      expect([client.lastSnapshot().flags, client.lastSnapshot().starveSeq]).toEqual([0, 4]);
+    }
+    // One more starve steps it once; the snapshots after it keep the step while cmds arrive.
+    run(match, client, 1);
+    expect([client.lastSnapshot().flags, client.lastSnapshot().starveSeq]).toEqual([
+      SNAP_FLAG_STARVED,
+      5,
+    ]);
+    client.input([cmdAt(t + 7, 127)]);
+    run(match, client, 1);
+    expect([client.lastSnapshot().flags, client.lastSnapshot().starveSeq]).toEqual([0, 5]);
+    // A respawn is a teleport, not a new session: the counter goes on (the client seeded it once).
+    expect(match.respawn(s)).toBe(true);
+    client.input([cmdAt(t + 9, 127), cmdAt(t + 8, 127)]);
+    run(match, client, 2);
+    expect(client.lastSnapshot().starveSeq).toBe(5);
+    expect(s.stats.starved).toBe(21);
+    expect(client.bad).toBe(0);
   });
 
   it("reports input buffer health and the cvar hash in full snapshots", () => {

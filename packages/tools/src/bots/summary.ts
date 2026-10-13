@@ -92,7 +92,10 @@ export interface BotNumbers {
   readonly correctionsPerS: number;
   readonly meanCorrection: number;
   readonly maxCorrection: number;
-  /** Corrections on snapshots the server did not flag starved: the sim disagreed (NET-03). */
+  /**
+   * Corrections with no starve since the previous snapshot received (the starve counter did not
+   * move, D-050): the sim disagreed (NET-03).
+   */
   readonly mispredictions: number;
   readonly starved: number;
   readonly hardResyncs: number;
@@ -147,8 +150,9 @@ export interface SummaryAggregate {
 
 export interface SummaryHost {
   readonly cpus: number;
-  readonly loadAvg1Start: number;
-  readonly loadAvg1End: number;
+  /** The 1-minute load average at the start and end, or null where there is none (Windows). */
+  readonly loadAvg1Start: number | null;
+  readonly loadAvg1End: number | null;
   readonly node: string;
   readonly platform: string;
   /** The generators' niceness the run reached (host.ts), or null when it left its own. */
@@ -179,7 +183,7 @@ export interface HumanNumbers {
   readonly longShare: number;
   readonly correctionsPerS: number;
   readonly meanCorrection: number;
-  /** Corrections on snapshots the server did not flag starved, since the page started. */
+  /** Corrections with no starve since the previous snapshot (D-050), since the page started. */
   readonly mispredictions: number;
   readonly starved: number;
   readonly hardResyncs: number;
@@ -240,7 +244,11 @@ export interface SummaryCheck {
   readonly name: string;
   readonly target: string;
   readonly value: string;
-  readonly pass: boolean;
+  /**
+   * Null when nothing was measured that it could pass or fail on (the host gate where there is no
+   * load average: Windows, D-051); such a check is never judged.
+   */
+  readonly pass: boolean | null;
   /** False for a number reported but not judged (its window is not the bots'); PASS ignores it. */
   readonly judged: boolean;
 }
@@ -313,8 +321,8 @@ export function aggregate(bots: readonly BotNumbers[]): SummaryAggregate {
  * PASS/FAIL against docs/10 §4: the server's tick p50/p99, GC pause and memory (§4.1, judged on
  * its run window; the window's peak heapUsed + external, RSS reported) and each client's down/up
  * bandwidth and snapshot size (§4.2, the worst bot); plus every bot joined and stayed, the
- * prediction's health (D-036): no strike on either side and no misprediction, a correction on a
- * snapshot the server did not flag starved (the e2e rule, docs/10 §1), and smooth remotes
+ * prediction's health (D-036): no strike on either side and no misprediction, a correction with
+ * no starve since the previous snapshot (D-050; the e2e rule, docs/10 §1), and smooth remotes
  * (D-037): no NET-05 violation in what the bots drew of each other. The §4.1 numbers of a run
  * window that began before the bots are reported, not judged. `serverMissing` says why there are
  * no server numbers, when there are none.
@@ -327,15 +335,18 @@ export function evaluateChecks(
   extra: { readonly gate?: HostGate | null; readonly human?: HumanNumbers | null } = {},
 ): SummaryCheck[] {
   const checks: SummaryCheck[] = [];
-  const add = (name: string, target: string, value: string, pass: boolean, judged = true) =>
+  const add = (name: string, target: string, value: string, pass: boolean | null, judged = true) =>
     checks.push({ name, target, value, pass, judged });
   const gate = extra.gate ?? null;
   if (gate !== null) {
+    // Where there is no load average to read (Windows, D-051) it is reported, neither a PASS nor
+    // a FAIL, and not judged.
     add(
       "host gate (1-minute load before the run)",
       `≤ ${HOST_GATE_LOAD_PER_CORE} per core`,
       gate.text,
-      gate.pass,
+      gate.measured ? gate.pass : null,
+      gate.measured,
     );
   }
   add(
@@ -395,7 +406,7 @@ export function evaluateChecks(
   add("snapshot size", "≤ 1100 B", `${agg.snapshotBytes.max} B`, agg.snapshotBytes.max <= 1100);
   add("bot strikes", "0", `${agg.strikes}`, agg.strikes === 0);
   add(
-    "mispredictions (corrections not on a starved snapshot)",
+    "mispredictions (corrections with no starve since the previous snapshot)",
     "0",
     `${agg.mispredictions}`,
     agg.mispredictions === 0,
@@ -450,7 +461,7 @@ function humanChecks(
 
 /** A run passes when every judged check does. */
 export function summaryPasses(checks: readonly SummaryCheck[]): boolean {
-  return checks.every((c) => !c.judged || c.pass);
+  return checks.every((c) => !c.judged || c.pass === true);
 }
 
 function row(cells: readonly (string | number)[]): string {
@@ -465,13 +476,17 @@ function header(cells: readonly string[]): string {
 export function summaryMarkdown(s: BotsSummary): string {
   const c = s.config;
   const out: string[] = [];
+  const { loadAvg1Start: load0, loadAvg1End: load1 } = s.host;
+  const load =
+    load0 === null || load1 === null
+      ? "no load average"
+      : `load ${load0.toFixed(2)} → ${load1.toFixed(2)} (1 min)`;
   out.push(`# Bots run ${s.startedAt}: ${s.pass ? "PASS" : "FAIL"}`);
   out.push("");
   out.push(
     `${c.count} bots${c.human ? " + 1 human" : ""} on \`${c.map}\` (match \`${c.match}\`, maxClients ` +
       `${c.maxClients}) at \`${c.profile}\` for ${c.minutes} min, seed ${c.seed}; server ${c.server}, ` +
-      `build \`${c.buildHash}\`. Host: ${s.host.cpus} CPUs, load ${s.host.loadAvg1Start.toFixed(2)} → ` +
-      `${s.host.loadAvg1End.toFixed(2)} (1 min), Node ${s.host.node} on ${s.host.platform}` +
+      `build \`${c.buildHash}\`. Host: ${s.host.cpus} CPUs, ${load}, Node ${s.host.node} on ${s.host.platform}` +
       `${s.host.nice === null ? "" : `, generators at nice ${s.host.nice}`}` +
       `${s.host.serverNice === null ? "" : `, server at nice ${s.host.serverNice}`}.`,
   );
@@ -481,7 +496,9 @@ export function summaryMarkdown(s: BotsSummary): string {
   out.push(header(["Check", "Target", "Measured", "Result"]));
   for (const k of s.checks) {
     const result = k.pass ? "PASS" : "FAIL";
-    out.push(row([k.name, k.target, k.value, k.judged ? result : `${result} (not judged)`]));
+    // A check with nothing measured (pass null) reads "not judged" alone, never a PASS.
+    const cell = k.pass === null ? "not judged" : k.judged ? result : `${result} (not judged)`;
+    out.push(row([k.name, k.target, k.value, cell]));
   }
   out.push("");
   out.push("## Server (run window)");

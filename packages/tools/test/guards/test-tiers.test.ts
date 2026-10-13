@@ -168,6 +168,28 @@ describe("test tiers", () => {
     expect(check).not.toMatch(/continue-on-error/);
   });
 
+  it("block CI on the fast tier and the build on Windows, in a job of its own (D-051)", () => {
+    const win = ciJob("windows");
+    const steps = (job: string, kind: "uses" | "run") =>
+      [...job.matchAll(new RegExp(`^ {6}- ${kind}: (.+)$`, "gm"))].map((m) => m[1]);
+    expect(win).toMatch(/^ {4}runs-on: windows-latest$/m);
+    expect(win).toMatch(/^ {4}timeout-minutes: 25$/m);
+    // The same setup as `check`, then the fast tier and the build: the long, browser and load
+    // tiers stay on Linux.
+    expect(steps(win, "uses")).toEqual(steps(ciJob("check"), "uses"));
+    expect(win).toMatch(/^ {10}node-version-file: \.nvmrc\n {10}cache: pnpm$/m);
+    expect(steps(win, "run")).toEqual([
+      "pnpm install --frozen-lockfile",
+      "pnpm typecheck",
+      "pnpm lint",
+      "pnpm test",
+      "pnpm build",
+    ]);
+    expect(win).not.toMatch(/continue-on-error/);
+    // The last job, so no other job's text runs into it (ciJob cuts at the next key).
+    expect(ci.trimEnd().endsWith(`  windows:\n${win}`.trimEnd())).toBe(true);
+  });
+
   it("report each tier's cost against its budget", () => {
     expect(costReporter(fastConfig)?.budget).toEqual({
       label: "pnpm test",

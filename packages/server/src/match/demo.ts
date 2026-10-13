@@ -210,6 +210,8 @@ export class DemoRecorder {
     h.serverTick = t;
     h.baseBack = base === null ? 0 : 1;
     h.flags = SNAP_FLAG_SPECTATOR;
+    // No receiver, so no starve counter (D-050): a spectator snapshot carries 0.
+    h.starveSeq = 0;
     h.cvarHash = cvarHash16;
     h.inputBufferHealth = 0;
     const w = this.snapWriter;

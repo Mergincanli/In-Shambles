@@ -1,12 +1,16 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { basename } from "node:path";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, onTestFinished } from "vitest";
 import { httpJson } from "./node/wsClient";
 
 // The server smoke test's process helpers (D-029), shared by its two tiers (D-032):
-// `smoke.test.ts` (start and stop on SIGTERM, a bad setting, the production bundle) and
-// `packages/server/long/server-smoke.long.ts` (SIGINT, and `pnpm dev:server` from the repo root).
+// `smoke.test.ts` (start and stop on SIGTERM, a bad setting, the production bundle stopped by the
+// stdin `quit` on every platform, D-051) and
+// `packages/server/long/server-smoke.long.ts` (SIGINT, `pnpm dev:server` from the repo root, and
+// the bundle stopped while its stdout fails, D-051).
 
 export const serverDir = fileURLToPath(new URL("..", import.meta.url));
 export const repoRoot = fileURLToPath(new URL("../../..", import.meta.url));
@@ -127,12 +131,18 @@ export function listening(run: Run): { port: number; buildHash: string } {
 
 /**
  * The server from source starts, logs JSON lines, answers /status and runs a console line from
- * stdin, then stops cleanly on `signal`: exit 0 and one shutdown line naming it.
+ * stdin, then stops cleanly on `signal`: exit 0, one shutdown line naming it and the metrics file
+ * written on the way out (the stop's whole shutdown, as on the stdin `quit`; D-051).
  */
 export async function expectStartsAndStops(signal: NodeJS.Signals): Promise<void> {
+  const dir = mkdtempSync(join(tmpdir(), "server-smoke-"));
+  onTestFinished(() =>
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }),
+  );
+  const metricsFile = join(dir, "metrics.json");
   const run = start(
     process.execPath,
-    ["--import", "tsx", "src/node/main.ts", "--port", "0"],
+    ["--import", "tsx", "src/node/main.ts", "--port", "0", "--metrics-out", metricsFile],
     serverDir,
   );
   await waitFor(run, READY, 10_000, true);
@@ -156,5 +166,6 @@ export async function expectStartsAndStops(signal: NodeJS.Signals): Promise<void
     expect(events(run.output(), "shutdown")).toEqual([
       expect.objectContaining({ lvl: "info", signal }),
     ]);
+    expect(JSON.parse(readFileSync(metricsFile, "utf8"))).toMatchObject({ buildHash });
   }
 }

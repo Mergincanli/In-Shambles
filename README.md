@@ -19,12 +19,42 @@ pnpm install
 pnpm typecheck && pnpm lint && pnpm test
 ```
 
+## Windows
+
+Windows 11 works for development and play, in Windows PowerShell 5.1 (the one Windows ships) or PowerShell 7. CI runs the fast tests and the build on Windows too (the long and load tiers run on Linux). Setup in PowerShell:
+
+```powershell
+corepack enable   # once, in an Administrator PowerShell (or, without admin: npm install -g pnpm@10.28.0)
+cd $HOME\Documents\GitHub\In-Shambles
+pnpm install
+pnpm typecheck
+pnpm lint
+pnpm test
+```
+
+| If | Then |
+|---|---|
+| PowerShell says running scripts is disabled | Run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once |
+| You cloned with GitHub Desktop | It is already in `Documents\GitHub\In-Shambles`: skip `git clone` and `cd In-Shambles` above |
+| `git` is not a command in PowerShell | GitHub Desktop's own git is not on PATH: install Git for Windows (git-scm.com). `pnpm test` and the build hash run `git` (without it one test fails and the build reads `dev`) |
+| `&&` is an error | Windows PowerShell 5.1 has no `&&`: run the checks one by one, as above, or use PowerShell 7 |
+| You need an environment variable | `$env:SV_RCON_PASSWORD="secret"; pnpm dev:server` |
+| A value holds commas | Quote it: PowerShell splits `a,b` into two arguments. `pnpm dev:server --set "sv_allowedOrigins=https://a.example,https://b.example"`, or put it in `server.cfg` |
+| You write a cfg file from PowerShell | `>` in Windows PowerShell 5.1 writes UTF-16. The server reads it, but `"set sv_port 28800" \| Set-Content -Encoding utf8 my.cfg` or a text editor is cleaner |
+| You open a demo under `pnpm dev` | `?demo=/@fs/C:/Users/<you>/Documents/GitHub/In-Shambles/demos/<file>.demo` |
+| `pnpm lint` shows `␍` in a file's diff | Your editor saved it with Windows line endings (CRLF): run `pnpm format`, or set the editor to LF (VS Code: `"files.eol": "\n"`) |
+
+- **Firewall:** the first command that starts a server (`pnpm test`, `pnpm dev:server` or `pnpm bots`) makes Windows Firewall ask about Node.js once. Allow it to play over your network; `localhost` works either way.
+- **Stopping the server:** press Ctrl+C in its own window or type `quit` in it. Either stops it cleanly (demo files end properly, `--metrics-out` is written). Closing the window stops it too and should be as clean, but that is not yet checked on Windows. Ctrl+C may ask `Terminate batch job (Y/N)?`: answer `Y`.
+- **Bots:** Windows has no load average, so the bots' host gate reads "not measured" and is not judged.
+- **Hosting:** Node's timers on Windows step about every 16 ms, so a server hosted on Windows shows remote players about a tick later than one on Linux. Fine for playing together; public servers will run Linux.
+
 ## Commands
 
 | Command | What it does |
 |---|---|
 | `pnpm dev` | The game on http://localhost:5173: the client with the server in a Web Worker (offline loopback) |
-| `pnpm dev:server` | Dedicated server from source on port 28700 (stop with Ctrl+C); JSON log lines on stdout |
+| `pnpm dev:server` | Dedicated server from source on port 28700 (stop with Ctrl+C, or type `quit`); JSON log lines on stdout |
 | `pnpm build` | Production client build and server bundle (`packages/server/dist/main.js`) |
 | `pnpm test` | The fast tests (about 40 s); the last line gives the run's wall and CPU time against its budget |
 | `pnpm test:long` | The long tier: long deterministic runs and full sweeps, the native-ESM allocation guards, the real-process smokes (server, bots, bench CLI) and the client production build; run it too when you change those entry points (CI runs both) |
@@ -42,7 +72,7 @@ pnpm typecheck && pnpm lint && pnpm test
 | `pnpm bots --count 16 --profile wan-100-loss1 --minutes 2` | Headless bots over real WebSockets on a server it starts (or `--server ws://host:port`, `/m/<name>` for a named match), then a JSON + markdown summary in `reports/bots/` (git-ignored) with PASS/FAIL against the `docs/10` §4 budgets, the prediction's health and the host's load before the run (`--strict` exits 1 on a FAIL and refuses builds older than their sources); `--human` adds a headless Chromium player on the production client build (`pnpm build` first). The bots and the browser run at nice 10 |
 | `pnpm demo-info <file> [--json]` | What a server demo (`demos/*.demo`) holds: header, duration, record counts, keyframes, snapshot sizes, players seen and cvar changes; `--json` prints one JSON object, and an invalid file exits 1 with the reason |
 
-`pnpm dev:server` reads `packages/server/server.cfg` and takes flags such as `--port 0` (any free port), `--map movement_lab` and `--set <cvar>=<value>` (`docs/06` §8). It answers `GET /status` and `GET /metrics` with JSON on its port, logs a `metrics` line every 10 s (`sv_metricsInterval`), writes its metrics to a file at shutdown with `--metrics-out <file>` (relative paths in flags are relative to the directory you typed the command in) (`--metrics-discard <s>` leaves the first seconds out), and runs console commands typed on stdin (`set pm_gravity 400`, `metrics reset`). One process can run several matches: `--match <name>=<map>[:<maxClients>]` (repeatable) or `match_add` lines in `server.cfg` create them, and on stdin `matches` lists them, `match_add <name> <map> [maxClients]` and `match_remove <name>` add and remove one, and `@<name> <command>` sends a command to one match (`docs/06` §8). It runs under pnpm, which doesn't forward signals to the server. To stop it from a script or process manager, signal its process group (Ctrl+C does this), or run the bundle directly with `node packages/server/dist/main.js`.
+`pnpm dev:server` reads `packages/server/server.cfg` and takes flags such as `--port 0` (any free port), `--map movement_lab` and `--set <cvar>=<value>` (`docs/06` §8). It answers `GET /status` and `GET /metrics` with JSON on its port, logs a `metrics` line every 10 s (`sv_metricsInterval`), writes its metrics to a file at shutdown with `--metrics-out <file>` (relative paths in flags are relative to the directory you typed the command in) (`--metrics-discard <s>` leaves the first seconds out), and runs console commands typed on stdin (`set pm_gravity 400`, `metrics reset`, `quit` to stop it). One process can run several matches: `--match <name>=<map>[:<maxClients>]` (repeatable) or `match_add` lines in `server.cfg` create them, and on stdin `matches` lists them, `match_add <name> <map> [maxClients]` and `match_remove <name>` add and remove one, and `@<name> <command>` sends a command to one match (`docs/06` §8). It runs under pnpm, which doesn't forward signals to the server. To stop it from a script or process manager, write `quit` to its stdin (on every platform), signal its process group (Ctrl+C does this), or run the bundle directly with `node packages/server/dist/main.js`.
 
 `pnpm test:browser` uses the Playwright browsers already on the machine. `pnpm exec playwright install chromium firefox webkit` downloads them (CI does this), and `CHROMIUM_PATH` points the Chromium run at another build.
 
