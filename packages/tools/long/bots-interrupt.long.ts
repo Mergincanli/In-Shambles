@@ -66,7 +66,8 @@ describe.runIf(POSIX)("pnpm bots under a terminal's Ctrl+C", () => {
     const wrote = /bots: wrote (\S+\.json) and (\S+\.md)/.exec(stdout);
     if (wrote === null) throw new Error(`no summary written:\n${detail}`);
     const summary = JSON.parse(readFileSync(wrote[1] as string, "utf8")) as BotsSummary;
-    // The window ended early, and the child (spared the SIGINT) wrote its metrics at our SIGTERM.
+    // The window ended early, and the child (spared the SIGINT) wrote its metrics when the `quit`
+    // the runner wrote to its stdin stopped it (D-051).
     expect(
       summary.bots.every((b) => b.seconds < 10),
       detail,

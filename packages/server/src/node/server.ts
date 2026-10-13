@@ -27,6 +27,7 @@ import {
   type CfgMatchLine,
   type CfgSet,
   ConfigError,
+  decodeServerCfg,
   type MatchSpec,
   matchSpec,
   parseCommandLine,
@@ -93,6 +94,11 @@ export interface StartOptions {
   readonly demosDir?: string;
   /** The demo files' writes (`fs.write`; a test passes a slow disk). */
   readonly demoWrite?: DemoWriteFn;
+  /**
+   * The stdin console's `quit` (D-051): the process's own graceful stop (main.ts: as on SIGINT,
+   * then exit 0). Without it `quit` replies that the program running this server stops it.
+   */
+  readonly onQuit?: () => void;
 }
 
 /** One match of the process (D-047) with its own rcon gate and demo files. */
@@ -188,8 +194,9 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   registerServerReplicatedCvars(template);
   const cfgPath = cli.cfg === null ? resolve(cwd, "server.cfg") : resolve(argsCwd, cli.cfg);
   let cfg: CfgEntry[] = [];
-  if (existsSync(cfgPath)) cfg = parseServerCfg(readFileSync(cfgPath, "utf8"), cfgPath);
-  else if (cli.cfg !== null) throw new ConfigError(`--cfg ${cli.cfg}: no such file`);
+  if (existsSync(cfgPath)) {
+    cfg = parseServerCfg(decodeServerCfg(readFileSync(cfgPath), cfgPath), cfgPath);
+  } else if (cli.cfg !== null) throw new ConfigError(`--cfg ${cli.cfg}: no such file`);
   // SERVER sets are the process's wherever they stand; replicated ones before the first
   // match_add set the template; the rest wait for the matches (below).
   const firstAdd = cfg.findIndex((e) => e.kind === "match_add");
@@ -493,6 +500,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
         return typeof spec === "string" ? { ok: false, text: spec } : addMatch(spec);
       },
       matchRemove: removeMatch,
+      quit: options.onQuit ?? null,
     },
   };
   const stopConsole =

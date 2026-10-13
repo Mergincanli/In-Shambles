@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { type HostGate, hostGate } from "../../src/bots/host";
+import { type HostGate, hostGate, hostLoad } from "../../src/bots/host";
 import {
   aggregate,
   type BotNumbers,
@@ -9,6 +9,7 @@ import {
   type HumanNumbers,
   humanNumbers,
   reportStamp,
+  type SummaryCheck,
   type SummaryConfig,
   type SummaryServer,
   summaryMarkdown,
@@ -317,6 +318,46 @@ describe("bots summary", () => {
       judged: true,
     });
     expect(summary([bot(0), bot(1)], server, { gate: gateOk }).pass).toBe(true);
+  });
+
+  it("reports the gate as not measured where there is no load average (Windows, D-051)", () => {
+    expect(hostLoad("win32").load1).toBeNull();
+    expect(hostLoad("linux").load1).toEqual(expect.any(Number));
+    const unmeasured = hostGate(null, 4);
+    expect(unmeasured).toEqual({
+      load1: null,
+      cpus: 4,
+      perCore: null,
+      pass: true,
+      measured: false,
+      text: "not measured (no load average on Windows)",
+    });
+    expect(gateOk.measured).toBe(true);
+    // Reported, not judged: no PASS on a number nobody read, and no FAIL either (pass null).
+    const s = summary([bot(0), bot(1)], server, { gate: unmeasured });
+    expect(s.checks[0]).toEqual({
+      name: "host gate (1-minute load before the run)",
+      target: "≤ 0.5 per core",
+      value: "not measured (no load average on Windows)",
+      pass: null,
+      judged: false,
+    });
+    expect(s.pass).toBe(true);
+    // A FAIL elsewhere still fails the run.
+    const struck = summary([bot(0), bot(1, { strikes: 1 })], server, { gate: unmeasured });
+    expect(struck.pass).toBe(false);
+    // Only a check that passed counts as one: a judged check with nothing measured would fail.
+    expect(summaryPasses([{ ...(s.checks[0] as SummaryCheck), judged: true }])).toBe(false);
+    const md = summaryMarkdown({
+      ...s,
+      host: { ...s.host, loadAvg1Start: null, loadAvg1End: null },
+    });
+    expect(md).toContain(
+      "| host gate (1-minute load before the run) | ≤ 0.5 per core | " +
+        "not measured (no load average on Windows) | not judged |",
+    );
+    expect(md).not.toMatch(/host gate[^\n]*PASS/);
+    expect(md).toContain("Host: 4 CPUs, no load average, Node 22.22.0 on linux-x64,");
   });
 
   it("reads the human's numbers from the page's two readings", () => {

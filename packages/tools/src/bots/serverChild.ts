@@ -16,8 +16,15 @@ export const SERVER_DEFAULT_MAX_CLIENTS = 32;
 const MAX_CLIENTS = 64;
 /** How long the child may take to log `listening` (it loads a map and primes nothing yet). */
 const LISTEN_TIMEOUT_MS = 30_000;
-/** How long the child may take to exit after SIGTERM before it is killed. */
+/**
+ * How long the child may take to exit after `quit` before a POSIX child is sent SIGTERM as well
+ * (a server that does not read its stdin; design value, D-051).
+ */
+export const QUIT_GRACE_MS = 2_000;
+/** How long the child may take to exit after `quit` before it is killed. */
 const EXIT_TIMEOUT_MS = 5_000;
+/** Where a signal reaches the child's handler (on Windows `kill` ends it at once). */
+const POSIX = process.platform !== "win32";
 
 export const SERVER_BUNDLE = SERVER_BUILD.output;
 const SERVER_DIR = fromRoot("packages", "server");
@@ -59,7 +66,11 @@ export interface ServerChild {
   readonly lines: Record<string, unknown>[];
   /** Whether it exited (or failed to run) without `stop`, e.g. a crash mid-run. */
   readonly died: () => boolean;
-  /** SIGTERM, then the exit code (SIGKILL after EXIT_TIMEOUT_MS). Idempotent. */
+  /**
+   * The stdin `quit` (D-051: the graceful stop on every platform, so the child writes its metrics
+   * file on Windows too), SIGTERM after QUIT_GRACE_MS on POSIX, SIGKILL after EXIT_TIMEOUT_MS;
+   * resolves to the exit code. Idempotent.
+   */
   stop(): Promise<number | null>;
 }
 
@@ -75,8 +86,9 @@ export function bundleIsFresh(): boolean {
 /**
  * Starts the server child and resolves once it logs `listening` (its port and build hash). The
  * child gets its own process group (`detached`), so a terminal's Ctrl+C reaches only the bots,
- * which end their window, write the summary and stop the child themselves; a runner that exits
- * any other way still SIGTERMs it on the way out.
+ * which end their window, write the summary and stop the child themselves (`stop`: `quit` on its
+ * stdin); a runner that exits any other way still SIGTERMs it on the way out (an exit handler
+ * can't wait for a pipe write; on Windows that ends the child at once).
  */
 export function startServerChild(args: readonly string[]): Promise<ServerChild> {
   const kind = bundleIsFresh() ? "dist" : "tsx";
@@ -89,6 +101,8 @@ export function startServerChild(args: readonly string[]): Promise<ServerChild> 
     stdio: ["pipe", "pipe", "pipe"],
     detached: true,
   });
+  // A write to a child that just exited fails with EPIPE: `exited` reports the exit instead.
+  child.stdin?.on("error", () => {});
   const lines: Record<string, unknown>[] = [];
   let stderr = "";
   let partial = "";
@@ -112,9 +126,19 @@ export function startServerChild(args: readonly string[]): Promise<ServerChild> 
   let stopping: Promise<number | null> | null = null;
   const stop = (): Promise<number | null> => {
     if (stopping !== null) return stopping;
-    if (!done) child.kill("SIGTERM");
-    const timer = setTimeout(() => child.kill("SIGKILL"), EXIT_TIMEOUT_MS);
-    stopping = exited.finally(() => clearTimeout(timer));
+    const timers: NodeJS.Timeout[] = [];
+    if (!done) {
+      // The same stop on every platform, so Linux runs cover Windows' path (D-051). With its
+      // stdin gone, a POSIX child gets SIGTERM at once.
+      const stdin = child.stdin;
+      const sent = stdin?.writable === true;
+      if (sent) stdin.write("quit\n");
+      if (POSIX) timers.push(setTimeout(() => child.kill("SIGTERM"), sent ? QUIT_GRACE_MS : 0));
+      timers.push(setTimeout(() => child.kill("SIGKILL"), EXIT_TIMEOUT_MS));
+    }
+    stopping = exited.finally(() => {
+      for (const t of timers) clearTimeout(t);
+    });
     return stopping;
   };
   const died = () => done && stopping === null;

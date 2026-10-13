@@ -63,6 +63,7 @@ describe("admin console line", () => {
     runConsoleLine("kick 0", host, log);
     // Without a process (a match's own console), the process commands are refused.
     runConsoleLine("matches", host, log);
+    runConsoleLine("quit", host, log);
     expect(cvars.get("pm_gravity")).toBe(400);
     expect(lines.map((l) => [l.lvl, l.ev, l.text])).toEqual([
       ["info", "console", "pm_gravity = 400"],
@@ -70,6 +71,7 @@ describe("admin console line", () => {
       ["info", "console", "movement_lab, tick 0, 1 of 32 players\n#0 connecting strikes 0 build -"],
       ["info", "console", "client 0 kicked: kicked by an admin"],
       ["error", "console", "matches: this console has no process commands"],
+      ["error", "console", "quit: this console has no process commands"],
     ]);
   });
 });

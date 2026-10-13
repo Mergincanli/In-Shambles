@@ -43,6 +43,7 @@ export {
   FileDemoSink,
   utcStamp,
 } from "./demoWriter";
+export { isReservedFileName } from "./fileNames";
 export { createNodeHost, type PassClock, type ServerMatch, TimedPass } from "./host";
 export { createJsonLog, type JsonLog } from "./log";
 export { MATCH_NAME, MatchSet } from "./matchSet";

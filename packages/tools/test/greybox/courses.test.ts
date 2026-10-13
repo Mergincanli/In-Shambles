@@ -245,7 +245,8 @@ describe("greybox courses: compiled files", () => {
         );
       }
     } finally {
-      rmSync(out, { recursive: true, force: true });
+      // Retried: on Windows a virus scanner may still hold the files the CLI just wrote.
+      rmSync(out, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
   }, 60_000);
 

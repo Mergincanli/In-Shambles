@@ -10,7 +10,6 @@ import {
   events,
   expectStartsAndStops,
   listening,
-  POSIX,
   READY,
   serverDir,
   start,
@@ -19,9 +18,11 @@ import {
 } from "./smokeRun";
 
 // The server smoke test: the server from source started, queried and stopped on
-// SIGTERM, refusing a bad setting, and the production bundle run with plain node. Tiers (D-032):
-// the SIGINT stop and `pnpm dev:server` from the repo root are the long tier's
-// (`packages/server/long/server-smoke.long.ts`); the process helpers are shared (`smokeRun.ts`).
+// SIGTERM, refusing a bad setting, and the production bundle run with plain node and stopped by
+// `quit` on its stdin, on every platform (D-051: Windows can't deliver SIGTERM to a handler).
+// Tiers (D-032): the SIGINT stop, `pnpm dev:server` from the repo root and the bundle stopped while
+// its stdout fails are the long tier's (`packages/server/long/server-smoke.long.ts`); the process
+// helpers are shared (`smokeRun.ts`).
 
 describe("server smoke test", () => {
   it("starts, logs JSON lines, answers /status, and stops cleanly on SIGTERM", async () => {
@@ -88,20 +89,25 @@ describe("server smoke test", () => {
       `build someone-else does not match the server's ${buildHash}`,
     ]);
 
-    run.kill("SIGTERM");
-    const exit = await within(run.exited, 5_000, "no exit after SIGTERM");
-    if (POSIX) {
-      expect(exit).toEqual({ code: 0, signal: null });
-      expect(events(run.output(), "shutdown")).toHaveLength(1);
-      await until(() => {
-        client.poll();
-        return client.closed !== null;
-      }, "the client's close");
-      expect(client.kicks.map((k) => k.reason)).toEqual(["server shutting down"]);
-      // The run windows, written on the way out (D-029).
-      const metrics = JSON.parse(readFileSync(metricsFile, "utf8"));
-      expect(metrics).toMatchObject({ buildHash, matches: { main: { map: "arena_greybox" } } });
-      expect(metrics.process.passes).toBeGreaterThan(0);
-    }
+    // The stdin `quit` (D-051), the stop a parent has on every platform: the same shutdown as
+    // SIGINT and SIGTERM, which only POSIX delivers to a handler.
+    run.child.stdin?.write("quit\n");
+    const exit = await within(run.exited, 5_000, "no exit after quit");
+    expect(exit).toEqual({ code: 0, signal: null });
+    expect(events(run.output(), "console")).toEqual([
+      expect.objectContaining({ lvl: "info", text: "quit: shutting down" }),
+    ]);
+    expect(events(run.output(), "shutdown")).toEqual([
+      expect.objectContaining({ lvl: "info", signal: "quit" }),
+    ]);
+    await until(() => {
+      client.poll();
+      return client.closed !== null;
+    }, "the client's close");
+    expect(client.kicks.map((k) => k.reason)).toEqual(["server shutting down"]);
+    // The run windows, written on the way out (D-029).
+    const metrics = JSON.parse(readFileSync(metricsFile, "utf8"));
+    expect(metrics).toMatchObject({ buildHash, matches: { main: { map: "arena_greybox" } } });
+    expect(metrics.process.passes).toBeGreaterThan(0);
   }, 30_000);
 });

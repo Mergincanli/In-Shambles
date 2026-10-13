@@ -254,6 +254,9 @@ describe("admin commands on a match (D-042)", () => {
     ["stoprecord now", "usage: stoprecord"],
     ["record", "record: there is no match here"],
     ["rcon pw status", "rcon: this console already runs as admin"],
+    // D-051: the process's stop is the dedicated server's stdin console's alone (rcon carries
+    // the command here as an admin's).
+    ["quit", "quit: only the dedicated server's own console (stdin) stops it"],
   ])("%j → %j", (text, reply) => {
     expect(runServerCommand(text, registry(), true).text).toBe(reply);
   });

@@ -8,7 +8,7 @@
     "./node": "./src/node/index.ts"
   },
   "scripts": {
-    "start": "tsx src/node/main.ts",
+    "start": "node --import tsx src/node/main.ts",
     "build": "node build.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.match.json"
   },

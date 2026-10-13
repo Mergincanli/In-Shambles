@@ -77,3 +77,22 @@ jobs:
           name: load-reports
           path: reports/
           if-no-files-found: warn
+
+  # D-051: the fast tier and the build on Windows, where the game is developed and played as well.
+  # The long, browser and load tiers stay on Linux (their real-process and real-time legs are
+  # POSIX-shaped or timing-bound); this job blocks like `check`.
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm lint
+      - run: pnpm test
+      - run: pnpm build

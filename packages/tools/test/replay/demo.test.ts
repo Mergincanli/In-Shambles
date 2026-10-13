@@ -68,7 +68,8 @@ beforeAll(() => {
 });
 
 afterAll(() => {
-  if (dir !== "") rmSync(dir, { recursive: true, force: true });
+  // Retried: on Windows a virus scanner may still hold a file just written (EBUSY, EPERM).
+  if (dir !== "") rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 function run(...argv: string[]) {

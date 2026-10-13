@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { getPriority, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { MATCH_NAME, startServer } from "@game/server/node";
+import { isReservedFileName, MATCH_NAME, matchSpec, startServer } from "@game/server/node";
 import { describe, expect, it } from "vitest";
 import {
   type Build,
@@ -13,17 +13,26 @@ import {
   SERVER_BUILD,
 } from "../../src/bots/builds";
 import { BOTS_USAGE, botsMain, exitCode, parseBotArgs } from "../../src/bots/command";
-import { descendants, lowerPriority, type PrioritySys, threadNiceness } from "../../src/bots/host";
+import {
+  descendants,
+  hostGate,
+  lowerPriority,
+  type PrioritySys,
+  threadNiceness,
+} from "../../src/bots/host";
 import { humanQuery } from "../../src/bots/human";
 import {
   BotsRefused,
   checkCount,
   hashRefusal,
+  hostGateLine,
+  mapNameRefusal,
   matchOf,
   runBots,
   type ServerStatus,
   serverSection,
   statusUrl,
+  summaryHost,
 } from "../../src/bots/runner";
 import { serverChildArgs } from "../../src/bots/serverChild";
 import type { BotsSummary } from "../../src/bots/summary";
@@ -38,6 +47,9 @@ import { fromRoot } from "../../src/paths";
 
 describe("pnpm bots flags", () => {
   it("defaults to 16 bots at wan-100-loss1 for 2 min on arena_greybox, into reports/bots", () => {
+    // A real absolute path on every platform (on Windows "/typed/here" would take the drive of
+    // the test's working directory).
+    const typed = join(tmpdir(), "typed-here");
     expect(parseBotArgs([])).toEqual({
       count: 16,
       profile: "wan-100-loss1",
@@ -70,7 +82,7 @@ describe("pnpm bots flags", () => {
           "--out",
           "x",
         ],
-        "/typed/here",
+        typed,
       ),
     ).toMatchObject({
       human: true,
@@ -80,7 +92,7 @@ describe("pnpm bots flags", () => {
       server: "ws://localhost:28700",
       seed: 7,
       strict: true,
-      outDir: "/typed/here/x",
+      outDir: join(typed, "x"),
     });
   });
 
@@ -91,7 +103,10 @@ describe("pnpm bots flags", () => {
     process.env.INIT_CWD = typedIn;
     try {
       expect(parseBotArgs(["--out", "../bots"]).outDir).toBe(resolve(typedIn, "../bots"));
-      expect(parseBotArgs(["--out", "/abs/dir"]).outDir).toBe("/abs/dir");
+      // An absolute --out is kept as given. On tmpdir's drive, as INIT_CWD is: on a Windows
+      // runner the temp folder (C:) and the working directory (D:) differ.
+      const abs = join(tmpdir(), "abs-dir");
+      expect(parseBotArgs(["--out", abs]).outDir).toBe(abs);
       expect(parseBotArgs([]).outDir).toBe(fromRoot("reports", "bots"));
     } finally {
       if (saved === undefined) delete process.env.INIT_CWD;
@@ -121,11 +136,16 @@ describe("pnpm bots flags", () => {
     // The human takes the 64th slot (D-045).
     expect(await run(["--human", "--count", "64"])).toBe(2);
     expect(await run(["--map", "../../etc/passwd"])).toBe(2);
+    expect(await run(["--map", "con"])).toBe(2);
     expect(await run(["--server", "ws//x"])).toBe(2);
     // A refused run keeps its caller's priority: it lowers its own only once it will run (D-045).
+    // Every thread's niceness where /proc has them (Linux), and the process's priority, which is
+    // all there is to read on Windows and macOS (on Linux, the calling thread's).
     const niceBefore = threadNiceness();
+    const priorityBefore = getPriority();
     expect(await run(["--server", "ws://127.0.0.1:1", "--count", "2"])).toBe(2);
     expect(threadNiceness()).toEqual(niceBefore);
+    expect(getPriority()).toBe(priorityBefore);
     expect(await run(["--nope"])).toBe(2);
     expect(errors).toEqual([
       "bots: --count 0: expected 1–64",
@@ -134,12 +154,36 @@ describe("pnpm bots flags", () => {
       "bots: --minutes 0: expected a positive number",
       "bots: --count 64: expected 1–63 with --human",
       "bots: --map ../../etc/passwd: expected a map id",
+      "bots: --map con: a reserved file name (a device on Windows)",
       "bots: --server ws//x: not a URL (expected ws://host:port)",
       expect.stringMatching(/^bots: http:\/\/127\.0\.0\.1:1\/status: no server answering \(/),
       expect.stringContaining(BOTS_USAGE),
     ]);
     // Clear messages, never a stack.
     for (const e of errors) expect(e).not.toMatch(/\n\s+at /);
+    // Port 1's refusal takes 1–2 s on Windows, which retries a refused loopback connect.
+  }, 10_000);
+
+  it("load only the maps the server would: map ids that are no Windows device name (D-051)", () => {
+    // `--map` and the name a WELCOME sends (a hostile --server's included), name for name with
+    // the server's own rule: every device name, and the near misses that are plain files.
+    const digits = [..."0123456789"];
+    const devices = ["con", "prn", "aux", "nul", ...digits.flatMap((d) => [`com${d}`, `lpt${d}`])];
+    expect(devices).toHaveLength(24);
+    for (const n of devices) {
+      expect(isReservedFileName(n), n).toBe(true);
+      expect(mapNameRefusal(n), n).toBe("a reserved file name (a device on Windows)");
+      expect(matchSpec("a", n, null, "x"), n).toBe(
+        `x: "${n}" is a reserved file name (a device on Windows)`,
+      );
+    }
+    const misses = ["arena_greybox", "movement_lab", "com10", "lpt10", "con_1", "aux2", "comx"];
+    for (const n of [...misses, "com", "lpt", "nul_", "../x", "Arena", "CON", "a/b", ""]) {
+      expect(mapNameRefusal(n) === null, n).toBe(typeof matchSpec("a", n, null, "x") !== "string");
+    }
+    for (const n of [...misses, "x".repeat(63)]) expect(mapNameRefusal(n), n).toBeNull();
+    expect(mapNameRefusal("x".repeat(64))).toBe("expected a map id");
+    expect(mapNameRefusal("a/b")).toBe("expected a map id");
   });
 
   it("stops a --strict run on a busy host before it starts: exit 1 with the numbers", async () => {
@@ -155,6 +199,54 @@ describe("pnpm bots flags", () => {
     expect(errors).toEqual([
       "bots: FAIL: host gate: load 3.20 on 4 CPUs = 0.80 per core > 0.5 before the run",
     ]);
+  });
+
+  it("lets a --strict run go ahead on a host without a load average (Windows, D-051)", async () => {
+    const lines: string[] = [];
+    const errors: string[] = [];
+    const code = await botsMain(
+      ["--strict", "--count", "2", "--server", "ws://127.0.0.1:1"],
+      (t) => lines.push(t),
+      (t) => errors.push(t),
+      { hostLoad: () => ({ load1: null, cpus: 4 }), nice: 0 },
+    );
+    // Past the gate, refused by the server that does not answer (exit 2), not by the gate, and
+    // before the run's first line (the gate's own line is hostGateLine's, below).
+    expect(code).toBe(2);
+    expect(errors).toEqual([
+      expect.stringMatching(/^bots: http:\/\/127\.0\.0\.1:1\/status: no server answering \(/),
+    ]);
+    expect(lines).toEqual([]);
+    // Port 1's refusal takes 1–2 s on Windows, which retries a refused loopback connect.
+  }, 10_000);
+
+  it("logs the host gate's FAIL, or a gate with no load average, and the host's load (D-051)", () => {
+    expect(hostGateLine(null)).toBeNull();
+    expect(hostGateLine(hostGate(0.4, 4))).toBeNull();
+    expect(hostGateLine(hostGate(3.2, 4))).toBe(
+      "bots: FAIL host gate: load 3.20 on 4 CPUs = 0.80 per core > 0.5 before the run",
+    );
+    expect(hostGateLine(hostGate(null, 4))).toBe(
+      "bots: host gate not measured (no load average on Windows)",
+    );
+    // The summary's host: the load to 3 decimals, null where there is none (Windows).
+    const host = { node: process.versions.node, platform: `${process.platform}-${process.arch}` };
+    expect(summaryHost({ load1: 0.12345, cpus: 4 }, { load1: 2, cpus: 4 }, 10, null)).toEqual({
+      cpus: 4,
+      loadAvg1Start: 0.123,
+      loadAvg1End: 2,
+      ...host,
+      nice: 10,
+      serverNice: null,
+    });
+    expect(summaryHost({ load1: null, cpus: 8 }, { load1: null, cpus: 8 }, null, 0)).toEqual({
+      cpus: 8,
+      loadAvg1Start: null,
+      loadAvg1End: null,
+      ...host,
+      nice: null,
+      serverNice: 0,
+    });
   });
 
   it("exits 1 on a FAIL only under --strict", () => {

@@ -50,6 +50,7 @@ import {
   humanNumbers,
   r3,
   type SummaryConfig,
+  type SummaryHost,
   type SummaryServer,
   summaryPasses,
   writeSummary,
@@ -93,6 +94,49 @@ const PROGRESS_MS = 10_000;
  * name comes off the wire, so a hostile `--server` must not reach a path outside the folder.
  */
 const MAP_NAME = /^[a-z0-9_]{1,63}$/;
+/**
+ * The Windows device names (the server's own rule, `node/fileNames.ts`, D-051): a WELCOME naming
+ * `con` would make a bot read the console, not a file.
+ */
+const DEVICE_NAME = /^(con|prn|aux|nul|com[0-9]|lpt[0-9])$/i;
+
+/** Why a bot will not load map `name` (a map id that is no device name), or null when it will. */
+export function mapNameRefusal(name: string): string | null {
+  if (!MAP_NAME.test(name)) return "expected a map id";
+  if (DEVICE_NAME.test(name)) return "a reserved file name (a device on Windows)";
+  return null;
+}
+
+/**
+ * The line a run logs for its host gate (D-045), or null: a FAIL with the numbers, or a gate with
+ * no load average to read (Windows, D-051); a gate that passed, or none, logs nothing.
+ */
+export function hostGateLine(gate: HostGate | null): string | null {
+  if (gate === null) return null;
+  if (!gate.measured) return `bots: host gate ${gate.text}`;
+  return gate.pass ? null : `bots: FAIL host gate: ${gate.text}`;
+}
+
+/**
+ * The summary's host section: the 1-minute load at the run's start and end (null where the host
+ * has none: Windows, D-051), the generators' niceness and the server child's.
+ */
+export function summaryHost(
+  start: HostLoad,
+  end: HostLoad,
+  nice: number | null,
+  serverNice: number | null,
+): SummaryHost {
+  return {
+    cpus: start.cpus,
+    loadAvg1Start: start.load1 === null ? null : r3(start.load1),
+    loadAvg1End: end.load1 === null ? null : r3(end.load1),
+    node: process.versions.node,
+    platform: `${process.platform}-${process.arch}`,
+    nice,
+    serverNice,
+  };
+}
 
 export interface BotRunOptions {
   readonly count: number;
@@ -267,7 +311,8 @@ export function validateOptions(o: BotRunOptions): NetProfile {
   if (!(o.minutes > 0) || !Number.isFinite(o.minutes)) {
     throw new BotsRefused(`--minutes ${o.minutes}: expected a positive number`);
   }
-  if (!MAP_NAME.test(o.map)) throw new BotsRefused(`--map ${o.map}: expected a map id`);
+  const badMap = mapNameRefusal(o.map);
+  if (badMap !== null) throw new BotsRefused(`--map ${o.map}: ${badMap}`);
   return profile;
 }
 
@@ -337,7 +382,9 @@ class Bot {
       webSocket: true,
       onMapRequest: (name) => {
         // Thrown here, ClientSim ends the session with the reason.
-        if (!MAP_NAME.test(name)) throw new Error(`refused map name ${JSON.stringify(name)}`);
+        if (mapNameRefusal(name) !== null) {
+          throw new Error(`refused map name ${JSON.stringify(name)}`);
+        }
         const course = loadCourse(name);
         this.client.provideMap(course.cmap, course.world);
       },
@@ -712,7 +759,8 @@ export async function runBots(o: BotRunOptions): Promise<BotRunResult> {
         `${buildHash}${nice === null ? "" : `, generators at nice ${nice}`}` +
         `${serverNice === null ? "" : `, server at nice ${serverNice}`}`,
     );
-    if (gate !== null && !gate.pass) log(`bots: FAIL host gate: ${gate.text}`);
+    const gateLine = hostGateLine(gate);
+    if (gateLine !== null) log(gateLine);
     const warning = buildWarning({ strict, human: o.human });
     if (warning !== null) log(`bots: ${warning}`);
     if (o.human) {
@@ -859,15 +907,7 @@ export async function runBots(o: BotRunOptions): Promise<BotRunResult> {
     const summary: BotsSummary = {
       startedAt,
       config,
-      host: {
-        cpus: hostStart.cpus,
-        loadAvg1Start: r3(loadStart),
-        loadAvg1End: r3(readHost().load1),
-        node: process.versions.node,
-        platform: `${process.platform}-${process.arch}`,
-        nice,
-        serverNice,
-      },
+      host: summaryHost(hostStart, readHost(), nice, serverNice),
       server,
       aggregate: agg,
       human: humanNums,

@@ -3,6 +3,7 @@ import { basename, dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEMO_NAME } from "@game/shared";
 import type { DemoHost, DemoOpened, DemoSink } from "../match/demo";
+import { isReservedFileName, RESERVED_FILE_REASON } from "./fileNames";
 import type { JsonLog } from "./log";
 
 /** The writer's buffer (design): one file write per 64 KiB of demo. */
@@ -179,7 +180,8 @@ export function defaultDemoName(match: string, mapName: string, stamp: string): 
 /**
  * The Node server's demo files (D-044, M3 design §2.12): `record [name]` of one match opens
  * `<demosDir>/<name>.demo`, `<match>-<map>-<utc>.demo` without a name (`defaultDemoName`). A
- * name must be a DEMO_NAME; the path is built with `path.join` and refused unless it resolves
+ * name must be a DEMO_NAME and no Windows device name (`nul`, `com1`, …, on every platform:
+ * fileNames.ts, D-051); the path is built with `path.join` and refused unless it resolves
  * inside the demos folder (its real path, so a symlinked folder still confines), and the file is
  * created exclusively (`wx`): an existing file, or a symlink in its place, is never written
  * through; the name then gets a `-2`, `-3`, … suffix. The folder comes from the server's options,
@@ -205,6 +207,7 @@ export class DemoWriter implements DemoHost {
   open(name: string | null, mapName: string): DemoOpened | string {
     const base = name ?? defaultDemoName(this.match, mapName, utcStamp(this.clock()));
     if (!DEMO_NAME.test(base)) return `"${base}" is not a demo name`;
+    if (isReservedFileName(base)) return `"${base}" ${RESERVED_FILE_REASON}`;
     let real: string;
     try {
       mkdirSync(this.dir, { recursive: true });

@@ -168,6 +168,10 @@ export function runServerCommand(
   if (verb === "") return reply(PRINT_ERROR, "empty command");
   if (verb === "cvars") return reply(PRINT_INFO, "", true);
   if (verb === "rcon") return reply(PRINT_ERROR, "rcon: this console already runs as admin");
+  // The process's stop (D-051) is the dedicated server's stdin console's alone, never rcon's.
+  if (verb === "quit") {
+    return reply(PRINT_ERROR, "quit: only the dedicated server's own console (stdin) stops it");
+  }
   if (
     verb === "status" ||
     verb === "kick" ||
