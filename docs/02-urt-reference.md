@@ -372,6 +372,8 @@ UrT 4.3.4 is still freely downloadable. Run it locally (offline server) purely t
 
 ## 15. Known unknowns (closed source; resolve via §13 or by feel)
 
+The 2026-10-13 web research (`docs/design/M4-movement-research.md`) pins many of the movement items below from published measurements and recorded gameplay telemetry, and lists what still needs a capture (its §5). Its proposed changes go through the M4 plan; until then the items stay as listed.
+
 **Movement**
 - Run/sprint/walk/crouch speeds (sprint ≈ 365–368 inferred).
 - Air acceleration tweaks vs. Q3.
