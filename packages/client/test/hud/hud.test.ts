@@ -4,6 +4,7 @@ import * as ng from "../../src/hud/netgraph";
 import { NetgraphReadout, netgraphLines } from "../../src/hud/netgraph";
 import { renderStatsText } from "../../src/hud/renderStats";
 import { moveState, speedometerText } from "../../src/hud/speedometer";
+import { Vitals, vitalsText } from "../../src/hud/vitals";
 import {
   type ClientSim,
   ID_DEFER_LAG,
@@ -51,6 +52,54 @@ describe("speedometer", () => {
     expect(moveState(ps)).toBe("water");
     ps.flags |= PMF_ON_LADDER;
     expect(moveState(ps)).toBe("ladder");
+  });
+});
+
+describe("vitals readout (M4 design §2.12)", () => {
+  it("shows health rounded up and stamina rounded down, in points", () => {
+    const ps = new PlayerState();
+    ps.health = 10000;
+    ps.stamina = 10000;
+    expect(vitalsText(ps)).toBe("HP 100  ST 100");
+    // A living player never reads 0 (plan default 15); a dead one does.
+    ps.health = 1;
+    ps.stamina = 99;
+    expect(vitalsText(ps)).toBe("HP 1  ST 0");
+    ps.health = 7550;
+    ps.stamina = 7599;
+    expect(vitalsText(ps)).toBe("HP 76  ST 75");
+    ps.health = 0;
+    expect(vitalsText(ps)).toBe("HP 0  ST 75");
+  });
+
+  it("writes its text only when a shown value changes", () => {
+    let writes = 0;
+    let text = "";
+    const el = {
+      get textContent() {
+        return text;
+      },
+      set textContent(v: string) {
+        writes++;
+        text = v;
+      },
+    } as unknown as HTMLElement;
+    const vitals = new Vitals(el);
+    const ps = new PlayerState();
+    ps.health = 10000;
+    ps.stamina = 10000;
+    vitals.update(ps);
+    vitals.update(ps);
+    // Hundredths that round to the same points change nothing either.
+    ps.stamina = 10050;
+    vitals.update(ps);
+    expect([writes, text]).toEqual([1, "HP 100  ST 100"]);
+    ps.health = 9950;
+    vitals.update(ps);
+    expect([writes, text]).toEqual([1, "HP 100  ST 100"]);
+    ps.health = 9900;
+    vitals.update(ps);
+    expect([writes, text]).toEqual([2, "HP 99  ST 100"]);
   });
 });
 

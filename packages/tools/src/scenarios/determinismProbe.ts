@@ -24,6 +24,7 @@ import {
   PmoveEvents,
   PmoveParams,
   pmove,
+  resetPlayerStateForSpawn,
   SNAP_ROUNDED,
   sanitizeUserCmd,
   TICK_DT,
@@ -100,20 +101,24 @@ function anchorTable(cmap: Cmap): Float64Array {
 
 function teleport(ps: PlayerState, anchors: Float64Array, n: number): void {
   const o = 4 * (n % MV19_ANCHORS.length);
+  // A spawn's state (M4 design §2.2: every v4 field reset, full health), then the anchor.
+  resetPlayerStateForSpawn(ps, 0);
   ps.origin[0] = anchors[o] as number;
   ps.origin[1] = anchors[o + 1] as number;
   ps.origin[2] = anchors[o + 2] as number;
-  ps.velocity.fill(0);
   ps.viewYaw = anchors[o + 3] as number;
   ps.viewPitch = 0;
   ps.flags = PMF_GROUNDED;
   ps.groundEntity = ENTITY_WORLD;
-  ps.waterLevel = 0;
-  ps.stamina = 100 * 100;
 }
 
+/** The protocol v4 fields' doubles in the digest, after the v3 state (M4 design §2.2). */
+const DIGEST_V4_AT = 112;
+const DIGEST_V4_FIELDS = 11;
+/** The events' doubles start after the state, snap outcome, event count and v4 fields. */
+const DIGEST_EVENTS_AT = DIGEST_V4_AT + 8 * DIGEST_V4_FIELDS;
 /** State, snap outcome and events of one tick, as little-endian doubles for the digest. */
-const DIGEST_DOUBLES = 14 + 2 * PMOVE_EVENTS_CAPACITY;
+const DIGEST_DOUBLES = 14 + DIGEST_V4_FIELDS + 2 * PMOVE_EVENTS_CAPACITY;
 
 /**
  * Runs the probe. `perTick`, when given, receives the chained digest after each tick (MV-19's
@@ -198,6 +203,17 @@ export function runDeterminismProbe(
     view.setFloat64(88, ps.stamina, true);
     view.setFloat64(96, snap, true);
     view.setFloat64(104, events.count, true);
+    view.setFloat64(DIGEST_V4_AT, ps.wallJumps, true);
+    view.setFloat64(DIGEST_V4_AT + 8, ps.health, true);
+    view.setFloat64(DIGEST_V4_AT + 16, ps.armor, true);
+    view.setFloat64(DIGEST_V4_AT + 24, ps.submerged, true);
+    view.setFloat64(DIGEST_V4_AT + 32, ps.climbHeight, true);
+    view.setFloat64(DIGEST_V4_AT + 40, ps.climbYaw, true);
+    view.setFloat64(DIGEST_V4_AT + 48, ps.regenDelay, true);
+    view.setFloat64(DIGEST_V4_AT + 56, ps.kickCooldown, true);
+    view.setFloat64(DIGEST_V4_AT + 64, ps.regrab, true);
+    view.setFloat64(DIGEST_V4_AT + 72, ps.waterJump, true);
+    view.setFloat64(DIGEST_V4_AT + 80, ps.bandage, true);
     for (let k = 0; k < PMOVE_EVENTS_CAPACITY; k++) {
       let type = 0;
       let value = 0;
@@ -209,8 +225,8 @@ export function runDeterminismProbe(
         else if (type === PMEV_STEP) tally.steps++;
         else if (type === PMEV_LAND) tally.lands++;
       }
-      view.setFloat64(112 + 16 * k, type, true);
-      view.setFloat64(120 + 16 * k, value, true);
+      view.setFloat64(DIGEST_EVENTS_AT + 16 * k, type, true);
+      view.setFloat64(DIGEST_EVENTS_AT + 8 + 16 * k, value, true);
     }
     digest = murmur3Bytes(bytes, digest);
     if (perTick !== null) perTick[t] = digest;

@@ -17,6 +17,7 @@ import {
   lastPmoveSnap,
   MOVE_AXIS_MAX,
   Mulberry32,
+  PLAYER_HEALTH_MAX,
   PlayerState,
   PMF_GROUNDED,
   PMOVE_CVARS,
@@ -517,6 +518,19 @@ function stateFields(ps: PlayerState): string[] {
     `${ps.groundEntity}`,
     `${ps.waterLevel}`,
     `${ps.stamina}`,
+    ...[
+      ps.wallJumps,
+      ps.health,
+      ps.armor,
+      ps.submerged,
+      ps.climbHeight,
+      ps.climbYaw,
+      ps.regenDelay,
+      ps.kickCooldown,
+      ps.regrab,
+      ps.waterJump,
+      ps.bandage,
+    ].map(String),
   ];
 }
 
@@ -542,6 +556,8 @@ function scriptRows(world: CollisionWorld, sets: PmoveParams[], script: Script):
   ps.flags = script.start.airborne === true ? 0 : PMF_GROUNDED;
   ps.groundEntity = script.start.airborne === true ? ENTITY_NONE : ENTITY_WORLD;
   ps.stamina = 100 * 100;
+  // A freshly spawned player's v4 fields (M4 design §2.2): full health, everything else 0.
+  ps.health = PLAYER_HEALTH_MAX;
   quantizePlayerState(ps);
   const rows: string[] = [];
   for (let t = 0; t < script.ticks; t++) {
@@ -598,7 +614,9 @@ export function renderPmoveVectors(): string {
     "// Frozen input → output bits for single pmove ticks on a small fixed world. Fields as in",
     "// trace.ts: f64 as 16 hex digits of the IEEE-754 bits, u32 as 8 hex digits, integers in",
     "// decimal. A state is origin, velocity (f64), viewYaw, viewPitch, flags, groundEntity,",
-    "// waterLevel, stamina (decimal); a cmd is tick, buttons, forward, right, up, yaw, pitch,",
+    "// waterLevel, stamina, then the protocol v4 fields wallJumps, health, armor, submerged,",
+    "// climbHeight, climbYaw, regenDelay, kickCooldown, regrab, waterJump, bandage (decimal); a",
+    "// cmd is tick, buttons, forward, right, up, yaw, pitch,",
     "// weaponSlot (decimal, already sanitized). Plain JavaScript (no imports, no type",
     "// annotations), so browsers load it as is (D-022).",
     "",

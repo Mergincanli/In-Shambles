@@ -140,12 +140,43 @@ function quantInputs(limit: number, quantum: number): number[] {
   return xs;
 }
 
+/** The v4 fields (M4 design §2.2), in declaration order after stamina. */
+const V4_FIELDS = [
+  "wallJumps",
+  "health",
+  "armor",
+  "submerged",
+  "climbHeight",
+  "climbYaw",
+  "regenDelay",
+  "kickCooldown",
+  "regrab",
+  "waterJump",
+  "bandage",
+] as const;
+type V4Field = (typeof V4_FIELDS)[number];
+
 /**
  * PlayerState inputs in field order (origin, velocity, viewYaw, viewPitch, flags, groundEntity,
- * waterLevel, stamina): edges first, then seeded random states, some out of range.
+ * waterLevel, stamina, then the v4 fields): edges first, then seeded random states, some out of
+ * range. Rows with CLIMBING (flags bit 3) clear also pin the canonical rule: the climb fields
+ * quantize to 0.
  */
 function playerStateInputs(): number[][] {
   const { NaN: nan, POSITIVE_INFINITY: inf } = Number;
+  // The v4 tails, one per edge row below.
+  const v4 = [
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [-0, -0.5, -0, -0, -0.5, -0, -0, -0, -0, -0, -0.5],
+    [3.9, 9999.99, 1, 959.5, -12.75, 17.9, 30.5, 12, 9, 20, 100.25],
+    [7, 16383, 3, 2047, 2047, 255, 127, 63, 15, 63, 255],
+    [8, 16384, 4, 2048, -2049, 256, 128, 64, 16, 64, 256],
+    [-1, -250, -1, -1, 2048, -1, -1, -1, -1, -1, -1],
+    [1e9, 1e9, 5.5, 1e9, -1e9, 1e9, 1e9, 1e9, 1e9, 1e9, 1e9],
+    [nan, nan, nan, nan, nan, nan, nan, nan, nan, nan, nan],
+    [inf, -inf, inf, -inf, inf, -inf, inf, -inf, inf, -inf, inf],
+    [-inf, inf, -inf, inf, -inf, inf, -inf, inf, -inf, inf, -inf],
+  ];
   const rows = [
     [0, 0, 0, 0, 0, 0, 0, 0, 0, -1, 0, 0],
     [-0, -1 / 64, 1 / 64, -0, -1 / 32, 1 / 32, -0, -0.5, -0, -0.5, -0, -0],
@@ -170,7 +201,7 @@ function playerStateInputs(): number[][] {
     [nan, nan, nan, nan, nan, nan, nan, nan, nan, nan, nan, nan],
     [inf, -inf, inf, -inf, inf, -inf, inf, -inf, inf, inf, inf, inf],
     [0, 0, 0, 0, 0, 0, 0, 0, 0, -inf, -inf, -inf],
-  ];
+  ].map((row, i) => [...row, ...(v4[i] as number[])]);
   const rng = new Mulberry32(0x9500);
   const r = (range: number) => (rng.nextFloat() * 2 - 1) * range;
   for (let i = 0; i < 16; i++) {
@@ -187,6 +218,7 @@ function playerStateInputs(): number[][] {
       r(40000),
       r(5),
       r(80000),
+      ...V4_FIELDS.map(() => r(20000)),
     ]);
   }
   return rows;
@@ -241,6 +273,7 @@ function playerStateRow(input: number[]): string {
     number,
     number,
   ];
+  for (let k = 0; k < V4_FIELDS.length; k++) ps[V4_FIELDS[k] as V4Field] = input[12 + k] as number;
   ps.origin.set([ox, oy, oz]);
   ps.velocity.set([vx, vy, vz]);
   ps.viewYaw = yaw;
@@ -258,6 +291,7 @@ function playerStateRow(input: number[]): string {
     ps.groundEntity,
     ps.waterLevel,
     ps.stamina,
+    ...V4_FIELDS.map((k) => ps[k]),
   ];
   return [...input.map(f64Hex), ...out].join(" ");
 }
@@ -411,7 +445,7 @@ export function renderDeterminismVectors(): string {
     section("HASH32_VECTORS", "seed, a, b, c, d, hash32(seed, a, b, c, d)", hashes),
     section(
       "PLAYER_STATE_QUANT_VECTORS",
-      "12 PlayerState fields in declaration order, then after quantizePlayerState with DEV_ASSERT off: origin and velocity (f64), viewYaw, viewPitch, flags, groundEntity, waterLevel, stamina (decimal)",
+      "23 PlayerState fields in declaration order (f64), then after quantizePlayerState with DEV_ASSERT off: origin and velocity (f64), viewYaw, viewPitch, flags, groundEntity, waterLevel, stamina, wallJumps, health, armor, submerged, climbHeight, climbYaw, regenDelay, kickCooldown, regrab, waterJump, bandage (decimal)",
       playerStates,
     ),
     section(

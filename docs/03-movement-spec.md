@@ -418,17 +418,23 @@ The 0.99 and 0.1 u/s thresholds are design constants (`SLIDE_SAME_PLANE`, `SLIDE
 | `origin` | vec3 | quantized 1/32 u |
 | `velocity` | vec3 | quantized 1/16 u/s |
 | `viewYaw`, `viewPitch` | u16 | 65536 steps per 360° |
-| `flags` | bitfield | grounded, crouched, sliding, climbing, onLadder, jumpHeld, crouchPressedInAir, legsBroken, legWound, inWater… |
+| `flags` | bitfield, 11 bits | grounded, crouched, sliding, climbing, onLadder, jumpHeld, crouchPressedInAir, legsBroken, legWound, inWater, grabLock |
 | `groundEntity` | i16 | −1 = none |
 | `waterLevel` | u8 | 0–3 |
-| `wallJumps` | u8 | |
 | `stamina` | u16 | fixed-point ×100 |
-| `health` | u8 | owned by combat; read by movement |
-| `armor` | bitfield | vest, helmet |
-| `breathMs`, `drownMs` | u16 | |
-| `climbTarget` | vec3 | while climbing |
-| `timers` | u16s | regen delay, kick cooldown, re-grab cooldown, slide time |
-| `movementEvents` | small ring | footstep, jump, land(impact), wallkick, grab, slideStart/End, fallDamage, goomba |
+| `wallJumps` | u3 | 0–7, wall jumps since the last walkable landing |
+| `health` | u14 | hundredths (100 HP = 10000; 0 is dead), owned by combat, read by movement (staminaMax, the dead gate, falls, drowning) |
+| `armor` | 2 bits | bit 0 vest, bit 1 helmet |
+| `submerged` | u11 | ticks with the eyes under water (breath, drowning), saturating at 2047; 0 when the eyes are out |
+| `climbHeight` | i12 | 1/32 u, the ledge top − origin z, while climbing; 0 otherwise |
+| `climbYaw` | u8 | the view yaw at the grab >> 8, while climbing; 0 otherwise |
+| `regenDelay` | u7 | ticks before stamina regenerates |
+| `kickCooldown` | u6 | ticks before the next boot |
+| `regrab` | u4 | ticks: the re-grab countdown, or while climbing the climb finish's ticks left |
+| `waterJump` | u6 | ticks left of a water-jump |
+| `bandage` | u8 | ticks the self-bandage has been held |
+
+Movement events (footstep, jump, land, wall kick, grab, boot, water-jump, slide start and end, fall damage, goomba) are **pmove output, not state** (D-023): they never feed the next tick, so they stay out of PlayerState. Remotes get the wire kinds through the entity record's `eventSeq` (`docs/05` §3.6, §10).
 
 **Quantize at the end of every tick:**
 - origin to the nearest clear 1/32 u grid point (D-017): the rounded point if the hull fits there, else the nearest clear corner of the grid cell, else last tick's origin
@@ -438,12 +444,14 @@ The 0.99 and 0.1 u/s thresholds are design constants (`SLIDE_SAME_PLANE`, `SLIDE
 This makes the client's predicted state **bit-identical** to the server's state for the same inputs (`docs/05` §4).
 
 **Pinned down in M1** (D-018, `packages/shared/src/sim/playerState.ts`):
-- M1 implements `origin` through `waterLevel`, plus `stamina`. `wallJumps` and the fields below `stamina` are added by the milestone that first simulates them.
+- M1 implements `origin` through `waterLevel`, plus `stamina`. `wallJumps` and the fields below `stamina` are added by the milestone that first simulates them. (Superseded by D-053: M4 lays out every field below `stamina` at once in its increment 2, inert until its mechanic.)
 - `stamina` is stored as an integer count of hundredths (0–65535), so 100 is one stamina point.
-- `flags` bits 0–9 are the ten flags above, in the order listed; new flags take the next bit.
+- `flags` bits 0–9 are the first ten flags above, in the order listed; new flags take the next bit (bit 10 `grabLock` since protocol v4, D-053).
 - Every scalar field holds an integer. Quantize clamps `origin` to ±16384 u and `velocity` to ±(2^19 − 1)/16 u/s (the i20 range) per axis, wraps the view angles to u16, clamps `groundEntity` to −1…32767 (32767 is the world) and `waterLevel` to 0–3, truncating toward zero.
 - A non-finite value is a bug (a dev assert). With asserts off it falls back to 0, except `groundEntity`, which falls back to −1 (none) because 0 is a real entity.
 - Rounding biases: stamina rounds to 0.01 every tick, so a per-second rate moves in steps of 0.6/s at 60 Hz (an 11/s drain runs at 10.8/s, 5/s regen at 4.8/s); M2 tunes the `st_*` cvars with this in mind. Origin rounding to 1/32 u each tick can add about 0.2% distance at 320 u/s, so feel tests measure velocity, not distance travelled. Velocity rounding to 1/16 u/s biases gravity: an airborne vz on the 1/16 grid loses 800·dt rounded to 1/16 every tick, 13.3125 u/s at 60 Hz (an effective 798.75 u/s², about −0.16%) and 6.6875 u/s at 120 Hz (802.5 u/s²). The standing-jump apex is 45.625 u at 60 Hz and 45.406 u at 120 Hz against 45.556 unrounded, so all of MV-04's 60-vs-120 Hz gap is this rounding, not the integration. M4 calibrates fall-damage heights and airtimes against the simulated arc, not the closed-form one.
+
+**Pinned down in M4 increment 2** (D-053, protocol v4, M4 design §2.2): the fields from `wallJumps` to `bandage` are in PlayerState, the codec, the delta masks and the frame, in the order and widths of the table, every one inert until the M4 increment that gives it its meaning. Every timer counts ticks (1/60 s is no whole number of ms); health is hundredths like stamina, so the stamina maximum, drowning and M6's bleeding and healing need no hidden accumulator. `flags` bit 10 is `grabLock` (owner only, never in an entity record). Quantize clamps each counter and timer to its width (truncating), masks `armor` and `climbYaw`, and zeroes `climbHeight` and `climbYaw` whenever `climbing` is clear. A spawn resets every field (`resetPlayerStateForSpawn`: full health, armor from the server's `sv_spawnVest`, everything else 0) except the origin and the view.
 
 ## 7. Measurements log (fill from reference captures, `docs/02` §13)
 

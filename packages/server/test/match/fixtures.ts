@@ -72,6 +72,10 @@ export class TestSnapshot {
   get starveSeq(): number {
     return this.header.starveSeq;
   }
+  /** The receiver's contact counter (D-053; stepped from M4 increment 4). */
+  get contactSeq(): number {
+    return this.header.contactSeq;
+  }
   get inputBufferHealth(): number {
     return this.header.inputBufferHealth;
   }

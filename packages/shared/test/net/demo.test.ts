@@ -135,13 +135,13 @@ describe("demo file (D-044)", () => {
   it("has the header layout of M3 design §2.12 (golden)", () => {
     const h = header(0x01020304);
     const bytes = encodeDemoHeader(h) as Uint8Array;
-    // "ISDM", demoVersion 1, protocol 3 (D-050), 60 Hz, startTick 0x01020304 (LE); mapName (u8 13 +
+    // "ISDM", demoVersion 1, protocol 4 (D-053), 60 Hz, startTick 0x01020304 (LE); mapName (u8 13 +
     // "arena_greybox"); the map hash lo then hi; buildHash (u8 7 + "abc1234"); the cvar block's
     // u16 length (24) and the encoded CVARS (type 8, effectiveTick 0, the block's hash, the block).
     expect(hex(bytes)).toBe(
       "4953444d" +
         "0100" +
-        "0300" +
+        "0400" +
         "3c" +
         "04030201" +
         "0d" +
@@ -153,7 +153,7 @@ describe("demo file (D-044)", () => {
         "1800" +
         "080000000033603996012473fb778c2e87e9730000000000",
     );
-    expect(PROTOCOL_VERSION).toBe(3);
+    expect(PROTOCOL_VERSION).toBe(4);
     expect(TICK_RATE).toBe(60);
     const back = new DemoHeader();
     expect(decodeDemoHeader(bytes, bytes.length, back)).toBeNull();
@@ -366,6 +366,10 @@ describe("demo file (D-044)", () => {
     const p9 = bytes.slice();
     p9[6] = 9;
     expect(refusal(validateDemo(p9))).toMatch(/recorded with protocol 9/);
+    // An M3 demo (protocol v3) no longer plays: v4 changed the snapshot layout (D-053).
+    const p3 = bytes.slice();
+    p3[6] = 3;
+    expect(refusal(validateDemo(p3))).toBe("recorded with protocol 3; this build speaks 4");
     expect(refusal(validateDemo(new Uint8Array([1, 2, 3])))).toMatch(/not a demo/);
   });
 

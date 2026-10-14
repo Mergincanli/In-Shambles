@@ -41,6 +41,24 @@ import { POINT_CONTENTS_VECTORS, SNAP_VECTORS, TRACE_VECTORS, TRACE_WORLD } from
 import { f64ToHex, hexToF64 } from "./f64";
 import { worldFromRows } from "./vectorWorld";
 
+/** The protocol v4 PlayerState fields (M4 design §2.2), in declaration order after stamina. */
+const V4_FIELDS = [
+  "wallJumps",
+  "health",
+  "armor",
+  "submerged",
+  "climbHeight",
+  "climbYaw",
+  "regenDelay",
+  "kickCooldown",
+  "regrab",
+  "waterJump",
+  "bandage",
+] as const;
+type V4Field = (typeof V4_FIELDS)[number];
+/** A PlayerState's fields in a vector row: origin and velocity (6), 6 v3 scalars, 11 v4. */
+const PS_FIELDS = 12 + V4_FIELDS.length;
+
 /**
  * How every committed vector table (test/vectors/*.ts) is replayed: one recompute per row with the
  * real shared code, rendered back in the row's own format, so a row passes when it comes back
@@ -223,10 +241,12 @@ const DETERMINISM_TABLES: readonly VectorTable[] = [
       ps.groundEntity = x(9);
       ps.waterLevel = x(10);
       ps.stamina = x(11);
+      for (let k = 0; k < V4_FIELDS.length; k++) ps[V4_FIELDS[k] as V4Field] = x(12 + k);
       quantizePlayerState(ps);
       const vectors = [...ps.origin, ...ps.velocity].map(f64ToHex);
       const ints = [ps.viewYaw, ps.viewPitch, ps.flags, ps.groundEntity, ps.waterLevel, ps.stamina];
-      return [...f.slice(0, 12), ...vectors, ...ints].join(" ");
+      const v4 = V4_FIELDS.map((k) => ps[k]);
+      return [...f.slice(0, PS_FIELDS), ...vectors, ...ints, ...v4].join(" ");
     },
   },
   {
@@ -328,16 +348,16 @@ export const pmoveVectorParams = PMOVE_PARAMS.map((row) => {
   return p;
 });
 
-/** PMOVE_VECTORS row layout: set, dt, state (12), cmd (8), next state (12), snap, events. */
+/** PMOVE_VECTORS row layout: set, dt, state (23), cmd (8), next state (23), snap, events. */
 export const PMOVE_ROW = Object.freeze({
   STATE_IN: 2,
-  CMD: 14,
-  STATE_OUT: 22,
-  SNAP: 34,
-  EVENTS: 35,
+  CMD: 2 + PS_FIELDS,
+  STATE_OUT: 10 + PS_FIELDS,
+  SNAP: 10 + 2 * PS_FIELDS,
+  EVENTS: 11 + 2 * PS_FIELDS,
 });
 
-/** Reads the 12 state fields of a PMOVE_VECTORS row from field `at` into `ps`. */
+/** Reads the 23 state fields of a PMOVE_VECTORS row from field `at` into `ps`. */
 export function readPmoveState(f: string[], at: number, ps: PlayerState): PlayerState {
   for (let k = 0; k < 3; k++) {
     ps.origin[k] = f64(f[at + k]);
@@ -349,14 +369,18 @@ export function readPmoveState(f: string[], at: number, ps: PlayerState): Player
   ps.groundEntity = int(f[at + 9]);
   ps.waterLevel = int(f[at + 10]);
   ps.stamina = int(f[at + 11]);
+  for (let k = 0; k < V4_FIELDS.length; k++) {
+    ps[V4_FIELDS[k] as V4Field] = int(f[at + 12 + k]);
+  }
   return ps;
 }
 
-/** A state as the 12 fields of a PMOVE_VECTORS row. */
+/** A state as the 23 fields of a PMOVE_VECTORS row. */
 export function pmoveStateFields(ps: PlayerState): string[] {
   return [
     ...[...ps.origin, ...ps.velocity].map(f64ToHex),
     ...[ps.viewYaw, ps.viewPitch, ps.flags, ps.groundEntity, ps.waterLevel, ps.stamina].map(String),
+    ...V4_FIELDS.map((k) => String(ps[k])),
   ];
 }
 

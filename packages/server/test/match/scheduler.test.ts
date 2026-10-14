@@ -103,14 +103,15 @@ function crafted(c: DriverClient, last: number, t: number, lastSent: number) {
 }
 
 describe("SnapshotScheduler (M3 design §2.3, D-046)", () => {
-  it("rests on a static bound: 34 records fit any delta (37 full), so 2 snapshots carry all 63", () => {
+  it("rests on a static bound: 33 records fit any delta (37 full), so 2 snapshots carry all 63", () => {
     const left = (MATCH_MAX_CLIENTS - 1) * ENTITY_REMOVED_BITS;
     const fixed = SNAP_DELTA_FIXED_BITS + SNAP_DEFERRED_COUNT_BITS;
-    expect(fixed).toBe(318);
+    expect(fixed).toBe(414);
     expect(SNAP_MIN_CAPACITY).toBe(
       Math.floor((SNAP_BUDGET_BITS - fixed - left) / (ENTITY_DELTA_MAX_BITS - 17)),
     );
-    expect(SNAP_MIN_CAPACITY).toBe(34);
+    // 34 in protocol v3; v4's larger local block and header leave 33 (M4 design §2.2, D-053).
+    expect(SNAP_MIN_CAPACITY).toBe(33);
     expect(SNAP_MIN_CAPACITY_FULL).toBe(
       Math.floor(
         (SNAP_BUDGET_BITS - SNAP_FULL_FIXED_BITS - SNAP_DEFERRED_COUNT_BITS - left) /
@@ -137,7 +138,7 @@ describe("SnapshotScheduler (M3 design §2.3, D-046)", () => {
       expect(c.lastSent[0]).toBe(t);
       if (t > 1) c.ackTick = t - 1;
     }
-    // The worst case against an exact one: 36 remotes at their worst, 8700 bits, within budget.
+    // The worst case against an exact one: 36 remotes at their worst, 8796 bits, within budget.
     const cur = history.frameFor(4);
     const base = history.frameFor(3);
     expect(worstCaseBits(cur, base)).toBe(SNAP_DELTA_FIXED_BITS + 36 * ENTITY_DELTA_MAX_BITS);
@@ -161,7 +162,7 @@ describe("SnapshotScheduler (M3 design §2.3, D-046)", () => {
     c.ackTick = 1;
     for (let s = 37; s < 43; s++) world.leave(s);
     const cur = crowd(history, world, 37, 2);
-    expect(worstCaseBits(cur, history.frameFor(1))).toBe(8700 + 6 * 17);
+    expect(worstCaseBits(cur, history.frameFor(1))).toBe(8796 + 6 * 17);
     expect(send(sched, w, history, c, 2)).toBe(true);
     expect(sched.sizePass).toBe(true);
     expect(w.bitLength).toBeLessThanOrEqual(SNAP_BUDGET_BITS);
@@ -170,7 +171,7 @@ describe("SnapshotScheduler (M3 design §2.3, D-046)", () => {
     expect(sched.deferred).toBeGreaterThan(0);
   });
 
-  it("fits 34 of 63 worst records and defers the other 29: 8704 bits (the accounting)", () => {
+  it("fits 34 of 63 worst records and defers the other 29 (the accounting)", () => {
     const history = new WorldHistory();
     const world = new SlotWorld(new Mulberry32(3));
     const sched = new SnapshotScheduler();
@@ -179,9 +180,9 @@ describe("SnapshotScheduler (M3 design §2.3, D-046)", () => {
     const w = new BitWriter(MAX_UNRELIABLE_BYTES);
     crowd(history, world, 64, 1);
     // A full first snapshot: at least SNAP_MIN_CAPACITY_FULL (37) new bodies fit; with 16-bit
-    // out costs and no removals, 292 + 6 + 63 × 16 + 38 × 197 ≤ 8800 < … + 39 × 197: 38 go.
+    // out costs and no removals, 378 + 6 + 63 × 16 + 37 × 197 ≤ 8800 < … + 38 × 197: 37 go.
     expect(send(sched, w, history, c, 1)).toBe(true);
-    expect([sched.deferred, 63 - sched.deferred]).toEqual([25, 38]);
+    expect([sched.deferred, 63 - sched.deferred]).toEqual([26, 37]);
     c.ackTick = 1;
     // Make every slot fresh at 1 in the baseline's eyes, so nobody is due: tick 2 has 63 worst
     // records against a baseline that holds all 63 (a mirror copy of tick 1 with every row fresh).
@@ -193,6 +194,8 @@ describe("SnapshotScheduler (M3 design §2.3, D-046)", () => {
     crowd(history, world, 64, 2);
     expect(send(sched, w, history, c, 2)).toBe(true);
     // The local block is at its worst too only by chance; the records are: 34 × 233 + 29 × 16.
+    // With no removals each left-out slot costs 16 bits, not the bound's 17: 408 + 6 + 63 × 16 +
+    // 34 × 217 is exactly 8800, so one more than SNAP_MIN_CAPACITY (33) fits.
     const local = localBlockBits(history.frameFor(2), mirror1, SELF);
     expect(w.bitLength).toBe(SNAP_HEADER_BITS + local + 7 + 6 + 34 * 233 + 29 * 16);
     expect([sched.deferred, sched.dropped]).toEqual([29, 0]);
@@ -230,7 +233,9 @@ describe("SnapshotScheduler (M3 design §2.3, D-046)", () => {
     const shares: number[] = [];
     for (let s = 0; s < FRAME_SLOTS; s++) if (s !== SELF) shares.push(freshCount[s] / ticks);
     // Everyone at the same rate, low and high ids alike (records shrink once a slot's copy is two
-    // ticks old, so more than 34 fit: about 2 ticks in 3).
+    // ticks old, so more than 33 fit: about 2 ticks in 3). The last tie-break counts ids from an
+    // offset that moves with the tick the tie group was last left out: under protocol v4's sizes a
+    // plain id order locked this crowd into a cycle that left the 3 highest ids at 1 tick in 2.
     expect(Math.min(...shares)).toBeGreaterThan(0.5);
     expect(Math.max(...shares) - Math.min(...shares)).toBeLessThan(0.02);
   });
@@ -296,11 +301,13 @@ describe("SnapshotScheduler (M3 design §2.3, D-046)", () => {
     expect(sched.schedule(cur, base, SELF, t, c)).toBe(false);
     expect(sched.overrun).toBe(true);
     expect(sched.bits).toBeLessThanOrEqual(SNAP_BUDGET_BITS);
-    // Equal priority: by id, the first ones go while they fit.
+    // Equal priority and last deferral: by id counted from 99 & 63 = 35, the first ones go while
+    // they fit (35…50, then 0…).
     const fresh: number[] = [];
     const ids: number[] = [];
-    for (let s = 0; s <= 50; s++) {
-      if (s === SELF) continue;
+    for (let k = 0; k < FRAME_SLOTS; k++) {
+      const s = (99 + k) & 63;
+      if (s === SELF || s > 50) continue;
       ids.push(s);
       if (sched.decision[s] === SCHED_FRESH) fresh.push(s);
     }
@@ -316,7 +323,8 @@ describe("SnapshotScheduler (M3 design §2.3, D-046)", () => {
     const sched = new SnapshotScheduler();
     const c = new DriverClient();
     const t = 100;
-    const { base, cur } = crafted(c, 50, t, 99);
+    // 51 remotes: the 34 worst records that fit leave 192 bits, less than slot 50's new body.
+    const { base, cur } = crafted(c, 51, t, 99);
     // Slot 50 is a player this client has never been sent (absent in the baseline).
     base.setAbsent(50);
     c.sentSerial[50] = -1;
@@ -330,7 +338,8 @@ describe("SnapshotScheduler (M3 design §2.3, D-046)", () => {
     const sched = new SnapshotScheduler();
     const c = new DriverClient();
     const t = 100;
-    const { base, cur } = crafted(c, 50, t, 99);
+    // As above: 51 remotes, so a left-out new body (196 bits over its removal) can't squeeze in.
+    const { base, cur } = crafted(c, 51, t, 99);
     // Slot 50 changed hands: the baseline (acked) still holds the old player (serial 0), but the
     // client was sent the new one (serial 1) fresh at 99. Without its rank it would be the last
     // in the order (highest id, never left out) and go out as a removal.

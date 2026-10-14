@@ -1,7 +1,11 @@
 import {
+  EV_DEATH_FALL,
+  EV_HIT_BOOT,
   EV_LEAVE_KICKED,
   EV_LEAVE_LEFT,
   EV_LEAVE_TIMED_OUT,
+  EVK_HIT_CONFIRM,
+  EVK_PLAYER_DEATH,
   EVK_PLAYER_JOIN,
   EVK_PLAYER_LEAVE,
   EVK_SERVER_STATS,
@@ -100,6 +104,24 @@ describe("Roster (D-043)", () => {
     expect(notices).toEqual([]);
     r.reset();
     expect([...r.server, r.count, r.burstDone]).toEqual([0, 0, 0, 0, 0, 0, false]);
+  });
+
+  it("takes PLAYER_DEATH and HIT_CONFIRM (protocol v4) without touching the roster or stats", () => {
+    const r = new Roster();
+    const notices: string[] = [];
+    r.apply(msg([EVK_PLAYER_JOIN, 4, 1], [EVK_SERVER_STATS, 40, 120]), 4, notices);
+    const before = [...r.server, r.count, ...r.team];
+    const m = new EventsMsg();
+    const death = m.add(EVK_PLAYER_DEATH);
+    const hit = m.add(EVK_HIT_CONFIRM);
+    if (death === null || hit === null) throw new Error("full");
+    death.victim = 4;
+    death.cause = EV_DEATH_FALL;
+    hit.victim = 7;
+    hit.cause = EV_HIT_BOOT;
+    r.apply(m, 4, notices);
+    expect([...r.server, r.count, ...r.team]).toEqual(before);
+    expect(notices).toEqual(["you joined team 1"]);
   });
 
   it("keeps at most NOTICES_MAX notices when nobody drains them, dropping the oldest", () => {

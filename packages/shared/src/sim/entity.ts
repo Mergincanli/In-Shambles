@@ -23,8 +23,9 @@ export const TEAM_2 = 2;
 
 /**
  * The movement flags a remote player's entity carries (M3 design §2.1): every `PMF_*` bit but
- * PMF_JUMP_HELD (bit 5) and PMF_CROUCH_PRESSED_IN_AIR (bit 6), which only the owner's prediction
- * reads. Written as a literal because playerState.ts imports this module (a test pins it to the
- * PMF_* constants).
+ * PMF_JUMP_HELD (bit 5), PMF_CROUCH_PRESSED_IN_AIR (bit 6) and PMF_GRAB_LOCK (bit 10, M4 design
+ * §2.2), which only the owner's prediction reads. The record's flags field stays 10 bits wide.
+ * Written as a literal because playerState.ts imports this module (a test pins it to the PMF_*
+ * constants).
  */
 export const ENTITY_FLAG_MASK = 0x39f;

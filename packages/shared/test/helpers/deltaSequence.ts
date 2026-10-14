@@ -1,4 +1,5 @@
 import { BitReader, BitWriter } from "../../src/net/bitstream";
+import { PLAYER_STATE_BITS } from "../../src/net/playerStateCodec";
 import { MAX_UNRELIABLE_BYTES, SNAPSHOT_HISTORY } from "../../src/net/protocol";
 import {
   decodeSnapshotBody,
@@ -20,8 +21,8 @@ import {
   WorldFrame,
 } from "../../src/net/worldFrame";
 import { Mulberry32 } from "../../src/rng/mulberry32";
-import { PMEV_JUMP, PMEV_LAND, PMEV_STEP } from "../../src/sim/events";
-import { intIn, mutateEntity, mutateLocal, randomEntity } from "./netMessages";
+import { PMEV_STEP, PMEV_WIRE_MAX } from "../../src/sim/events";
+import { intIn, mutateEntity, mutateLocal, randomEntity, randomEventValue } from "./netMessages";
 
 // NET-02 (a)'s driver (docs/05 §4.3, §14; M3 design §2.3 and §5, D-038): a long, seeded world
 // sequence goes through the snapshot encoder with the server's baseline rule and into a client
@@ -114,15 +115,8 @@ export class World {
         // An event burst: one to four events in the tick, the newest two kept.
         const n = intIn(rng, 1, 4);
         for (let i = 0; i < n; i++) {
-          const kind = intIn(rng, PMEV_STEP, PMEV_LAND);
-          pushEntityEvent(
-            f.eventSeq,
-            f.evKind,
-            f.evValue,
-            s,
-            kind,
-            kind === PMEV_JUMP ? 0 : intIn(rng, 0, 255),
-          );
+          const kind = intIn(rng, PMEV_STEP, PMEV_WIRE_MAX);
+          pushEntityEvent(f.eventSeq, f.evKind, f.evValue, s, kind, randomEventValue(rng, kind));
         }
       }
       // Otherwise idle this tick.
@@ -435,7 +429,7 @@ export function runDeltaSequence(
         (SNAP_FULL_FIXED_BITS + (cur.presentCount - 1) * ENTITY_NEW_BITS + 7) >> 3;
       run.worstLocalOver = Math.max(
         run.worstLocalOver,
-        localBlockBits(cur, base, DELTA_SELF) - 199,
+        localBlockBits(cur, base, DELTA_SELF) - PLAYER_STATE_BITS,
       );
       for (let s = t & 3; s < SLOTS; s += 4) {
         if (s !== DELTA_SELF)

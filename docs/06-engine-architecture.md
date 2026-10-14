@@ -56,14 +56,15 @@ packages/shared/src/
     entity.ts          ENTITY_NONE (−1), ENTITY_WORLD (32767), MATCH_MAX_CLIENTS (64), TEAM_*,
                        ENTITY_FLAG_MASK (D-034)
     hull.ts            player hulls (docs/03 §2)
-    playerState.ts     PlayerState struct + quantize(), PlayerStateRing (128 ticks)
+    playerState.ts     PlayerState struct (protocol v4's fields, D-053) + quantize() with the
+                       canonical rules, resetPlayerStateForSpawn, PlayerStateRing (128 ticks)
     usercmd.ts         UserCmd struct + sanitize(), BUTTON_* bits
     pmove/             cmdScale, friction, accelerate, walk, air, water, ladder, slideMove,
                        stepSlideMove, groundTrace, crouch, jump  (docs/03 §4); the pipeline
                        (pmove.ts, D-023), a trace log for debug draw (debug.ts) and the primer
                        (primer.ts: its course, PRIMER_SCRIPT, primePmoveOnce; D-040)
     urt/               sprint, stamina, wallJump, powerSlide, ledgeGrab, fall, goomba, kick (docs/03 §5)
-    events.ts          movement events ring
+    events.ts          movement events ring; PMEV_* kinds (0–7 on the wire, 8–11 local; D-053)
   combat/
     weapons.ts         weapon runtime state machine (idle, firing, burst, reload, bolt, zoom)
     damage.ts          table lookup, armor substitution, bleeding/limp flags
@@ -78,18 +79,21 @@ packages/shared/src/
   net/
     bitstream.ts       BitWriter/BitReader: LSB-first, explicit widths, sticky error flag (D-026)
     protocol.ts        PROTOCOL_VERSION, MSG_* type ids, MSG_CHANNEL (type → channel), packet,
-                       client-message and text size limits, EVENTS' EVK_* kinds and EV_LEAVE_*
-                       reasons (D-043)
+                       client-message and text size limits, EVENTS' EVK_* kinds, EV_LEAVE_*
+                       reasons (D-043) and EV_DEATH_*/EV_HIT_* causes (D-053)
     messages.ts        message structs + encodeX/decodeX (docs/05 §3.6) but SNAPSHOT; readTick/writeTick
     events.ts          EVENTS: EventsMsg (63 pooled records), encodeEvents/decodeEvents, the
-                       events' widths (D-043)
-    snapshot.ts        SNAPSHOT v3: SnapshotHeader (with the receiver's starve counter, D-050),
-                       encodeSnapshot, decodeSnapshotHeader/Body, full and delta forms against a
-                       baseline frame, exact size functions localBlockBits and entityRecordBits, the
-                       size constants and their static checks (D-033, D-038)
-    worldFrame.ts      WorldFrame (64 slots as typed arrays, stamps, masks), FrameRing (64 by tick),
-                       slot ↔ PlayerState, copySlot, entityEquals, frameDigest (D-034)
-    playerStateCodec.ts  the PlayerState bit layout and its decode-time range checks
+                       events' widths (D-043; PLAYER_DEATH and HIT_CONFIRM, D-053)
+    snapshot.ts        SNAPSHOT v4: SnapshotHeader (with the receiver's starve counter, D-050, and
+                       contact counter, D-053), encodeSnapshot, decodeSnapshotHeader/Body, full and
+                       delta forms against a baseline frame (an 18-bit delta local mask), exact
+                       size functions localBlockBits and entityRecordBits, the size constants and
+                       their static checks (D-033, D-038), the v4 cvar width checks (D-053)
+    worldFrame.ts      WorldFrame (64 slots as typed arrays, stamps, masks; v4's local-only fields
+                       in one strided Int16Array with LF_* lanes), FrameRing (64 by tick), slot ↔
+                       PlayerState, copySlot, entityEquals, frameDigest (D-034, D-053)
+    playerStateCodec.ts  the PlayerState bit layout (281 bits, v4) and its decode-time range and
+                       canonical checks
     cvarBlock.ts       replicated cvar block: canonical encoding, hash, all-or-nothing apply (D-027)
     demo.ts            the .demo file (D-044): DemoHeader and its encoding, record headers, DemoReader
                        (an allocation-free record walk), validateDemo (every record decoded as
@@ -108,7 +112,7 @@ packages/server/src/
                        yields to the host's I/O before catching up
     match.ts           Match: handshake, sv_maxClients, teams, spawns and respawns, per-tick order
                        (docs/05 §8.1), movement-event history, the world frame captured into the
-                       history and the v3 snapshots built from it (deltas against each client's
+                       history and the v4 snapshots built from it (deltas against each client's
                        acked tick, D-038; the byte-budget scheduler above 37 players, D-046), CVARS;
                        EVENTS after each snapshot: the roster burst, JOIN, LEAVE, SERVER_STATS from
                        the host's reportTickStats (D-043); the pmove primer at construction
@@ -253,8 +257,9 @@ packages/client/src/
   audio/               Web Audio graph, positional sources, footsteps, priorities
 
   hud/                 DOM overlay. M2: overlay.ts (panels, ≤ 15 Hz), speedometer.ts, netgraph.ts,
-                       renderStats.ts (r_stats). Later: crosshair, health/stamina, ammo, wound
-                       figure, killfeed, chat, minimap
+                       renderStats.ts (r_stats). M4: vitals.ts ("HP 100  ST 100", always on while
+                       playing; HP rounded up; a placeholder M8 styles). Later: crosshair, ammo,
+                       wound figure, killfeed, chat, minimap
   console/             console UI (console.ts), commands.ts (cvar and bind commands, DOM-free),
                        binds.ts (bind table, defaults, modifier keys refused), clientCvars.ts
                        (ARCHIVE client cvars, the CHEAT views, rcon_password; D-042)
@@ -435,7 +440,7 @@ DEV / OFFLINE                                  ONLINE
 - **Space conversion** (`render/space.ts`): `three.x = q.x × 0.0254`, `three.y = q.z × 0.0254`, `three.z = −q.y × 0.0254`; yaw/pitch mapped accordingly: `setViewAngles` sets Euler order YXZ with `rotation.y = yaw − 90°` and `rotation.x = −pitch` (sim yaw 0 faces +X, positive pitch looks down). The mapping is a proper rotation, so map vertices are converted once at load time (`convertVertices`) and keep their winding. Unit-test the conversions.
 - **World (M2):** one mesh per cmap render surface (one per material), `MeshLambertMaterial` with a procedural 256² grid `CanvasTexture` per material (16 u minor and 64 u major lines, repeat-wrapped; uv0 is 1 per 64 u, `docs/07` §3): floor light grey, wall mid grey, `grey/ladder` with rungs, water blue at 0.5 opacity, double-sided, no depth write, anything else magenta. Hemisphere plus directional light, no shadows; geometry, materials and textures are disposed on unload.
 - **HUD:** DOM overlay updated imperatively (refs). Crosshair and ammo update immediately; scoreboard and minimap at ≤ 15 Hz. No framework re-render per frame. Menus may use a UI framework later.
-  - M2 (`client/src/hud`): a crosshair; a click-to-play prompt while the pointer is free; a blue tint while the camera is inside water (`pointContents` at the camera); the speedometer (`cl_speedometer`: horizontal speed, vertical velocity and ground/air/water/ladder, the mode pmove dispatches on); the netgraph (`cl_netgraph`, bottom right; seven lines since D-043, `docs/05` §13): `link` (RTT, jitter, snapshot loss % and snapshots/s, the simulated profile); `snaps` (mean and largest snapshot size, full snapshots and baseline drops per second, the players in the newest snapshot, players the server's scheduler left out per snapshot); `remote` (the interpolation delay in ticks and ms, its defer lag, the share of the last second's remote-frames drawn extrapolated or held, D-037); `corr` (corrections/s with mean and largest size, the render offset left, teleports, hard/pending-parameter resyncs); `input` (input-buffer health, its mean and its low edge, the lowest over 1.5 s, which the clock steers to `cl_inputBuffer` by dilation and coarse steps, D-039, so a mean grown above it shows the spread of bursty frames or jitter; after a re-anchor the last low edge until the window refills; starved cmds/s, the mean dilation % over the last second and the clock's coarse steps); `bytes` (in and out per second, payload plus WebSocket framing on a dedicated server); `server` (from the server's `SERVER_STATS` EVENTS, once a second: its tick time p50/p99/max in ms and the players of this match; `-` until the first; offline the Worker's times are as coarse as the browser's timer, 100 µs steps in Chromium, `docs/05` §10). The console prints the join and leave notices of the match's EVENTS (`player 3 joined team 2`, `player 3 timed out`; not the roster burst a joiner gets, only its own `you joined team 1`); the renderer panel (`r_stats`). Rates are over the last second; the panels' text refreshes at ≤ 15 Hz. In demo playback (D-044) the HUD shows only the "following #id" line in the followed player's team colour: no crosshair (a spectator camera aims nothing), and the speedometer, netgraph and renderer panels stay off (there is no session or prediction to show; `cl_netgraph`, `cl_speedometer` and `r_stats` change only their cvars there). When the session closes (a kick, a refused WELCOME, a version or tick-rate mismatch, refused server cvars) the page's error box shows `disconnected: <reason>`, and the prompt and crosshair stay hidden.
+  - M2 (`client/src/hud`): a crosshair; a click-to-play prompt while the pointer is free; a blue tint while the camera is inside water (`pointContents` at the camera); the speedometer (`cl_speedometer`: horizontal speed, vertical velocity and ground/air/water/ladder, the mode pmove dispatches on); the netgraph (`cl_netgraph`, bottom right; seven lines since D-043, `docs/05` §13): `link` (RTT, jitter, snapshot loss % and snapshots/s, the simulated profile); `snaps` (mean and largest snapshot size, full snapshots and baseline drops per second, the players in the newest snapshot, players the server's scheduler left out per snapshot); `remote` (the interpolation delay in ticks and ms, its defer lag, the share of the last second's remote-frames drawn extrapolated or held, D-037); `corr` (corrections/s with mean and largest size, the render offset left, teleports, hard/pending-parameter resyncs); `input` (input-buffer health, its mean and its low edge, the lowest over 1.5 s, which the clock steers to `cl_inputBuffer` by dilation and coarse steps, D-039, so a mean grown above it shows the spread of bursty frames or jitter; after a re-anchor the last low edge until the window refills; starved cmds/s, the mean dilation % over the last second and the clock's coarse steps); `bytes` (in and out per second, payload plus WebSocket framing on a dedicated server); `server` (from the server's `SERVER_STATS` EVENTS, once a second: its tick time p50/p99/max in ms and the players of this match; `-` until the first; offline the Worker's times are as coarse as the browser's timer, 100 µs steps in Chromium, `docs/05` §10). The console prints the join and leave notices of the match's EVENTS (`player 3 joined team 2`, `player 3 timed out`; not the roster burst a joiner gets, only its own `you joined team 1`); the renderer panel (`r_stats`); since M4 (D-053, M4 design §2.12) the vitals readout, bottom left, always on while playing: `HP 100  ST 100`, the predicted player's health rounded up (a living player never reads 0) and stamina rounded down, in points (a placeholder M8 styles). Rates are over the last second; the panels' text refreshes at ≤ 15 Hz. In demo playback (D-044) the HUD shows only the "following #id" line in the followed player's team colour: no crosshair (a spectator camera aims nothing), and the speedometer, netgraph and renderer panels stay off (there is no session or prediction to show; `cl_netgraph`, `cl_speedometer` and `r_stats` change only their cvars there). When the session closes (a kick, a refused WELCOME, a version or tick-rate mismatch, refused server cvars) the page's error box shows `disconnected: <reason>`, and the prompt and crosshair stay hidden.
 - **Players (M3, `client/src/render/players.ts`, D-034):** every other player is a capsule of the hull's radius (15 u) and height (56 u standing; squashed along the up axis to 40 u crouched), standing on the hull's feet and turned to its view yaw, with a small dark nub at eye height in front showing where it faces; colour by team (placeholders, ESTIMATE: team 1 orange `#d9652b`, team 2 blue `#2b8fd9`, no team grey `#9a9a9a`; `render/teamColors.ts`). One `InstancedMesh` of 64 capsules with a colour per instance and one of nubs sharing its matrix buffer: 2 draw calls whatever the player count, none with nobody visible. The game fills a `RemoteView` (`client/src/net/remotes.ts`) each frame from the remote interpolation (D-037, `docs/05` §6) and the renderer reads only that; a crouch or stand-up blends the capsule's height over `cl_remoteCrouchBlendMs` (at once when the slot appears or teleports). Instance matrices are written by `space.ts`'s `uprightToThree` (`space.ts` stays the only module that turns sim angles into scene rotations).
 - **Debug draw** (M2, `client/src/render/debug/debugDraw.ts`): one `LineSegments` with buffers sized once. `r_debugHull` draws the hull box at the drawn origin; `r_debugTraces` the traces of the frame's first predictions from pmove's `PmoveTraceLog` (green when clear, red when they hit, with an 8 u tick along the hit normal; kept while frames predict no tick); `r_debugGround` the ground normal from a short sweep under the predicted state, drawn under the hull's interpolated origin (yellow when walkable, magenta when steep). The segments are built in sim space and converted through `space.ts`.
 - **Audio:**
@@ -480,6 +485,7 @@ DEV / OFFLINE                                  ONLINE
 | `sv_inputBurst` | 240 | ESTIMATE (D-041): unreliable bucket, packets (64–4096; refill 2 a tick): the 64-packet anchor fill plus a 2 s TCP stall's backlog; the floor is the anchor fill alone, and values near it can strike honest clients on jittery links after a stall |
 | `sv_reliableBurst` | 20 | ESTIMATE (D-041): reliable bucket, messages (8–1024; refill 0.25 a tick) |
 | `sv_autoRecord` | 0 | design (D-044): 1 records a demo of every match from its creation (at startup, once the port is bound: a refused start leaves no file) to its removal or shutdown (`demos/<match>-<map>-<utc>.demo`) |
+| `sv_spawnVest` | 0 | design (D-053, M4 design §2.4): 1 spawns every player wearing the vest (PlayerState `armor` bit 0, which halves the stamina maximum from M4 increment 6); the hook until M6 loadouts; read when the match is created (the Worker never sets it); prediction reads the state, not this setting |
 | `sv_maxPerIp` | 8 | ESTIMATE (D-041): connections (open or upgrading) one address may hold; HTTP 429 past it; loopback exempt |
 | `sv_allowedOrigins` | "" | design (D-041): comma-separated browser origins allowed to connect, HTTP 403 for any other; compared as browsers send them (lowercase, no trailing slash); empty = any |
 

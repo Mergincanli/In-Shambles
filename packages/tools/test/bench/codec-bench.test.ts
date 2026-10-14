@@ -91,17 +91,17 @@ describe("codec bench workload", () => {
     expect(origins.size).toBeGreaterThan(CODEC_CASES / 2);
   });
 
-  it("round-trips every case as a delta well under the 436 B full snapshot, and 55 B inputs", () => {
+  it("round-trips every case as a delta well under the 447 B full snapshot, and 55 B inputs", () => {
     const s = new CodecBenchState();
     runSnapshotCodec(workload, s, CODEC_CASES);
     runInputCodec(workload, s, CODEC_CASES);
     expect(s.failures).toBe(0);
-    // A full one is 86 + 199 + 7 + 15 × 213 bits (436 B); the deltas of moving players at a
-    // 6–10 tick baseline age come to about a third of that.
+    // A full one is 90 + 281 + 7 + 15 × 213 bits (447 B, v4); the deltas of moving players at a
+    // 6–10 tick baseline age come to about half of that.
     const mean = s.snapshotBytes / CODEC_CASES;
     console.log(`codec bench: mean 16-player delta ${mean.toFixed(1)} B`);
-    expect(mean).toBeGreaterThan(37);
-    expect(mean).toBeLessThan(436 * 0.7);
+    expect(mean).toBeGreaterThan(48);
+    expect(mean).toBeLessThan(447 * 0.7);
     expect(s.inputBytes).toBe(55 * CODEC_CASES);
   });
 
@@ -125,7 +125,7 @@ describe("codec bench verdict", () => {
       expect(meetsCodecBudget(ns)).toBe(verdict === "PASS");
       const report = formatCodecBench(fakeResult(ns, 2));
       expect(report).toContain(
-        `SNAPSHOT, v3 delta of 16 players (221 B) encode+decode: ${ns.toFixed(1)} ns, budget 30000 ns: ${verdict}`,
+        `SNAPSHOT, v4 delta of 16 players (221 B) encode+decode: ${ns.toFixed(1)} ns, budget 30000 ns: ${verdict}`,
       );
       expect(report).toContain("GCs during the codec loops: 2 (expect 0)");
     }
@@ -160,9 +160,9 @@ describe("snapshot build bench workload", () => {
       expect(back).toBeGreaterThanOrEqual(6);
       expect(back).toBeLessThanOrEqual(11);
     }
-    // Deltas of 16 moving players: well under a full snapshot (436 B), more than the first ticks'.
+    // Deltas of 16 moving players: well under a full snapshot (447 B), more than the first ticks'.
     const mean = s.bytes / s.snapshots;
-    expect(mean).toBeLessThan(436);
+    expect(mean).toBeLessThan(447);
     expect(mean).toBeLessThan(before);
   });
 });

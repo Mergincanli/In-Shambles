@@ -12,6 +12,7 @@ import {
   InputMsg,
   MAX_UNRELIABLE_BYTES,
   type PlayerState,
+  PROTOCOL_VERSION,
   playerStateToSlot,
   registerPmoveCvars,
   registryCvarHash,
@@ -23,17 +24,17 @@ import { buildPmoveWorkload, PMOVE_PLAYERS, PmoveBenchState, runPmoveTicks } fro
 import { countIn, WARMUP_ROUNDS, warmupCalls } from "./trace.bench";
 
 /**
- * The snapshot codec microbenchmark (docs/10 §4.4: encode + decode of a typical snapshot
- * ≤ 30 µs). Since M3 increment 8 a typical snapshot is a 16-player match's delta, protocol v3
- * since D-050 (v2's sizes; D-033, D-038): the receiver's state as a delta local block and the
- * other 15 players as delta records against the frame of a baseline 6–10 ticks back (about an RTT
- * of acks). The cases are the pmove bench's 16 players on movement_lab (running, jumping,
- * swimming, on the ladder) over 64 ticks after BASELINE_BACK_MAX lead-in ticks, one world frame
- * per tick, each tick's snapshot for each of the 16 receivers, captured once before the clock
- * runs, behind a header like the match sends. Decoding goes through the header and the body into
- * a frame against the baseline frame, as the client's store does. INPUT, the other per-tick
- * message, is timed alongside with four cmds from the pmove bench's cmd table. (Until increment 8
- * the typical snapshot was the full one, 436 B.)
+ * The snapshot codec microbenchmark (docs/10 §4.4: encode + decode of a typical snapshot ≤ 30 µs).
+ * Since M3 increment 8 a typical snapshot is a 16-player match's delta, protocol v4 since D-053
+ * (v3's entity records with the larger local block; D-033, D-038, D-050): the receiver's state as a
+ * delta local block and the other 15 players as delta records against the frame of a baseline 6–10
+ * ticks back (about an RTT of acks). The cases are the pmove bench's 16 players on movement_lab
+ * (running, jumping, swimming, on the ladder) over 64 ticks after BASELINE_BACK_MAX lead-in ticks,
+ * one world frame per tick, each tick's snapshot for each of the 16 receivers, captured once before
+ * the clock runs, behind a header like the match sends. Decoding goes through the header and the
+ * body into a frame against the baseline frame, as the client's store does. INPUT, the other
+ * per-tick message, is timed alongside with four cmds from the pmove bench's cmd table. (Until
+ * increment 8 the typical snapshot was the full one, 436 B.)
  */
 
 /** Snapshots captured: the pmove bench's 16 players over 64 ticks, one per receiver. */
@@ -255,7 +256,7 @@ export function formatCodecBench(result: CodecBenchResult): string {
   const pass = meetsCodecBudget(result.nsPerSnapshot);
   return [
     `codec: ${result.calls} encode+decode round trips per message, ${CODEC_CASES} cases (pmove bench states on movement_lab)`,
-    `SNAPSHOT, v3 delta of 16 players (${result.snapshotBytes.toFixed(0)} B) encode+decode: ${result.nsPerSnapshot.toFixed(1)} ns, budget ${CODEC_BUDGET_NS} ns: ${pass ? "PASS" : "FAIL"}`,
+    `SNAPSHOT, v${PROTOCOL_VERSION} delta of 16 players (${result.snapshotBytes.toFixed(0)} B) encode+decode: ${result.nsPerSnapshot.toFixed(1)} ns, budget ${CODEC_BUDGET_NS} ns: ${pass ? "PASS" : "FAIL"}`,
     `INPUT, 4 cmds (${result.inputBytes.toFixed(0)} B) encode+decode: ${result.nsPerInput.toFixed(1)} ns`,
     `failed round trips: ${result.failures} (expect 0); GCs during the codec loops: ${result.gcs} (expect 0)`,
     `sink: ${result.sink}`,

@@ -52,6 +52,7 @@ import {
   MSG_SNAPSHOT,
   MSG_WELCOME,
   SNAP_BUDGET_BITS,
+  SNAP_CONTACT_SEQ_MASK,
   SNAP_FLAG_DEFERRED,
   SNAP_FLAG_SPECTATOR,
   SNAP_FLAG_STARVED,
@@ -71,12 +72,32 @@ import {
   copySlot,
   ENTITY_EVENT_SLOTS,
   FRAME_SLOTS,
+  LF_ARMOR,
+  LF_BANDAGE,
+  LF_CLIMB_HEIGHT,
+  LF_CLIMB_YAW,
+  LF_COUNT,
+  LF_HEALTH,
+  LF_KICK_COOLDOWN,
+  LF_REGEN_DELAY,
+  LF_REGRAB,
+  LF_SUBMERGED,
+  LF_WALL_JUMPS,
+  LF_WATER_JUMP,
   playerStateToSlot,
   WorldFrame,
 } from "../../src/net/worldFrame";
 import type { Mulberry32 } from "../../src/rng/mulberry32";
-import { PMEV_JUMP, PMEV_LAND, PMEV_NONE } from "../../src/sim/events";
-import { PlayerState } from "../../src/sim/playerState";
+import {
+  PMEV_BOOT,
+  PMEV_GRAB,
+  PMEV_JUMP,
+  PMEV_NONE,
+  PMEV_WALLKICK,
+  PMEV_WATER_JUMP,
+  PMEV_WIRE_MAX,
+} from "../../src/sim/events";
+import { PlayerState, PMF_CLIMBING, PMF_MASK } from "../../src/sim/playerState";
 import type { UserCmd } from "../../src/sim/usercmd";
 import { TICK_MAX } from "../../src/time";
 
@@ -107,10 +128,23 @@ export function randomState(rng: Mulberry32, ps: PlayerState): PlayerState {
   for (let i = 0; i < 3; i++) ps.velocity[i] = intIn(rng, -524287, 524287) / 16;
   ps.viewYaw = intIn(rng, 0, 0xffff);
   ps.viewPitch = intIn(rng, -PITCH_LIMIT_U16, PITCH_LIMIT_U16) & 0xffff;
-  ps.flags = intIn(rng, 0, 0x3ff);
+  ps.flags = intIn(rng, 0, PMF_MASK);
   ps.groundEntity = intIn(rng, -1, 32767);
   ps.waterLevel = intIn(rng, 0, 3);
   ps.stamina = intIn(rng, 0, 0xffff);
+  ps.wallJumps = intIn(rng, 0, 7);
+  ps.health = intIn(rng, 0, 16383);
+  ps.armor = intIn(rng, 0, 3);
+  ps.submerged = intIn(rng, 0, 2047);
+  // The canonical rule (M4 design §2.2): the climb fields are 0 unless CLIMBING.
+  const climbing = (ps.flags & PMF_CLIMBING) !== 0;
+  ps.climbHeight = climbing ? intIn(rng, -2048, 2047) : 0;
+  ps.climbYaw = climbing ? intIn(rng, 0, 255) : 0;
+  ps.regenDelay = intIn(rng, 0, 127);
+  ps.kickCooldown = intIn(rng, 0, 63);
+  ps.regrab = intIn(rng, 0, 15);
+  ps.waterJump = intIn(rng, 0, 63);
+  ps.bandage = intIn(rng, 0, 255);
   return ps;
 }
 
@@ -127,14 +161,26 @@ export const LIVE_FULL_MAX_OTHERS = Math.floor(
 
 const eventState = new PlayerState();
 
-/** Random canonical event slots for slot `s` (kinds 0–3, empty slots last and zero, JUMP 0). */
+/** A wire event kind's value as the encoder takes it (M4 design §2.2). */
+export function randomEventValue(rng: Mulberry32, kind: number): number {
+  if (kind === PMEV_BOOT) return intIn(rng, 0, 63);
+  const zero =
+    kind === PMEV_NONE ||
+    kind === PMEV_JUMP ||
+    kind === PMEV_WALLKICK ||
+    kind === PMEV_GRAB ||
+    kind === PMEV_WATER_JUMP;
+  return zero ? 0 : intIn(rng, 0, 255);
+}
+
+/** Random canonical event slots for slot `s` (wire kinds 0–7 and their value rules, empty last). */
 function randomEvents(rng: Mulberry32, f: WorldFrame, s: number): void {
   const e = s * ENTITY_EVENT_SLOTS;
   const n = intIn(rng, 0, 2);
   for (let i = 0; i < ENTITY_EVENT_SLOTS; i++) {
-    const kind = i < n ? intIn(rng, 1, PMEV_LAND) : PMEV_NONE;
+    const kind = i < n ? intIn(rng, 1, PMEV_WIRE_MAX) : PMEV_NONE;
     f.evKind[e + i] = kind;
-    f.evValue[e + i] = kind === PMEV_NONE || kind === PMEV_JUMP ? 0 : intIn(rng, 0, 255);
+    f.evValue[e + i] = randomEventValue(rng, kind);
   }
 }
 
@@ -150,7 +196,7 @@ export function randomEntity(rng: Mulberry32, f: WorldFrame, s: number, stamp: n
   f.entVelZ[s] = intIn(rng, -32767, 32767);
   f.yaw[s] = intIn(rng, 0, 0xffff);
   f.pitch[s] = intIn(rng, -PITCH_LIMIT_U16, PITCH_LIMIT_U16);
-  f.flags[s] = intIn(rng, 0, 0x3ff);
+  f.flags[s] = intIn(rng, 0, PMF_MASK);
   f.team[s] = intIn(rng, 0, 2);
   f.teleportSeq[s] = intIn(rng, 0, 255);
   f.eventSeq[s] = intIn(rng, 0, 255);
@@ -226,7 +272,7 @@ export function mutateEntity(rng: Mulberry32, f: WorldFrame, s: number): void {
   }
   if ((groups & 4) !== 0) f.yaw[s] = intIn(rng, 0, 0xffff);
   if ((groups & 8) !== 0) f.pitch[s] = intIn(rng, -PITCH_LIMIT_U16, PITCH_LIMIT_U16);
-  if ((groups & 16) !== 0) f.flags[s] = intIn(rng, 0, 0x3ff);
+  if ((groups & 16) !== 0) f.flags[s] = intIn(rng, 0, PMF_MASK);
   if ((groups & 32) !== 0) f.team[s] = intIn(rng, 0, 2);
   if ((groups & 64) !== 0) f.teleportSeq[s] = intIn(rng, 0, 255);
   if ((groups & 128) !== 0) {
@@ -249,10 +295,32 @@ export function mutateLocal(rng: Mulberry32, f: WorldFrame, s: number): void {
   }
   f.yaw[s] = maybe(rng, f.yaw[s] as number, 0, 0xffff);
   f.pitch[s] = maybe(rng, f.pitch[s] as number, -PITCH_LIMIT_U16, PITCH_LIMIT_U16);
-  f.flags[s] = maybe(rng, f.flags[s] as number, 0, 0x3ff);
+  f.flags[s] = maybe(rng, f.flags[s] as number, 0, PMF_MASK);
   f.ground1[s] = maybe(rng, f.ground1[s] as number, 0, 32768);
   f.waterLevel[s] = maybe(rng, f.waterLevel[s] as number, 0, 3);
   f.stamina[s] = maybe(rng, f.stamina[s] as number, 0, 0xffff);
+  // The v4 lanes (M4 design §2.2), each within its width; the climb's only while CLIMBING.
+  const l = f.locals;
+  const b = s * LF_COUNT;
+  const lane = (i: number, lo: number, hi: number) => {
+    l[b + i] = maybe(rng, l[b + i] as number, lo, hi);
+  };
+  lane(LF_WALL_JUMPS, 0, 7);
+  lane(LF_HEALTH, 0, 16383);
+  lane(LF_ARMOR, 0, 3);
+  lane(LF_SUBMERGED, 0, 2047);
+  lane(LF_REGEN_DELAY, 0, 127);
+  lane(LF_KICK_COOLDOWN, 0, 63);
+  lane(LF_REGRAB, 0, 15);
+  lane(LF_WATER_JUMP, 0, 63);
+  lane(LF_BANDAGE, 0, 255);
+  if (((f.flags[s] as number) & PMF_CLIMBING) !== 0) {
+    lane(LF_CLIMB_HEIGHT, -2048, 2047);
+    lane(LF_CLIMB_YAW, 0, 255);
+  } else {
+    l[b + LF_CLIMB_HEIGHT] = 0;
+    l[b + LF_CLIMB_YAW] = 0;
+  }
 }
 
 /**
@@ -260,7 +328,7 @@ export function mutateLocal(rng: Mulberry32, f: WorldFrame, s: number): void {
  * spectator) with changed local fields and a random teleportSeq; each other slot `base` holds
  * left (a removal), replaced by a new incarnation (another serial), unchanged or changed; a few
  * slots `base` lacks appear. At most `maxRecords` slots need a record, so a live delta stays
- * within the budget by construction (36 records: the worst 1088 B).
+ * within the budget by construction (36 records: the worst 1100 B).
  */
 export function randomDeltaFrame(
   rng: Mulberry32,
@@ -343,11 +411,11 @@ export function decodeSnapshotParts(r: BitReader, m: SnapshotParts): boolean {
 }
 
 /**
- * Random valid parts: live (starved or not, with any starve counter, D-050) or spectator (counter
- * 0), full or (half the time) a delta against a random baseline in `m.base`, up to the most
- * records that fit. A third of the live ones with at most 16 others carry the byte-budget
- * scheduler's forms (D-046, `randomDeferrals`): a baseline with pending slots and older stamps,
- * and slots left out of the snapshot.
+ * Random valid parts: live (starved or not, with any starve and contact counter, D-050, D-053) or
+ * spectator (counters 0), full or (half the time) a delta against a random baseline in `m.base`, up
+ * to the most records that fit. A third of the live ones with at most 16 others carry the
+ * byte-budget scheduler's forms (D-046, `randomDeferrals`): a baseline with pending slots and older
+ * stamps, and slots left out of the snapshot.
  */
 export function randomSnapshot(rng: Mulberry32, m: SnapshotParts): SnapshotParts {
   const h = m.hdr;
@@ -355,12 +423,13 @@ export function randomSnapshot(rng: Mulberry32, m: SnapshotParts): SnapshotParts
   const kind = rng.nextInt(5);
   h.flags = kind === 0 ? SNAP_FLAG_SPECTATOR : kind === 1 ? SNAP_FLAG_STARVED : 0;
   h.starveSeq = kind === 0 ? 0 : rng.nextInt(SNAP_STARVE_SEQ_MASK + 1);
+  h.contactSeq = kind === 0 ? 0 : rng.nextInt(SNAP_CONTACT_SEQ_MASK + 1);
   h.cvarHash = intIn(rng, 0, 0xffff);
   h.inputBufferHealth = intIn(rng, -128, 127);
   const spectator = kind === 0;
   const self = spectator ? -1 : SNAP_SELF;
   const max = spectator ? 24 : 16;
-  // Small enough that any deferral fits: 312 + 16 × 233 + 6 + 16 × 16 bits.
+  // Small enough that any deferral fits: 408 + 16 × 233 + 6 + 16 × 16 bits.
   const defer = !spectator && rng.nextInt(3) === 0;
   const delta = h.serverTick > 1 && rng.nextInt(2) === 0;
   h.baseBack = delta ? intIn(rng, 1, Math.min(SNAPSHOT_HISTORY - 1, h.serverTick - 1)) : 0;

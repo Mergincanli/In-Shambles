@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { BitWriter } from "../../src/net/bitstream";
+import { PLAYER_STATE_BITS } from "../../src/net/playerStateCodec";
 import { MAX_UNRELIABLE_BYTES } from "../../src/net/protocol";
-import { encodeSnapshot, SnapshotHeader } from "../../src/net/snapshot";
+import { encodeSnapshot, LOCAL_DELTA_MAX_BITS, SnapshotHeader } from "../../src/net/snapshot";
 import { frameDigest, type WorldFrame } from "../../src/net/worldFrame";
 import { Mulberry32 } from "../../src/rng/mulberry32";
 import {
@@ -37,9 +38,11 @@ describe("NET-02: delta snapshots match the server's frames (docs/05 §4.3, §14
     expect(run.matched, summary).toBeGreaterThan(TICKS * 0.8);
     expect(store.delta, summary).toBeGreaterThan(store.full * 5);
     expect(meanDelta, summary).toBeLessThanOrEqual(meanFull);
-    // Per entity a delta record is at most a new one + 20 bits; the local block likewise.
+    // Per entity a delta record is at most a new one + 20 bits (mask 8 + 6 classes × 2); the local
+    // block at most the full one + 30 (v4's 18-bit mask + the same 12 class bits).
     expect(run.worstEntityOver).toBeLessThanOrEqual(20);
-    expect(run.worstLocalOver).toBeLessThanOrEqual(20);
+    expect(run.worstLocalOver).toBeLessThanOrEqual(LOCAL_DELTA_MAX_BITS - PLAYER_STATE_BITS);
+    expect(LOCAL_DELTA_MAX_BITS - PLAYER_STATE_BITS).toBe(30);
     // The impairments did their job: drops, the 8-drop full request, stale and duplicate copies,
     // fulls when the acks aged out of the window.
     expect(run.forcedMisses).toBeGreaterThan(0);

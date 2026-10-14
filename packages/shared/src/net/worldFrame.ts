@@ -1,7 +1,7 @@
 import { ORIGIN_SCALE, toSigned16, VELOCITY_SCALE } from "../math/quant";
 import { hash32 } from "../rng/hash32";
 import { ENTITY_FLAG_MASK, MATCH_MAX_CLIENTS } from "../sim/entity";
-import { PMEV_LAND, PMEV_STEP, type PmoveEvent } from "../sim/events";
+import { PMEV_BOOT, PMEV_LAND, PMEV_STEP, type PmoveEvent } from "../sim/events";
 import type { PlayerState } from "../sim/playerState";
 import { SNAPSHOT_HISTORY } from "./protocol";
 
@@ -30,6 +30,25 @@ export const MASK_PRESENT_LO = 0;
 export const MASK_PRESENT_HI = 1;
 export const MASK_PENDING_LO = 2;
 export const MASK_PENDING_HI = 3;
+
+/**
+ * Lanes of `WorldFrame.locals`: the local-block-only fields of protocol v4 (M4 design §2.2), at
+ * `slot * LF_COUNT + LF_*`, in PlayerState order. One strided Int16Array instead of eleven arrays
+ * keeps a frame's object count and the per-frame cost down (every value fits i16: health ≤ 16383,
+ * climbHeight i12, the rest ≤ 2047).
+ */
+export const LF_WALL_JUMPS = 0;
+export const LF_HEALTH = 1;
+export const LF_ARMOR = 2;
+export const LF_SUBMERGED = 3;
+export const LF_CLIMB_HEIGHT = 4;
+export const LF_CLIMB_YAW = 5;
+export const LF_REGEN_DELAY = 6;
+export const LF_KICK_COOLDOWN = 7;
+export const LF_REGRAB = 8;
+export const LF_WATER_JUMP = 9;
+export const LF_BANDAGE = 10;
+export const LF_COUNT = 11;
 
 /** Entity velocity is 1 u/s, i16 (design, INFERRED adequate for ≤ 2-tick extrapolation). */
 export const ENTITY_VELOCITY_MAX = 32767;
@@ -73,6 +92,8 @@ export class WorldFrame {
   readonly waterLevel = new Uint8Array(FRAME_SLOTS);
   /** Hundredths. */
   readonly stamina = new Uint16Array(FRAME_SLOTS);
+  /** The v4 local-only fields: LF_* lanes, slot s at `s * LF_COUNT` (0 for a client's remotes). */
+  readonly locals = new Int16Array(FRAME_SLOTS * LF_COUNT);
   /** TEAM_*. */
   readonly team = new Uint8Array(FRAME_SLOTS);
   /** Bumped by every spawn (D-035): the only snap signal. */
@@ -143,10 +164,11 @@ export function entityVelocity(vel16: number): number {
 export const ENTITY_LAND_VALUE_MAX = 255;
 
 /**
- * A movement event's value as an entity record carries it (8 bits, M3 design §2.1): STEP the
- * height change rounded to whole u as i8 (two's complement), JUMP 0, LAND the impact speed / 16
- * rounded, at most 255; anything else 0. Takes the event, not its value, so no double crosses the
- * call (`| 0` keeps −0 and every result a small integer).
+ * A movement event's value as an entity record carries it (8 bits, M3 design §2.1): STEP the height
+ * change rounded to whole u as i8 (two's complement), JUMP 0, LAND the impact speed / 16 rounded,
+ * at most 255, BOOT the victim's client id (< 64); anything else 0 (WALLKICK, GRAB, WATER_JUMP, and
+ * the local-only kinds, which the match never files). Takes the event, not its value, so no double
+ * crosses the call (`| 0` keeps −0 and every result a small integer).
  */
 export function entityEventValue(ev: Readonly<PmoveEvent>): number {
   const kind = ev.type;
@@ -156,6 +178,7 @@ export function entityEventValue(ev: Readonly<PmoveEvent>): number {
   if (kind === PMEV_LAND) {
     return Math.max(0, Math.min(ENTITY_LAND_VALUE_MAX, Math.round(ev.value / 16) | 0));
   }
+  if (kind === PMEV_BOOT) return Math.max(0, Math.min(MATCH_MAX_CLIENTS - 1, ev.value | 0));
   return 0;
 }
 
@@ -182,8 +205,8 @@ export function pushEntityEvent(
 
 /**
  * Writes a quantized `ps` into `slot`'s state fields (origin, both velocities, angles, flags,
- * ground, water, stamina): exact, since end-of-tick quantization leaves every field on the wire
- * grid. Presence, stamp, serial, team, teleportSeq and events are the caller's.
+ * ground, water, stamina, the v4 local lanes): exact, since end-of-tick quantization leaves every
+ * field on the wire grid. Presence, stamp, serial, team, teleportSeq and events are the caller's.
  */
 export function playerStateToSlot(f: WorldFrame, slot: number, ps: Readonly<PlayerState>): void {
   const o = ps.origin;
@@ -206,6 +229,19 @@ export function playerStateToSlot(f: WorldFrame, slot: number, ps: Readonly<Play
   f.ground1[slot] = ps.groundEntity + 1;
   f.waterLevel[slot] = ps.waterLevel;
   f.stamina[slot] = ps.stamina;
+  const l = f.locals;
+  const b = slot * LF_COUNT;
+  l[b + LF_WALL_JUMPS] = ps.wallJumps;
+  l[b + LF_HEALTH] = ps.health;
+  l[b + LF_ARMOR] = ps.armor;
+  l[b + LF_SUBMERGED] = ps.submerged;
+  l[b + LF_CLIMB_HEIGHT] = ps.climbHeight;
+  l[b + LF_CLIMB_YAW] = ps.climbYaw;
+  l[b + LF_REGEN_DELAY] = ps.regenDelay;
+  l[b + LF_KICK_COOLDOWN] = ps.kickCooldown;
+  l[b + LF_REGRAB] = ps.regrab;
+  l[b + LF_WATER_JUMP] = ps.waterJump;
+  l[b + LF_BANDAGE] = ps.bandage;
 }
 
 /** The inverse of `playerStateToSlot`, bit for bit: what prediction reads (D-034, M3 design §2.3). */
@@ -224,6 +260,26 @@ export function slotToPlayerState(f: WorldFrame, slot: number, out: PlayerState)
   out.groundEntity = (f.ground1[slot] as number) - 1;
   out.waterLevel = f.waterLevel[slot] as number;
   out.stamina = f.stamina[slot] as number;
+  const l = f.locals;
+  const b = slot * LF_COUNT;
+  out.wallJumps = l[b + LF_WALL_JUMPS] as number;
+  out.health = l[b + LF_HEALTH] as number;
+  out.armor = l[b + LF_ARMOR] as number;
+  out.submerged = l[b + LF_SUBMERGED] as number;
+  out.climbHeight = l[b + LF_CLIMB_HEIGHT] as number;
+  out.climbYaw = l[b + LF_CLIMB_YAW] as number;
+  out.regenDelay = l[b + LF_REGEN_DELAY] as number;
+  out.kickCooldown = l[b + LF_KICK_COOLDOWN] as number;
+  out.regrab = l[b + LF_REGRAB] as number;
+  out.waterJump = l[b + LF_WATER_JUMP] as number;
+  out.bandage = l[b + LF_BANDAGE] as number;
+}
+
+/** Zeroes slot `s`'s v4 local lanes (a remote's: they are not on the wire). */
+export function clearLocals(f: WorldFrame, s: number): void {
+  const l = f.locals;
+  const b = s * LF_COUNT;
+  for (let i = 0; i < LF_COUNT; i++) l[b + i] = 0;
 }
 
 /** Copies slot `ss` of `src` into slot `ds` of `dst`, presence and stamp included. */
@@ -246,6 +302,11 @@ export function copySlot(dst: WorldFrame, ds: number, src: WorldFrame, ss: numbe
   dst.ground1[ds] = src.ground1[ss] as number;
   dst.waterLevel[ds] = src.waterLevel[ss] as number;
   dst.stamina[ds] = src.stamina[ss] as number;
+  const dl = dst.locals;
+  const sl = src.locals;
+  const db = ds * LF_COUNT;
+  const sb = ss * LF_COUNT;
+  for (let i = 0; i < LF_COUNT; i++) dl[db + i] = sl[sb + i] as number;
   dst.team[ds] = src.team[ss] as number;
   dst.teleportSeq[ds] = src.teleportSeq[ss] as number;
   dst.eventSeq[ds] = src.eventSeq[ss] as number;
@@ -320,6 +381,12 @@ export function frameDigest(f: WorldFrame, selfId: number): number {
         f.ground1[s] as number,
       );
       h = hash32(h, f.waterLevel[s] as number, f.stamina[s] as number, 0, 0);
+      const l = f.locals;
+      const b = s * LF_COUNT;
+      // Four lanes a call, LF_COUNT (11) of them: 0–3, 4–7, 8–10.
+      h = hash32(h, l[b] as number, l[b + 1] as number, l[b + 2] as number, l[b + 3] as number);
+      h = hash32(h, l[b + 4] as number, l[b + 5] as number, l[b + 6] as number, l[b + 7] as number);
+      h = hash32(h, l[b + 8] as number, l[b + 9] as number, l[b + 10] as number, 0);
       continue;
     }
     if (f.stamp[s] === 0) continue;

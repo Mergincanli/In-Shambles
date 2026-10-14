@@ -260,6 +260,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   const defaultMaxClients = cvars.getNumber("sv_maxClients", MATCH_DEFAULT_MAX_CLIENTS);
   const strictBuild = cvars.getNumber("sv_strictBuild", 1) === 1;
   const autoRecord = cvars.getNumber("sv_autoRecord", 0) === 1;
+  const spawnVest = cvars.getNumber("sv_spawnVest", 0) === 1;
   const demosDir =
     options.demosDir === undefined ? defaultDemosDir(cwd) : resolve(cwd, options.demosDir);
   const set = new MatchSet<HostedMatch>(log);
@@ -288,6 +289,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
       timeouts: true,
       limits: security,
       primer,
+      spawnVest,
       // D-042: rcon runs as an admin of this match only, and resets this match's metrics only.
       ...(rcon === null ? {} : { rcon, rconGate: gate }),
       metricsReset: () => {

@@ -182,8 +182,8 @@ export function expectBandwidth(run: BandwidthRun): string {
   }
   expect(human.digestMismatches).toEqual([]);
   expect(human.digestsChecked).toBeGreaterThan(seconds * 60 * 0.7);
-  // 86 + 199 + 7 + 16 × 213 bits: the human, last in, got every other player as a new body.
-  expect(human.tap.maxFullSnapshot).toBe(463);
+  // 90 + 281 + 7 + 16 × 213 bits (v4): the human, last in, got every other player as a new body.
+  expect(human.tap.maxFullSnapshot).toBe(474);
   expectNoStrikes(h.match, []);
   return account;
 }
@@ -241,7 +241,7 @@ export function expectReport32(run: BandwidthRun): string {
     expect(c.session?.stats.strikes, account).toBe(0);
   }
   expect(human.digestMismatches).toEqual([]);
-  // 86 + 199 + 7 + 31 × 213 bits: the human, last in, got every other player as a new body.
-  expect(human.tap.maxFullSnapshot).toBe(862);
+  // 90 + 281 + 7 + 31 × 213 bits (v4): the human, last in, got every other player as a new body.
+  expect(human.tap.maxFullSnapshot).toBe(873);
   return account;
 }

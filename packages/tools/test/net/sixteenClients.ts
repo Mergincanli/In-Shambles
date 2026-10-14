@@ -130,8 +130,8 @@ export function expectSixteen(run: SixteenRun): string {
     worstRate = Math.max(worstRate, t.corrections / seconds);
     worstMean = Math.max(worstMean, t.meanCorrection);
   }
-  // The last one in got the other 15 as new bodies: 86 + 199 + 7 + 15 × 213 bits.
-  expect((h.clients[SIXTEEN - 1] as HarnessClient).tap.maxFullSnapshot).toBe(436);
+  // The last one in got the other 15 as new bodies: 90 + 281 + 7 + 15 × 213 bits (v4).
+  expect((h.clients[SIXTEEN - 1] as HarnessClient).tap.maxFullSnapshot).toBe(447);
   const ticks = h.tickTimes;
   const account =
     `NET-04, ${SIXTEEN} clients, arena_greybox, ${link.name}, ${seconds.toFixed(0)} s: corrections ` +

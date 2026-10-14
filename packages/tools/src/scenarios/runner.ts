@@ -4,6 +4,7 @@ import {
   ENTITY_NONE,
   ENTITY_WORLD,
   lastPmoveSnap,
+  PLAYER_HEALTH_MAX,
   PlayerState,
   PMF_GROUNDED,
   PmoveEvent,
@@ -11,6 +12,7 @@ import {
   PmoveParams,
   pmove,
   quantizePlayerState,
+  resetPlayerStateForSpawn,
   sanitizeUserCmd,
   TICK_DT,
   UserCmd,
@@ -149,6 +151,10 @@ export interface PlaceOptions {
   readonly velocity?: P3 | Float64Array;
   /** Hundredths; default SCENARIO_STAMINA (full, a rested player). */
   readonly stamina?: number;
+  /** Hundredths; default PLAYER_HEALTH_MAX (100 HP, a fresh spawn). */
+  readonly health?: number;
+  /** ARMOR_* bits; default 0 (no vest, as `sv_spawnVest` 0 spawns). */
+  readonly armor?: number;
 }
 
 const DEFAULT_PLACE: PlaceOptions = {};
@@ -156,9 +162,10 @@ const DEFAULT_PLACE: PlaceOptions = {};
 const BLANK_STATE = new PlayerState();
 
 /**
- * Puts a player at `origin` facing `yaw` (u16), pitch 0: at rest with full stamina and grounded on
- * the world unless `options` says otherwise, so a start on the floor emits no LAND. Every other
- * field is reset, and the result is quantized (docs/05 §4.1) as every state the server holds is, so
+ * Puts a player at `origin` facing `yaw` (u16), pitch 0: at rest with full health and stamina and
+ * grounded on the world unless `options` says otherwise, so a start on the floor emits no LAND.
+ * Every other field is reset through the match's own spawn reset (`resetPlayerStateForSpawn`, M4
+ * design §2.2), and the result is quantized (docs/05 §4.1) as every state the server holds is, so
  * a scenario starts from a state the wire could carry.
  */
 export function placePlayer(
@@ -177,6 +184,8 @@ export function placePlayer(
   const vy = v === undefined ? 0 : (v[1] as number);
   const vz = v === undefined ? 0 : (v[2] as number);
   copyPlayerState(ps, BLANK_STATE);
+  resetPlayerStateForSpawn(ps, options.armor ?? 0);
+  ps.health = options.health ?? PLAYER_HEALTH_MAX;
   ps.origin[0] = ox;
   ps.origin[1] = oy;
   ps.origin[2] = oz;

@@ -1,6 +1,6 @@
 /**
- * Protocol constants (docs/05 §3.2–§3.6; v1 D-026, v2 D-033, v3 D-050). Any change to a message
- * layout bumps PROTOCOL_VERSION and updates docs/05 §3.6 in the same change
+ * Protocol constants (docs/05 §3.2–§3.6; v1 D-026, v2 D-033, v3 D-050, v4 D-053). Any change to a
+ * message layout bumps PROTOCOL_VERSION and updates docs/05 §3.6 in the same change
  * (.claude/rules/netcode.md).
  */
 
@@ -8,9 +8,12 @@
  * u16 on the wire, in HELLO and WELCOME. v2 (D-033) changed SNAPSHOT: the player list and the
  * teleport counter. Its delta forms (D-038), deferred list (D-046) and the EVENTS message (D-043)
  * joined within v2: nothing shipped between those increments. v3 (D-050) gives the high half of
- * SNAPSHOT's flags byte to the receiver's starve counter; every other layout is v2's.
+ * SNAPSHOT's flags byte to the receiver's starve counter; every other layout is v2's. v4 (D-053,
+ * M4 design §2.2) is M4's one layout, fixed in its increment 2: PlayerState v4 (281 bits, the
+ * 18-bit delta local mask), the header's contact counter, movement event kinds 4–7 in entity
+ * records, and EVENTS' PLAYER_DEATH and HIT_CONFIRM.
  */
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 
 /** The u8 type byte that leads every message. 0 is never a message, so a zeroed buffer is bad. */
 export const MSG_HELLO = 1;
@@ -129,6 +132,16 @@ export const SNAP_FLAG_BITS = 4;
 export const SNAP_STARVE_SEQ_BITS = 4;
 export const SNAP_STARVE_SEQ_MASK = (1 << SNAP_STARVE_SEQ_BITS) - 1;
 
+/**
+ * The contact counter (M4 design §2.11, D-053): 4 bits after the header's teleportSeq (not in a
+ * spectator snapshot). The server steps a client's counter on every tick its pmove touched another
+ * player or the server changed its state from outside its pmove, as the starve counter does for
+ * starves, so the client can tell contact corrections from mispredictions. Laid out in protocol v4;
+ * stepped from M4 increment 4 (solid players), always 0 before.
+ */
+export const SNAP_CONTACT_SEQ_BITS = 4;
+export const SNAP_CONTACT_SEQ_MASK = (1 << SNAP_CONTACT_SEQ_BITS) - 1;
+
 /** Snapshots each end keeps, and so the oldest baseline a delta may use (docs/05 §4.3). */
 export const SNAPSHOT_HISTORY = 64;
 
@@ -156,15 +169,35 @@ export const PRINT_INFO = 0;
 export const PRINT_WARN = 1;
 export const PRINT_ERROR = 2;
 
-/** EVENTS kinds (4 bits; D-043, `events.ts`): 0 and 4–15 are refused, reserved for M6/M7. */
+/**
+ * EVENTS kinds (4 bits; D-043, D-053, `events.ts`): 0 and 6–15 are refused, reserved for M6/M7.
+ * PLAYER_DEATH and HIT_CONFIRM are the M4 subset of M6's combat feed (M4 design §2.2).
+ */
 export const EVK_PLAYER_JOIN = 1;
 export const EVK_PLAYER_LEAVE = 2;
 export const EVK_SERVER_STATS = 3;
+/** A player died (to every joined player, and into demos). */
+export const EVK_PLAYER_DEATH = 4;
+/** The receiver's boot or stomp hit someone (to the attacker only; gates the impact sound). */
+export const EVK_HIT_CONFIRM = 5;
 /** The highest kind this protocol carries. */
-export const EVK_MAX = EVK_SERVER_STATS;
+export const EVK_MAX = EVK_HIT_CONFIRM;
 
 /** PLAYER_LEAVE reasons (2 bits; 3 is refused). */
 export const EV_LEAVE_LEFT = 0;
 export const EV_LEAVE_TIMED_OUT = 1;
 export const EV_LEAVE_KICKED = 2;
 export const EV_LEAVE_REASON_MAX = EV_LEAVE_KICKED;
+
+/** PLAYER_DEATH causes (3 bits; 5–7 are refused). */
+export const EV_DEATH_FALL = 0;
+export const EV_DEATH_DROWN = 1;
+export const EV_DEATH_GOOMBA = 2;
+export const EV_DEATH_BOOT = 3;
+export const EV_DEATH_WORLD = 4;
+export const EV_DEATH_CAUSE_MAX = EV_DEATH_WORLD;
+
+/** HIT_CONFIRM causes (3 bits; 2–7 are refused in v4, M6 adds its weapons). */
+export const EV_HIT_BOOT = 0;
+export const EV_HIT_GOOMBA = 1;
+export const EV_HIT_CAUSE_MAX = EV_HIT_GOOMBA;

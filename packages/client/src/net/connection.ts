@@ -121,10 +121,10 @@ export interface ConnectionHandler {
 
 /**
  * The client's end of the protocol (docs/05 §2, §3.6; M2 design §1): the handshake state machine
- * (HELLO → WELCOME → clock-sync pings → READY → first snapshot), the decoding and channel check
- * of everything the server sends, and the encoding of what the client sends. Like the server, it
- * drops a packet that doesn't decode, arrives on the wrong channel or doesn't fit the state, and
- * counts a strike. Snapshots go into the `SnapshotStore` (protocol v3, D-033); a spectator one is
+ * (HELLO → WELCOME → clock-sync pings → READY → first snapshot), the decoding and channel check of
+ * everything the server sends, and the encoding of what the client sends. Like the server, it drops
+ * a packet that doesn't decode, arrives on the wrong channel or doesn't fit the state, and counts a
+ * strike. Snapshots go into the `SnapshotStore` (protocol v4, D-033, D-053); a spectator one is
  * struck and dropped (demo files only, D-044). EVENTS (D-043) go to the handler from READY on.
  * INPUT, SNAPSHOT, PING, PONG and EVENTS allocate nothing.
  *

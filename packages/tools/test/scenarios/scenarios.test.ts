@@ -2,6 +2,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   ACCEL_AIR,
+  ARMOR_VEST,
   accelerate,
   angleVectors,
   BUTTON_JUMP,
@@ -12,6 +13,7 @@ import {
   degreesToU16,
   ENTITY_NONE,
   ENTITY_WORLD,
+  PLAYER_HEALTH_MAX,
   PlayerState,
   PMEV_JUMP,
   PMEV_LAND,
@@ -168,8 +170,12 @@ describe("ScenarioRunner", () => {
       ENTITY_WORLD,
     ]);
     expect([ps.waterLevel, ps.stamina]).toEqual([0, SCENARIO_STAMINA]);
+    // The v4 fields as a spawn sets them (M4 design §2.2): full health, no vest.
+    expect([ps.health, ps.armor, ps.wallJumps, ps.submerged]).toEqual([PLAYER_HEALTH_MAX, 0, 0, 0]);
     placePlayer(ps, [1, 2, 3], 0, { grounded: false });
     expect([ps.flags, ps.groundEntity]).toEqual([0, ENTITY_NONE]);
+    placePlayer(ps, [1, 2, 3], 0, { health: 2500.7, armor: ARMOR_VEST });
+    expect([ps.health, ps.armor]).toEqual([2500, ARMOR_VEST]);
   });
 
   it("resets every field PlayerState has, whatever the state held before", () => {
@@ -185,7 +191,12 @@ describe("ScenarioRunner", () => {
       else throw new Error(`PlayerState.${key}: teach this test to dirty a ${typeof value}`);
     }
     expect(dirty, "every field dirtied").not.toEqual(new PlayerState());
-    for (const options of [{}, { grounded: false }, { velocity: [10, 20, 30] as const }]) {
+    for (const options of [
+      {},
+      { grounded: false },
+      { velocity: [10, 20, 30] as const },
+      { health: 1, armor: 3 },
+    ]) {
       expect(placePlayer(dirty, [1, 2, 3], 5, options), JSON.stringify(options)).toEqual(
         placePlayer(new PlayerState(), [1, 2, 3], 5, options),
       );

@@ -12,7 +12,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
-import { EVK_PLAYER_JOIN, EVK_SERVER_STATS, PROTOCOL_VERSION, validateDemo } from "@game/shared";
+import {
+  ARMOR_VEST,
+  EVK_PLAYER_JOIN,
+  EVK_SERVER_STATS,
+  PROTOCOL_VERSION,
+  validateDemo,
+} from "@game/shared";
 import { afterEach, describe, expect, it, onTestFinished } from "vitest";
 import { type RunningServer, startServer } from "../../src/node/server";
 import { TestClient } from "../match/fixtures";
@@ -98,6 +104,8 @@ describe("Node server (in process, real WebSocket)", () => {
     c.ready();
     await poll(c, () => c.snapshots.length >= 3, "snapshots");
     expect(c.bad).toBe(0);
+    // sv_spawnVest 0 by default (D-053): no vest.
+    expect(c.lastSnapshot().state.armor).toBe(0);
     expect(lines.find((l) => l.ev === "connect")).toMatchObject({
       match: "main",
       client: 0,
@@ -129,6 +137,17 @@ describe("Node server (in process, real WebSocket)", () => {
     expect(metrics.matches.main.serverTick).toBeGreaterThan(0);
     expect(metrics.matches.main.players).toBe(1);
     expect(metrics.matches.main.snapshots).toBeGreaterThan(0);
+  });
+
+  it("spawns every player wearing the vest with sv_spawnVest 1 (D-053)", async () => {
+    // The default (no vest) is checked by the handshake test above.
+    const { server, port } = await start(["--set", "sv_spawnVest=1"]);
+    const c = await client(port);
+    c.hello(server.buildHash);
+    await poll(c, () => c.welcomes.length === 1, "WELCOME");
+    c.ready();
+    await poll(c, () => c.snapshots.length >= 1, "snapshot");
+    expect(c.lastSnapshot().state.armor).toBe(ARMOR_VEST);
   });
 
   it("reports the effective sv_maxClients in /status, up to 64 (D-034, D-046)", async () => {

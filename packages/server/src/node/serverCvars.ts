@@ -190,6 +190,15 @@ export function registerServerCvars(reg: CvarRegistry): void {
     flags: CvarFlag.SERVER,
   });
   reg.register({
+    name: "sv_spawnVest",
+    type: "int",
+    default: 0, // design (D-053, M4 design §2.4): the vest hook, until M6 loadouts
+    min: 0,
+    max: 1,
+    description: "1: every player spawns wearing the vest (armor bit 0), until M6 loadouts",
+    flags: CvarFlag.SERVER,
+  });
+  reg.register({
     name: "sv_maxPerIp",
     type: "int",
     default: 8, // ESTIMATE (D-041)

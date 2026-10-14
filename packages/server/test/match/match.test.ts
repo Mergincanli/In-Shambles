@@ -1,4 +1,6 @@
 import {
+  ARMOR_HELMET,
+  ARMOR_VEST,
   applyCvarBlock,
   BUTTON_ATTACK,
   BUTTON_JUMP,
@@ -10,6 +12,7 @@ import {
   createLoopbackPair,
   cvarHash16,
   degreesToU16,
+  diffPlayerState,
   ENTITY_FLAG_MASK,
   ENTITY_WORLD,
   entityEventValue,
@@ -24,9 +27,13 @@ import {
   MSG_READY,
   MSG_SNAPSHOT,
   Mulberry32,
+  PLAYER_HEALTH_MAX,
   PlayerState,
+  PMEV_BOOT,
+  PMEV_GOOMBA,
   PMEV_JUMP,
   PMEV_LAND,
+  PMEV_SLIDE_START,
   PMEV_STEP,
   PMF_GROUNDED,
   PmoveEvent,
@@ -43,6 +50,7 @@ import {
   registerPmoveCvars,
   registerServerReplicatedCvars,
   registryCvarHash,
+  resetPlayerStateForSpawn,
   SNAP_FIT_MAX_PLAYERS,
   SNAP_FLAG_STARVED,
   SNAP_STARVE_SEQ_MASK,
@@ -81,6 +89,7 @@ import {
 import { SessionLimits, STRIKE_MALFORMED, STRIKE_UNEXPECTED } from "../../src/match/limits";
 import {
   effectiveMaxClients,
+  fileEntityEvents,
   MATCH_DEFAULT_MAX_CLIENTS,
   MATCH_MAX_CLIENTS,
   Match,
@@ -488,6 +497,55 @@ describe("match spawn and simulation", () => {
     expect(ps.groundEntity).toBe(ENTITY_WORLD);
     expect(ps.stamina).toBe(SPAWN_STAMINA);
     expect(match.session(0)?.spawnTick).toBe(4);
+    // Protocol v4 (M4 design §2.2): full health, no vest, every other v4 field 0; nothing steps
+    // the contact counter before solid players (M4 increment 4).
+    const spawned = resetPlayerStateForSpawn(new PlayerState(), 0);
+    spawned.origin.set(ps.origin);
+    spawned.viewYaw = ps.viewYaw;
+    spawned.flags = PMF_GROUNDED;
+    spawned.groundEntity = ENTITY_WORLD;
+    expect(diffPlayerState(spawned, ps)).toEqual([]);
+    expect(ps.health).toBe(PLAYER_HEALTH_MAX);
+    expect(snap.contactSeq).toBe(0);
+    // The header carries the session's counter as it stands (D-053; stepped from increment 4).
+    const session = match.session(0);
+    if (session === undefined) throw new Error("no session");
+    for (const seq of [13, 15, 0]) {
+      session.contactSeq = seq;
+      run(match, client, 1);
+      expect(client.lastSnapshot().contactSeq).toBe(seq);
+    }
+  });
+
+  it("spawns wearing the vest with sv_spawnVest, and resets every v4 field on a respawn (D-053)", () => {
+    const match = new Match({ cmap, world, buildHash: TEST_BUILD, primer: false, spawnVest: true });
+    const client = joined(match);
+    expect(client.lastSnapshot().state.armor).toBe(ARMOR_VEST);
+    const s = match.session(0);
+    if (s === undefined) throw new Error("no session");
+    // Dirty every v4 field (as later mechanics will), then respawn: the spawn reset clears them.
+    Object.assign(s.player, {
+      wallJumps: 3,
+      health: 4200,
+      armor: ARMOR_VEST | ARMOR_HELMET,
+      submerged: 500,
+      regenDelay: 20,
+      kickCooldown: 9,
+      regrab: 4,
+      waterJump: 7,
+      bandage: 33,
+    });
+    expect(match.respawn(s)).toBe(true);
+    run(match, client, 1);
+    const ps = client.lastSnapshot().state;
+    expect([ps.health, ps.armor, ps.wallJumps, ps.submerged, ps.bandage]).toEqual([
+      PLAYER_HEALTH_MAX,
+      ARMOR_VEST,
+      0,
+      0,
+      0,
+    ]);
+    expect([ps.regenDelay, ps.kickCooldown, ps.regrab, ps.waterJump]).toEqual([0, 0, 0, 0]);
   });
 
   it("spawns and repeats the neutral cmd with the spawn point's yaw", () => {
@@ -528,14 +586,8 @@ describe("match spawn and simulation", () => {
     const local = new PlayerState();
     const params = new PmoveParams();
     const cmd = new UserCmd();
-    // Prediction starts from the spawn snapshot's state.
-    local.origin.set(client.lastSnapshot().state.origin);
-    Object.assign(local, {
-      viewYaw: client.lastSnapshot().state.viewYaw,
-      flags: client.lastSnapshot().state.flags,
-      groundEntity: client.lastSnapshot().state.groundEntity,
-      stamina: client.lastSnapshot().state.stamina,
-    });
+    // Prediction starts from the spawn snapshot's state, every field of it.
+    copyPlayerState(local, client.lastSnapshot().state);
     for (let i = 1; i <= 120; i++) {
       const t = spawnTick + i;
       const c = cmdAt(t, 127, i % 40 === 0 ? BUTTON_JUMP : 0, (i * 97) & 0xffff);
@@ -779,8 +831,8 @@ describe("match snapshots (protocol v2, D-033–D-035)", () => {
       if (d[0] === MSG_SNAPSHOT) sizes.add(len);
     });
     run(match, clients[0] as TestClient, 1);
-    // 86 + 199 + 7 + 36 × 213 bits.
-    expect([...sizes]).toEqual([995]);
+    // 90 + 281 + 7 + 36 × 213 bits (protocol v4).
+    expect([...sizes]).toEqual([1006]);
   });
 });
 
@@ -1009,6 +1061,27 @@ describe("match spawns, teams, events and respawns (D-034, D-035)", () => {
     expect([...kinds].sort()).toEqual([PMEV_STEP, PMEV_JUMP, PMEV_LAND]);
     expect(ref.eventSeq[0]).toBeGreaterThan(4);
     expect(observer.bad).toBe(0);
+  });
+
+  it("files only the wire kinds into a slot's history: local-only kinds stay out (D-053)", () => {
+    const events = new PmoveEvents();
+    events.push(PMEV_STEP, -3);
+    events.push(PMEV_SLIDE_START, 0);
+    events.push(PMEV_BOOT, 70);
+    events.push(PMEV_GOOMBA, 5);
+    const seqs = new Uint8Array(MATCH_MAX_CLIENTS);
+    const kinds = new Uint8Array(MATCH_MAX_CLIENTS * 2);
+    const values = new Uint8Array(MATCH_MAX_CLIENTS * 2);
+    fileEntityEvents(events, new PmoveEvent(), seqs, kinds, values, 7);
+    // STEP then BOOT (its victim id clamped below 64), newest first; the count stepped twice.
+    expect([seqs[7], kinds[14], values[14], kinds[15], values[15]]).toEqual([
+      2,
+      PMEV_BOOT,
+      63,
+      PMEV_STEP,
+      -3 & 0xff,
+    ]);
+    expect(seqs.reduce((a, b) => a + b, 0)).toBe(2);
   });
 
   it("keeps the two newest of a tick's several events, the newest first", () => {

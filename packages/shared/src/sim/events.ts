@@ -11,6 +11,29 @@ export const PMEV_STEP = 1;
 export const PMEV_JUMP = 2;
 /** Airborne → grounded this tick; value = impact speed in u/s. */
 export const PMEV_LAND = 3;
+/**
+ * The M4 kinds (M4 design §2.2, D-053), emitted from the increment that gives each its meaning.
+ * Kinds 4–7 go on the wire in a remote's entity record; 8–11 stay local (remotes derive slides from
+ * the SLIDING flag's edges and a hurt sound from LAND's value), so the two event slots stay enough.
+ */
+/** Wall jump (M4 design §2.6); value = 0. */
+export const PMEV_WALLKICK = 4;
+/** Ledge grab (§2.8); value = 0. */
+export const PMEV_GRAB = 5;
+/** Boot hit (§2.11); value = the victim's client id (< 64). */
+export const PMEV_BOOT = 6;
+/** Water-jump out over a rim (§2.10); value = 0. */
+export const PMEV_WATER_JUMP = 7;
+/** The highest kind an entity record carries; above it a kind is local only. */
+export const PMEV_WIRE_MAX = PMEV_WATER_JUMP;
+/** Power slide started (§2.7); local only. */
+export const PMEV_SLIDE_START = 8;
+/** Power slide ended (§2.7); local only. */
+export const PMEV_SLIDE_END = 9;
+/** Fall damage taken (§2.5); value = damage in hundredths; local only. */
+export const PMEV_FALL_DAMAGE = 10;
+/** Landed on a player's head at goomba speed (§2.11); value = the victim's id; local only. */
+export const PMEV_GOOMBA = 11;
 
 export const PMOVE_EVENTS_CAPACITY = 8;
 

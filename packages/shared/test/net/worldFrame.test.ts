@@ -9,6 +9,8 @@ import {
   FRAME_SLOTS,
   FrameRing,
   frameDigest,
+  LF_COUNT,
+  LF_HEALTH,
   MASK_PENDING_HI,
   MASK_PENDING_LO,
   MASK_PRESENT_HI,
@@ -20,10 +22,21 @@ import {
 } from "../../src/net/worldFrame";
 import { Mulberry32 } from "../../src/rng/mulberry32";
 import { ENTITY_FLAG_MASK, MATCH_MAX_CLIENTS } from "../../src/sim/entity";
-import { PMEV_JUMP, PMEV_LAND, PMEV_NONE, PMEV_STEP, PmoveEvent } from "../../src/sim/events";
+import {
+  PMEV_BOOT,
+  PMEV_GRAB,
+  PMEV_JUMP,
+  PMEV_LAND,
+  PMEV_NONE,
+  PMEV_STEP,
+  PMEV_WALLKICK,
+  PMEV_WATER_JUMP,
+  PmoveEvent,
+} from "../../src/sim/events";
 import {
   PlayerState,
   PMF_CROUCH_PRESSED_IN_AIR,
+  PMF_GRAB_LOCK,
   PMF_JUMP_HELD,
   PMF_MASK,
   playerStateEquals,
@@ -34,7 +47,14 @@ describe("WorldFrame (M3 design §2.2)", () => {
   it("has a slot per client id, and the entity flag mask drops the owner-only bits", () => {
     expect(FRAME_SLOTS).toBe(MATCH_MAX_CLIENTS);
     expect(MATCH_MAX_CLIENTS).toBe(64);
-    expect(ENTITY_FLAG_MASK).toBe(PMF_MASK & ~(PMF_JUMP_HELD | PMF_CROUCH_PRESSED_IN_AIR));
+    expect(ENTITY_FLAG_MASK).toBe(
+      PMF_MASK & ~(PMF_JUMP_HELD | PMF_CROUCH_PRESSED_IN_AIR | PMF_GRAB_LOCK),
+    );
+    // The record's flags field stays 10 bits (M4 design §2.2: entity records unchanged).
+    expect(ENTITY_FLAG_MASK).toBeLessThan(1 << 10);
+    // The v4 local-only fields: one strided lane per field (M4 design §2.2).
+    expect(LF_COUNT).toBe(11);
+    expect(new WorldFrame().locals.length).toBe(FRAME_SLOTS * LF_COUNT);
   });
 
   it("carries a quantized PlayerState through a slot bit for bit", () => {
@@ -108,6 +128,7 @@ describe("WorldFrame (M3 design §2.2)", () => {
     ["ground1", f.ground1, 1],
     ["waterLevel", f.waterLevel, 1],
     ["stamina", f.stamina, 1],
+    ["locals", f.locals, LF_COUNT],
     ["team", f.team, 1],
     ["teleportSeq", f.teleportSeq, 1],
     ["eventSeq", f.eventSeq, 1],
@@ -229,6 +250,7 @@ describe("WorldFrame (M3 design §2.2)", () => {
     ] as const) {
       field(name, arr, 5);
     }
+    for (let i = 0; i < LF_COUNT; i++) field(`locals lane ${i}`, f.locals, 5 * LF_COUNT + i);
     for (const [name, arr] of [
       ["originX", f.originX],
       ["originZ", f.originZ],
@@ -265,6 +287,13 @@ describe("WorldFrame (M3 design §2.2)", () => {
       ["entVelX[self]", () => (f.entVelX[5] = (f.entVelX[5] as number) + 1)],
       ["vel16X[remote]", () => (f.vel16X[remote] = (f.vel16X[remote] as number) + 1)],
       ["stamina[remote]", () => (f.stamina[remote] = (f.stamina[remote] as number) + 1)],
+      [
+        "health[remote]",
+        () =>
+          (f.locals[remote * LF_COUNT + LF_HEALTH] =
+            (f.locals[remote * LF_COUNT + LF_HEALTH] as number) + 1),
+      ],
+      ["grab lock[remote]", () => (f.flags[remote] = (f.flags[remote] as number) ^ PMF_GRAB_LOCK)],
       ["jump held[remote]", () => (f.flags[remote] = (f.flags[remote] as number) ^ PMF_JUMP_HELD)],
       ["serial", () => (f.serial[remote] = (f.serial[remote] as number) + 1)],
     ];
@@ -306,6 +335,16 @@ describe("entity events (M3 design §2.1, §2.4)", () => {
     expect(value(PMEV_LAND, Number.NaN)).toBe(0);
     expect(value(PMEV_JUMP, 123)).toBe(0);
     expect(value(PMEV_NONE, 5)).toBe(0);
+  });
+
+  it("carries BOOT's victim id and 0 for the other v4 wire kinds (M4 design §2.2)", () => {
+    expect(value(PMEV_BOOT, 17)).toBe(17);
+    expect(value(PMEV_BOOT, 63)).toBe(63);
+    expect(value(PMEV_BOOT, 99)).toBe(63);
+    expect(value(PMEV_BOOT, -1)).toBe(0);
+    for (const kind of [PMEV_WALLKICK, PMEV_GRAB, PMEV_WATER_JUMP]) {
+      expect(value(kind, 300), `kind ${kind}`).toBe(0);
+    }
   });
 
   it("keeps the two newest, newest first, and a wrapping count", () => {

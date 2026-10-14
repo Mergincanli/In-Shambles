@@ -1,4 +1,5 @@
 import {
+  ARMOR_VEST,
   BitReader,
   BitWriter,
   BUTTON_ATTACK,
@@ -22,7 +23,6 @@ import {
   decodeReady,
   demoHeaderProblem,
   ENTITY_EVENT_SLOTS,
-  ENTITY_NONE,
   EV_LEAVE_KICKED,
   EV_LEAVE_LEFT,
   EV_LEAVE_TIMED_OUT,
@@ -55,7 +55,9 @@ import {
   MSG_PING,
   MSG_READY,
   PingMsg,
+  PLAYER_STAMINA_FULL,
   type PlayerState,
+  PMEV_WIRE_MAX,
   PmoveEvent,
   PmoveEvents,
   PmoveParams,
@@ -75,6 +77,7 @@ import {
   registerPmoveCvars,
   registerServerReplicatedCvars,
   registryCvarHash,
+  resetPlayerStateForSpawn,
   SNAP_FIT_MAX_PLAYERS,
   SNAP_FLAG_STARVED,
   SNAP_STARVE_SEQ_MASK,
@@ -151,7 +154,7 @@ export const SERVER_STATS_INTERVAL_TICKS = TICK_RATE;
 export type EventsTarget = Pick<Transport, "sendReliable">;
 
 /** Stamina at spawn, in hundredths: staminaMax = health 100 with no vest (docs/03 §5.2, FACT). */
-export const SPAWN_STAMINA = 100 * 100;
+export const SPAWN_STAMINA = PLAYER_STAMINA_FULL;
 
 export interface MatchOptions {
   readonly cmap: Cmap;
@@ -220,6 +223,32 @@ export interface MatchOptions {
    * cannot.
    */
   readonly demos?: DemoHost;
+  /**
+   * `sv_spawnVest` (M4 design §2.4, D-053; design until M6 loadouts): every spawn wears the vest
+   * (armor bit 0). Default false. Prediction reads the state's armor, never this setting.
+   */
+  readonly spawnVest?: boolean;
+}
+
+/**
+ * Files one pmove call's events into slot `id`'s entity event history, oldest first so the newest
+ * ends first (docs/05 §10), each value as an entity record carries it. Kinds past PMEV_WIRE_MAX
+ * stay local (M4 design §2.2, D-053): no record may carry them, so they are skipped, never filed
+ * (the encoder would refuse every snapshot holding one). `ev` is scratch. Allocates nothing.
+ */
+export function fileEntityEvents(
+  events: PmoveEvents,
+  ev: PmoveEvent,
+  eventSeqs: Uint8Array,
+  evKinds: Uint8Array,
+  evValues: Uint8Array,
+  id: number,
+): void {
+  for (let i = 0; i < events.count; i++) {
+    events.read(i, ev);
+    if (ev.type > PMEV_WIRE_MAX) continue;
+    pushEntityEvent(eventSeqs, evKinds, evValues, id, ev.type, entityEventValue(ev));
+  }
 }
 
 /** Match-wide counters (live). */
@@ -318,12 +347,12 @@ function freeClientId(sessions: readonly Session[], cap: number): number {
  *    tick is not simulated: its spawn state is its state at T.
  * 6. Capture the world frame of T into the 64-tick world history every client's baseline comes
  *    from: every active player's state, serial, team, teleport counter and event history.
- * 7. Per active client: the SNAPSHOT of T (protocol v3, D-033, D-038): a delta against the frame of
- *    the newest valid tick the client acked (`lastSnapshotTick` of its INPUTs), or a full one when
- *    none is usable; its own state as the local block, every other active player as an entity
- *    record, inputBufferHealth = newest cmd tick received − T (clamped to i8), flagged STARVED
- *    when step 5 starved the client at T, with the client's starve counter (D-050).
- *    When its worst case is past 1100 B the byte-budget scheduler (D-046, `scheduler.ts`) leaves
+ * 7. Per active client: the SNAPSHOT of T (protocol v4, D-033, D-038, D-053): a delta against the
+ *    frame of the newest valid tick the client acked (`lastSnapshotTick` of its INPUTs), or a full
+ *    one when none is usable; its own state as the local block, every other active player as an
+ *    entity record, inputBufferHealth = newest cmd tick received − T (clamped to i8), flagged
+ *    STARVED when step 5 starved the client at T, with the client's starve counter (D-050). When
+ *    its worst case is past 1100 B the byte-budget scheduler (D-046, `scheduler.ts`) leaves
  *    some players out, never one two ticks in a row; the tick counts as sent only once it encoded.
  *    Then its EVENTS (D-043): the roster changes since its last flush (its JOIN burst when it has
  *    just joined: every player present, then itself; then each JOIN and LEAVE), and on every 60th
@@ -382,6 +411,8 @@ export class Match implements MatchAdmin {
   /** Rate limits, strike levels and timeouts (D-041). */
   readonly limits: SessionLimits;
   private readonly timeouts: boolean;
+  /** ARMOR_* bits every spawn wears (`sv_spawnVest`, MatchOptions.spawnVest). */
+  private readonly spawnArmor: number;
   private readonly sessions: Session[] = [];
   private currentTick = 0;
   private anyClosed = false;
@@ -452,6 +483,7 @@ export class Match implements MatchAdmin {
     this.demoHost = options.demos ?? null;
     this.limits = options.limits ?? new SessionLimits();
     this.timeouts = options.timeouts ?? false;
+    this.spawnArmor = options.spawnVest === true ? ARMOR_VEST : 0;
     let cvars = options.cvars;
     if (cvars === undefined) {
       cvars = new CvarRegistry();
@@ -1160,26 +1192,24 @@ export class Match implements MatchAdmin {
 
   /**
    * The player appears at the next spawn point of the rotation at rest, facing its yaw, with full
-   * stamina, grounded if the ground trace finds walkable ground. Its state at tick `t` is this
-   * spawn state; simulation starts at t + 1, and the slot's teleport counter steps (D-035). The
-   * repeated cmd for a starved tick starts as a neutral one with the spawn yaw, which is what the
-   * client predicts with before its first real cmd (M2 design §2, "Client clock"); a joining
-   * client takes its view from the spawn state, so it keeps facing the yaw, while a respawned
-   * one's cmds turn it back to its own view from t + 1.
+   * health and stamina (`resetPlayerStateForSpawn`), grounded if the ground trace finds walkable
+   * ground. Its state at tick `t` is this spawn state; simulation starts at t + 1, and the slot's
+   * teleport counter steps (D-035). The repeated cmd for a starved tick starts as a neutral one
+   * with the spawn yaw, which is what the client predicts with before its first real cmd (M2 design
+   * §2, "Client clock"); a joining client takes its view from the spawn state, so it keeps facing
+   * the yaw, while a respawned one's cmds turn it back to its own view from t + 1.
    */
   private spawn(s: Session, t: number): void {
     const ps: PlayerState = s.player;
     const spawns = this.spawns;
     const point = spawns.take();
     const yaw = spawns.yaw(point);
+    // Every field a spawn resets, v4's included (M4 design §2.2): full health and stamina, the
+    // vest from `sv_spawnVest` (until M6 loadouts), every counter and timer 0.
+    resetPlayerStateForSpawn(ps, this.spawnArmor);
     spawns.origin(point, ps.origin);
-    ps.velocity.fill(0);
     ps.viewYaw = yaw;
     ps.viewPitch = 0;
-    ps.flags = 0;
-    ps.groundEntity = ENTITY_NONE;
-    ps.waterLevel = 0;
-    ps.stamina = SPAWN_STAMINA;
     groundTrace(ps, this.world, this.params, HULL_MINS, HULL_STANDING_MAXS, false, null);
     quantizePlayerState(ps);
     const c = s.lastCmd;
@@ -1229,20 +1259,7 @@ export class Match implements MatchAdmin {
     const events = this.events;
     events.clear();
     pmove(s.player, cmd, this.world, this.params, TICK_DT, events, null);
-    // Oldest first, so the newest ends first in the slot's history (docs/05 §10).
-    const ev = this.event;
-    const id = s.clientId;
-    for (let i = 0; i < events.count; i++) {
-      events.read(i, ev);
-      pushEntityEvent(
-        this.eventSeqs,
-        this.evKinds,
-        this.evValues,
-        id,
-        ev.type,
-        entityEventValue(ev),
-      );
-    }
+    fileEntityEvents(events, this.event, this.eventSeqs, this.evKinds, this.evValues, s.clientId);
   }
 
   /** Copies the registry into the params and the block; true when the replicated block changed. */
@@ -1332,6 +1349,7 @@ export class Match implements MatchAdmin {
     const h = this.snapHeader;
     h.flags = s.snapFlags;
     h.starveSeq = s.starveSeq;
+    h.contactSeq = s.contactSeq;
     h.cvarHash = this.blockHash16;
     h.inputBufferHealth = Math.max(-128, Math.min(127, s.queue.newestTick - t));
     const w = this.writer;

@@ -83,6 +83,8 @@ import {
   decodeSnapshotBody,
   decodeSnapshotHeader,
   ENTITY_NEW_BITS,
+  EVK_HIT_CONFIRM,
+  EVK_PLAYER_DEATH,
   EVK_PLAYER_JOIN,
   EVK_PLAYER_LEAVE,
   EVK_SERVER_STATS,
@@ -105,6 +107,14 @@ import {
   HULL_MINS,
   HULL_STANDING_MAXS,
   InputMsg,
+  LF_CLIMB_HEIGHT,
+  LF_CLIMB_YAW,
+  LF_COUNT,
+  LF_HEALTH,
+  LF_REGEN_DELAY,
+  LF_REGRAB,
+  LF_SUBMERGED,
+  LOCAL_MASK_BITS,
   type LoopbackEndpoint,
   MASK_PLAYERSOLID,
   MAX_RELIABLE_BYTES,
@@ -124,6 +134,7 @@ import {
   PlayerStateRing,
   PMEV_LAND,
   PMEV_STEP,
+  PMF_CLIMBING,
   PMF_CROUCHED,
   PMF_GROUNDED,
   PMF_ON_LADDER,
@@ -145,6 +156,8 @@ import {
   refreshPmoveParams,
   registerPmoveCvars,
   rotatedBoxPlanes,
+  SNAP_CONTACT_SEQ_BITS,
+  SNAP_CONTACT_SEQ_MASK,
   SNAP_FLAG_DEFERRED,
   SNAP_FLAG_SPECTATOR,
   SNAP_FLAG_STARVED,
@@ -242,6 +255,20 @@ function runQuantize(n: number): void {
     v[2] = e[2] * 0.1;
     ps.viewYaw = i;
     ps.stamina = i & 4095;
+    // The v4 fields (D-053) off their grid, out of range and with CLIMBING toggling, so both
+    // canonical branches run and a fractional climbHeight reaches the clamp.
+    ps.flags = (i & 8) !== 0 ? PMF_CLIMBING : 0;
+    ps.health = e[0] * 7.25;
+    ps.wallJumps = i & 15;
+    ps.armor = i & 7;
+    ps.submerged = e[1] * 3.5;
+    ps.climbHeight = e[2] * 0.37;
+    ps.climbYaw = i & 511;
+    ps.regenDelay = i & 255;
+    ps.kickCooldown = (i >> 1) & 127;
+    ps.regrab = i & 31;
+    ps.waterJump = (i >> 2) & 127;
+    ps.bandage = i & 511;
     quantizePlayerState(ps);
   }
 }
@@ -684,8 +711,9 @@ const eventsWriter = new BitWriter(MAX_RELIABLE_BYTES);
 const eventsSent = new EventsMsg();
 const eventsGot = new EventsMsg();
 /**
- * EVENTS the decoder must refuse (D-043): a count of 0, kinds 0, 4 and 15, a JOIN's team 3, a
- * LEAVE's reason 3, SERVER_STATS players 65, a truncated message and one with an extra byte; each
+ * EVENTS the decoder must refuse (D-043, D-053): a count of 0, kinds 0, 6 and 15, a JOIN's team
+ * 3, a LEAVE's reason 3, SERVER_STATS players 65, a death cause 5, a hit cause 2, a truncated
+ * message and one with an extra byte; each
  * a patch of a valid message, which must decode at load (so a layout slip can't refuse them all
  * on misaligned bits).
  */
@@ -697,6 +725,7 @@ const hostileEvents: Uint8Array[] = [];
     e.clientId = 5;
     e.team = kind === EVK_PLAYER_JOIN ? 2 : 0;
     e.players = kind === EVK_SERVER_STATS ? 64 : 0;
+    e.victim = 5;
     eventsWriter.reset();
     if (!encodeEvents(eventsWriter, eventsSent)) throw new Error("hostile EVENTS: base");
     const bytes = eventsWriter.bytes.slice(0, eventsWriter.byteLength);
@@ -713,11 +742,14 @@ const hostileEvents: Uint8Array[] = [];
   hostileEvents.push(
     patched(EVK_PLAYER_JOIN, 8, 6, 0),
     patched(EVK_PLAYER_JOIN, 14, 4, 0),
-    patched(EVK_PLAYER_JOIN, 14, 4, 4),
+    patched(EVK_PLAYER_JOIN, 14, 4, 6),
     patched(EVK_PLAYER_JOIN, 14, 4, 15),
     patched(EVK_PLAYER_JOIN, 24, 2, 3),
     patched(EVK_PLAYER_LEAVE, 24, 2, 3),
     patched(EVK_SERVER_STATS, 66, 7, 65),
+    // DEATH and HIT_CONFIRM: victim 18–23, cause 24–26.
+    patched(EVK_PLAYER_DEATH, 24, 3, 5),
+    patched(EVK_HIT_CONFIRM, 24, 3, 2),
   );
   const stats = one(EVK_SERVER_STATS);
   hostileEvents.push(stats.slice(0, stats.length - 1));
@@ -728,9 +760,10 @@ const hostileEvents: Uint8Array[] = [];
 const HOSTILE_EVENTS = hostileEvents.length;
 
 /**
- * The per-tick messages (D-026, D-033): SNAPSHOT (a full v3 snapshot of a 16-player frame whose
- * players take quantized states with fractional origin and velocity, written into the frame as the
- * match captures them, for a rotating receiver, with every starve counter value in turn (D-050);
+ * The per-tick messages (D-026, D-033): SNAPSHOT (a full v4 snapshot of a 16-player frame whose
+ * players take quantized states with fractional origin and velocity and moving v4 fields, written
+ * into the frame as the match captures them, for a rotating receiver, with every starve and
+ * contact counter value in turn, D-050, D-053;
  * decoded header then body as the client's store does), INPUT with 1–4 cmds, PING and PONG, each
  * encoded, dispatched on its type byte and decoded, then one hostile packet, which must be refused
  * without allocating either. Outcomes: snapshots (the receiver's state back exactly), inputs,
@@ -757,6 +790,19 @@ function runCodec(n: number): void {
       s.groundEntity = (i & 1) === 0 ? -1 : 32767;
       s.waterLevel = i;
       s.stamina = i & 4095;
+      // The v4 fields (D-053): every lane moves; the climb's only count while CLIMBING (flags bit
+      // 3, which `i` sets every 16th call of 16), quantize zeroes them otherwise.
+      s.wallJumps = i;
+      s.health = i * 3;
+      s.armor = i >> 2;
+      s.submerged = i * 5;
+      s.climbHeight = ((i * 11) & 4095) - 2048;
+      s.climbYaw = i >> 3;
+      s.regenDelay = i;
+      s.kickCooldown = i >> 1;
+      s.regrab = i >> 4;
+      s.waterJump = i;
+      s.bandage = i >> 1;
       quantizePlayerState(s);
       const self = (i >> 2) & (CODEC_PLAYERS - 1);
       const tick = i + 1;
@@ -770,6 +816,7 @@ function runCodec(n: number): void {
       snapHeader.cvarHash = i & 0xffff;
       snapHeader.flags = i & 1;
       snapHeader.starveSeq = (i >> 2) & SNAP_STARVE_SEQ_MASK;
+      snapHeader.contactSeq = (i >> 3) & SNAP_CONTACT_SEQ_MASK;
       encodeSnapshot(w, snapHeader, snapFrame, null, self);
     } else if (kind === 1) {
       inputSent.packetSeq = i & 0xffff;
@@ -835,20 +882,28 @@ function runCodec(n: number): void {
 }
 
 /**
- * Every fourth call (D-043): an EVENTS of 1–63 events of the three kinds round-trips, then a
- * hostile one is refused.
+ * Every fourth call (D-043, D-053): an EVENTS of 1–63 events of the five kinds round-trips, then
+ * a hostile one is refused.
  */
 function codecEvents(i: number): void {
   const m = eventsSent;
   m.count = 0;
   const n = 1 + ((i >> 2) % 63);
   for (let k = 0; k < n; k++) {
-    const kind = 1 + ((i + k) % 3);
+    const kind = 1 + ((i + k) % 5);
     const e = m.add(kind) as EventRecord;
-    if (kind !== EVK_SERVER_STATS) e.clientId = (i + k) & 63;
+    if (kind === EVK_PLAYER_JOIN || kind === EVK_PLAYER_LEAVE) e.clientId = (i + k) & 63;
     if (kind === EVK_PLAYER_JOIN) e.team = k % 3;
     else if (kind === EVK_PLAYER_LEAVE) e.reason = k % 3;
-    else {
+    else if (kind === EVK_PLAYER_DEATH) {
+      e.victim = (i + k) & 63;
+      e.cause = k % 5;
+      e.hasKiller = k & 1;
+      e.killer = (k & 1) * ((i + 3) & 63);
+    } else if (kind === EVK_HIT_CONFIRM) {
+      e.victim = (i + k) & 63;
+      e.cause = k & 1;
+    } else {
       e.tickP50Us = i & 0xffff;
       e.tickP99Us = (i * 3) & 0xffff;
       e.tickMaxUs = 0xffff;
@@ -863,7 +918,13 @@ function codecEvents(i: number): void {
   if (peekMessageType(w.bytes, w.byteLength) === MSG_EVENTS && decodeEvents(r, eventsGot)) {
     const got = eventsGot.events[n - 1] as EventRecord;
     const sent = m.events[n - 1] as EventRecord;
-    if (eventsGot.count === n && got.kind === sent.kind && got.clientId === sent.clientId) {
+    if (
+      eventsGot.count === n &&
+      got.kind === sent.kind &&
+      got.clientId === sent.clientId &&
+      got.victim === sent.victim &&
+      got.killer === sent.killer
+    ) {
       eventCounts[0] = (eventCounts[0] as number) + 1;
     }
   }
@@ -906,6 +967,23 @@ function dcCapture(t: number): WorldFrame {
     f.entVelX[p] = entityVelocity(f.vel16X[p] as number);
     f.yaw[p] = (t * 91 + p * 4099) & 0xffff;
   }
+  // The receiver's v4 lanes (D-053) change now and then, so the delta local block's lane branches
+  // run set and clear; the climb pair only while CLIMBING, cleared with it (the canonical rule).
+  const lc = f.locals;
+  const l = DC_SELF * LF_COUNT;
+  if ((t & 3) === 0) lc[l + LF_HEALTH] = (t * 7) & 0x3fff;
+  lc[l + LF_SUBMERGED] = (t >> 1) & 2047;
+  if ((t & 7) === 0) lc[l + LF_REGEN_DELAY] = t & 127;
+  if ((t & 5) === 0) lc[l + LF_REGRAB] = t & 15;
+  if ((t & 31) < 8) {
+    f.flags[DC_SELF] = (f.flags[DC_SELF] as number) | PMF_CLIMBING;
+    lc[l + LF_CLIMB_HEIGHT] = ((t * 37) & 4095) - 2048;
+    lc[l + LF_CLIMB_YAW] = (t * 3) & 255;
+  } else {
+    f.flags[DC_SELF] = (f.flags[DC_SELF] as number) & ~PMF_CLIMBING;
+    lc[l + LF_CLIMB_HEIGHT] = 0;
+    lc[l + LF_CLIMB_YAW] = 0;
+  }
   // Player 15 leaves for 32 ticks of every 256 and comes back as a new incarnation.
   if ((t & 255) < 32) f.setAbsent(DC_PLAYERS - 1);
   else if ((t & 255) === 32) {
@@ -923,7 +1001,7 @@ function dcCapture(t: number): WorldFrame {
 
 /**
  * A hostile delta's header (tick 1000, 10 back, `flags`: SNAP_FLAG_DEFERRED when a deferred list
- * follows the records) and no local change; `count` records follow.
+ * follows the records, contact counter 0) and no local change; `count` records follow.
  */
 function dcHostileStart(w: BitWriter, count: number, flags = 0): void {
   w.reset();
@@ -935,8 +1013,10 @@ function dcHostileStart(w: BitWriter, count: number, flags = 0): void {
   w.writeBits(0, 8);
   w.writeBits(0, 16);
   w.writeBits(0, 8);
+  // contactSeq (v4, D-053).
+  w.writeBits(0, SNAP_CONTACT_SEQ_BITS);
   // The delta local block's mask: no local change.
-  w.writeBits(0, 8);
+  w.writeBits(0, LOCAL_MASK_BITS);
   w.writeBits(count, 7);
 }
 
@@ -997,7 +1077,7 @@ const dcHostile: Uint8Array[] = [];
   w.writeBits(0x8000, 16);
   w.writeBits(0, 4);
   done();
-  // Event kind 4, after two good records.
+  // Event kind 8 (SLIDE_START, local only since v4), after two good records.
   dcHostileStart(w, 3);
   dcRecord(w, 3, 4);
   w.writeBits(1, 16);
@@ -1005,7 +1085,7 @@ const dcHostile: Uint8Array[] = [];
   w.writeBits(1, 16);
   dcRecord(w, 40, 128);
   w.writeBits(1, 8);
-  w.writeBits(4, 4);
+  w.writeBits(8, 4);
   w.writeBits(0, 20);
   done();
   // A deferred list (D-046) of count 0.
@@ -1183,6 +1263,13 @@ function dc64Step(w: BitWriter, r: BitReader, h: SnapshotHeader, i: number): voi
   }
 }
 
+/** Whether slot `s`'s v4 local lanes (D-053) agree in `got` and `cur`. */
+function sameLocals(got: WorldFrame, cur: WorldFrame, s: number): boolean {
+  const l = s * LF_COUNT;
+  for (let k = 0; k < LF_COUNT; k++) if (got.locals[l + k] !== cur.locals[l + k]) return false;
+  return true;
+}
+
 /**
  * Whether the client's frame `got` holds what the server's `cur` does as DC_SELF sees it (what
  * frameDigest hashes, compared field by field: a digest's uint32 would box here).
@@ -1203,7 +1290,11 @@ function dcSame(got: WorldFrame, cur: WorldFrame): boolean {
       got.yaw[s] !== cur.yaw[s] ||
       got.pitch[s] !== cur.pitch[s] ||
       got.flags[s] !== cur.flags[s] ||
-      got.teleportSeq[s] !== cur.teleportSeq[s]
+      got.ground1[s] !== cur.ground1[s] ||
+      got.waterLevel[s] !== cur.waterLevel[s] ||
+      got.stamina[s] !== cur.stamina[s] ||
+      got.teleportSeq[s] !== cur.teleportSeq[s] ||
+      !sameLocals(got, cur, s)
     ) {
       return false;
     }
@@ -1762,7 +1853,8 @@ function sameFrame(got: WorldFrame, cur: WorldFrame, self: number): boolean {
       got.ground1[s] !== cur.ground1[s] ||
       got.waterLevel[s] !== cur.waterLevel[s] ||
       got.stamina[s] !== cur.stamina[s] ||
-      got.teleportSeq[s] !== cur.teleportSeq[s]
+      got.teleportSeq[s] !== cur.teleportSeq[s] ||
+      !sameLocals(got, cur, s)
     ) {
       return false;
     }

@@ -26,10 +26,11 @@ import { type ClientMirror, type MirrorPool, sentFrame } from "./mirror";
  * SNAP_BUDGET_BITS (1100 B), never leaving a player out two ticks in a row and never delaying a
  * removal:
  *
- * 1. **Worst-case check** (O(1), the bypass): W = 312 + 233 p + 17 r for a delta (p remotes present
- *    now, r slots the baseline holds, pending included, that are gone now), 292 + 213 p for a full
- *    snapshot. W ≤ 8800 bits: everything goes, no size pass, the frame is plain. That holds while
- *    baseline and current frame hold ≤ 37 players by id, so at the default 32 it always holds.
+ * 1. **Worst-case check** (O(1), the bypass): W = 408 + 233 p + 17 r for a delta (p remotes present
+ *    now, r slots the baseline holds, pending included, that are gone now), 378 + 213 p for a full
+ *    snapshot (protocol v4, D-053). W ≤ 8800 bits: everything goes, no size pass, the frame is
+ *    plain. That holds while baseline and current frame hold ≤ 37 players by id, so at the default
+ *    32 it always holds.
  * 2. **Size pass:** the exact bits of every record (`entityRecordBits`). If they fit, everything
  *    goes (the frame is still plain).
  * 3. **Selection:** removals (17 bits) always go. Every other record is reserved at its out cost,
@@ -41,14 +42,18 @@ import { type ClientMirror, type MirrorPool, sentFrame } from "./mirror";
  *    player the client was already sent ranks just above the other staleness-1 records, so it
  *    does not blink out while the ack catches up), then the tick it was last
  *    left out descending (so the players left out longest ago go out next: update rates rotate),
- *    then id ascending; one that does not fit is left out and the scan goes on (first fit).
+ *    then id ascending counted from that tick & 63 (so a group left out together does not always
+ *    lose its highest ids: under v4's sizes a plain id order locked the worst crowd into a cycle
+ *    that left the 3 highest at 1 tick in 2, D-046 amended by D-053); one that does not fit is
+ *    left out and the scan goes on (first fit).
  *    Unchanged players cost nothing and are never left out.
  *
- * The bound (`SNAP_MIN_CAPACITY`, checked at load in `snapshot.ts`): at least 34 records fit any
- * delta snapshot (37 full), so at most 29 players are left out, and those are the only ones with
- * staleness 2 next tick: they sort first and always fit. A player left out of the snapshot of T
- * was carried fresh at T − 1, and is carried fresh at T + 1. If that ever failed (`overrun`, a
- * bug), the scan treats the stale ones like the rest and the match counts `sched_overrun`.
+ * The bound (`SNAP_MIN_CAPACITY`, checked at load in `snapshot.ts`): at least 33 records fit any
+ * delta snapshot (37 full; 34 in v3), so at most 30 players are left out, and those are the only
+ * ones with staleness 2 next tick: they sort first and always fit. A player left out of the
+ * snapshot of T was carried fresh at T − 1, and is carried fresh at T + 1. If that ever failed
+ * (`overrun`, a bug), the scan treats the stale ones like the rest and the match counts
+ * `sched_overrun`.
  *
  * Commit only on success: `schedule` writes the next `lastSent`/`lastDeferred`/`sentSerial` into
  * scratch rows; `commit` copies them once the snapshot encoded (`buildSnapshot`). Everything is
@@ -208,13 +213,19 @@ export class SnapshotScheduler {
         (reused && (state.sentSerial[s] as number) === (cur.serial[s] as number) ? 1 : 0);
       priority[s] = prio;
       used += out;
-      // Insertion by (priority desc, last left out desc, id asc); ids arrive ascending.
+      // Insertion by (priority desc, last left out desc, id asc from ld & 63): a tie group's
+      // order moves with the tick it was last left out together, so its cut rotates.
       const ld = lastDeferred[s] as number;
+      const rot = (s - ld) & (FRAME_SLOTS - 1);
       let j = n - 1;
       while (j >= 0) {
         const o = order[j] as number;
         const op = priority[o] as number;
-        if (op > prio || (op === prio && (lastDeferred[o] as number) >= ld)) break;
+        if (op > prio) break;
+        if (op === prio) {
+          const oLd = lastDeferred[o] as number;
+          if (oLd > ld || (oLd === ld && ((o - ld) & (FRAME_SLOTS - 1)) < rot)) break;
+        }
         order[j + 1] = o;
         j--;
       }

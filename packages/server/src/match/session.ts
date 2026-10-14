@@ -111,6 +111,13 @@ export class Session implements SnapshotClient {
    * seeds its count from the spawn snapshot.
    */
   starveSeq = 0;
+  /**
+   * The contact counter (M4 design §2.11, D-053): stepped on every tick this client's pmove
+   * touched another player or the server changed its state from outside its pmove, wrapping at 16
+   * (`SNAP_CONTACT_SEQ_MASK`), and carried by every snapshot it is sent, as the starve counter is.
+   * Protocol v4 carries it from M4 increment 2; nothing steps it before solid players (incr. 4).
+   */
+  contactSeq = 0;
   /** The slot's connect counter when this client took it (u16, wrapping): the entity's serial. */
   serial = 0;
   /** TEAM_*: TEAM_NONE until READY assigns one (D-034; cosmetic until M7). */

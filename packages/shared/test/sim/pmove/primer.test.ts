@@ -118,11 +118,12 @@ describe("pmove primer (D-040)", () => {
         cmd.buttons = t % 40 === 0 ? BUTTON_JUMP : 0;
         cmd.pitch = ((t * 53) % 6000) & 0xffff;
         pmove(ps, cmd, world, p, TICK_DT, null, null);
-        // Every field of the state, so a leak into any of them shows.
-        const o = ps.origin;
-        const v = ps.velocity;
-        out.push(o[0], o[1], o[2], v[0], v[1], v[2], ps.viewYaw, ps.viewPitch, ps.flags);
-        out.push(ps.groundEntity, ps.waterLevel, ps.stamina);
+        // Every field of the state (protocol v4's included, D-053: walked by key, so a field
+        // PlayerState gains is dumped too), so a leak into any of them shows.
+        for (const value of Object.values(ps) as (number | Float64Array)[]) {
+          if (typeof value === "number") out.push(value);
+          else out.push(...value);
+        }
       }
       return out;
     };

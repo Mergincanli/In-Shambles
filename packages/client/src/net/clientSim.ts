@@ -423,7 +423,7 @@ export class ClientSim {
     return this.connection.state;
   }
 
-  /** The snapshots received, by tick (protocol v3's frames, D-033, D-050). */
+  /** The snapshots received, by tick (protocol v4's frames, D-033, D-050, D-053). */
   get store(): SnapshotStore {
     return this.connection.store;
   }

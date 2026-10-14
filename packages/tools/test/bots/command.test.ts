@@ -616,10 +616,10 @@ describe.concurrent("a bots run", () => {
     for (const b of summary.bots) {
       expect(b.snapshots, `bot ${b.id}`).toBeGreaterThan(100);
       // Deltas against the acked frames (D-038) once the bots are in: at most the worst delta of
-      // two other players, 312 + 2 × 233 bits (98 B); measured about 30 B, 2.1 KB/s down, where
-      // full snapshots (90 B: 86 + 199 + 7 + 2 × 213 bits) would take 5.5 KB/s.
+      // two other players, 408 + 2 × 233 bits (110 B, protocol v4); measured about 30 B, 2.1 KB/s
+      // down, where full snapshots (101 B: 90 + 281 + 7 + 2 × 213 bits) would take 6 KB/s.
       expect(b.deltaShare, `bot ${b.id}`).toBeGreaterThan(0.9);
-      expect(b.snapshotBytes.max, `bot ${b.id}`).toBeLessThanOrEqual(98);
+      expect(b.snapshotBytes.max, `bot ${b.id}`).toBeLessThanOrEqual(110);
       expect(b.kbDownPerS, `bot ${b.id}`).toBeGreaterThan(1);
       expect(b.kbDownPerS, `bot ${b.id}`).toBeLessThan(4.5);
       expect(b.kbUpPerS, `bot ${b.id}`).toBeGreaterThan(2);

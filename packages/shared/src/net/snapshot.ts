@@ -1,15 +1,46 @@
 import { PITCH_LIMIT_U16 } from "../math/angles";
 import { ORIGIN_LIMIT, ORIGIN_SCALE, toSigned16 } from "../math/quant";
 import { ENTITY_FLAG_MASK, ENTITY_WORLD, MATCH_MAX_CLIENTS, TEAM_2 } from "../sim/entity";
-import { PMEV_JUMP, PMEV_LAND, PMEV_NONE } from "../sim/events";
-import { PlayerState } from "../sim/playerState";
+import {
+  PMEV_BOOT,
+  PMEV_GRAB,
+  PMEV_JUMP,
+  PMEV_NONE,
+  PMEV_WALLKICK,
+  PMEV_WATER_JUMP,
+  PMEV_WIRE_MAX,
+} from "../sim/events";
+import {
+  ARMOR_BITS,
+  BANDAGE_BITS,
+  CLIMB_HEIGHT_BITS,
+  CLIMB_YAW_BITS,
+  HEALTH_BITS,
+  KICK_COOLDOWN_BITS,
+  PlayerState,
+  PMF_BITS,
+  PMF_MASK,
+  REGEN_DELAY_BITS,
+  REGRAB_BITS,
+  SUBMERGED_BITS,
+  WALL_JUMPS_BITS,
+  WATER_JUMP_BITS,
+} from "../sim/playerState";
+import { PMOVE_CVARS } from "../sim/pmove/params";
+import { TICK_RATE } from "../time";
 import type { BitReader, BitWriter } from "./bitstream";
 import { readTick, writeTick } from "./messages";
-import { decodePlayerState, encodePlayerState, PLAYER_STATE_BITS } from "./playerStateCodec";
+import {
+  climbFieldsCanonical,
+  decodePlayerState,
+  encodePlayerState,
+  PLAYER_STATE_BITS,
+} from "./playerStateCodec";
 import {
   MAX_SPECTATOR_SNAPSHOT_BYTES,
   MSG_SNAPSHOT,
   SNAP_BUDGET_BITS,
+  SNAP_CONTACT_SEQ_BITS,
   SNAP_ENTITY_VELOCITY_D1,
   SNAP_ENTITY_VELOCITY_D2,
   SNAP_FLAG_BITS,
@@ -25,17 +56,22 @@ import {
   SNAPSHOT_HISTORY,
 } from "./protocol";
 import {
+  clearLocals,
   ENTITY_EVENT_SLOTS,
   ENTITY_VELOCITY_MAX,
   entityVelocity,
   FRAME_SLOTS,
+  LF_CLIMB_HEIGHT,
+  LF_CLIMB_YAW,
+  LF_COUNT,
   playerStateToSlot,
   slotToPlayerState,
   type WorldFrame,
 } from "./worldFrame";
 
 /**
- * SNAPSHOT, protocol v3 (docs/05 §3.6, M3 design §2.1, D-033, D-038, D-050): a header, the
+ * SNAPSHOT, protocol v4 (docs/05 §3.6, M3 design §2.1, M4 design §2.2, D-033, D-038, D-050,
+ * D-053): a header, the
  * receiver's local block, then an entity record per other player that changed against the
  * baseline (entity id = client id), ids ascending. A full snapshot (`baseBack` 0) has no baseline:
  * the full local block and a "new" record per present player. A delta (`baseBack` 1–63) is coded
@@ -58,7 +94,8 @@ import {
  * | cvarHash | 16 |
  * | inputBufferHealth | 8 (i8; not when spectator) |
  * | teleportSeq | 8 (not when spectator; D-035) |
- * | local block | the full PlayerState, 199; or a delta, 8–219 (not when spectator) |
+ * | contactSeq | 4 (not when spectator; the receiver's contact counter, D-053) |
+ * | local block | the full PlayerState, 281; or a delta, 18–311 (not when spectator) |
  * | entityCount | 7 (0…63; 0…64 when spectator) |
  * | entity records | 213 new, 17 removed, 28–233 a delta body |
  * | deferred list | only with DEFERRED: count 6 (1…63), then ids u16 strictly ascending |
@@ -66,14 +103,17 @@ import {
  * A full ("new") entity record: id 16 (< 64; the receiver's own refused unless spectator), removed
  * 1 (0), new 1 (1), origin 3 × i21 (1/32 u, ±16384 u), velocity 3 × i16 (1 u/s, ±32767), yaw 16,
  * pitch 16 (±16201), flags 10 (within ENTITY_FLAG_MASK), team 2 (0–2), teleportSeq 8, eventSeq 8,
- * two events of kind 4 (0 none, 1 STEP, 2 JUMP, 3 LAND) + value 8 (0 when empty; JUMP's is 0; an
- * empty first slot needs an empty second). A removal is id 16 + removed 1 (1), only for a slot the
- * baseline holds. A delta record is id 16, removed 0, new 0, a field mask 8 (origin, velocity,
- * yaw, pitch, flags, team, teleportSeq, events; never 0), then the set fields: origin and velocity
- * per axis a 2-bit class (0 same, 1 and 2 a difference, 3 the absolute value at the new body's
- * width), the rest at the new body's widths. The delta local block is a mask 8 (origin, velocity,
- * yaw, pitch, flags, groundEntity + 1, waterLevel, stamina; 0 = unchanged), then the set fields at
- * the full block's widths, origin and velocity class-coded like an entity's.
+ * two events of kind 4 (0 none, 1 STEP, 2 JUMP, 3 LAND, 4 WALLKICK, 5 GRAB, 6 BOOT, 7 WATER_JUMP;
+ * 8–15 refused) + value 8 (0 when empty and for JUMP, WALLKICK, GRAB and WATER_JUMP; BOOT's is the
+ * victim's id, < 64; an empty first slot needs an empty second). A removal is id 16 + removed 1
+ * (1), only for a slot the baseline holds. A delta record is id 16, removed 0, new 0, a field mask
+ * 8 (origin, velocity, yaw, pitch, flags, team, teleportSeq, events; never 0), then the set fields:
+ * origin and velocity per axis a 2-bit class (0 same, 1 and 2 a difference, 3 the absolute value at
+ * the new body's width), the rest at the new body's widths. The delta local block is a mask 18
+ * (origin, velocity, yaw, pitch, flags, groundEntity + 1, waterLevel, stamina, wallJumps, health,
+ * armor, submerged, climb (height and yaw together), regenDelay, kickCooldown, regrab, waterJump,
+ * bandage; 0 = unchanged), then the set fields at the full block's widths, origin and velocity
+ * class-coded like an entity's.
  *
  * "New" is a body format, not an incarnation signal (the client snaps on teleportSeq, D-035): the
  * encoder writes it when the baseline has no state for the slot, or holds another incarnation (a
@@ -92,8 +132,11 @@ import {
  * files only) at most MAX_SPECTATOR_SNAPSHOT_BYTES. Neither side allocates, refusals included.
  */
 
-/** Header bits with the type byte (M3 design §2.1): 86, or 70 without health and teleportSeq. */
-export const SNAP_HEADER_BITS = 86;
+/**
+ * Header bits with the type byte (M3 design §2.1, M4 design §2.2): 90, or 70 without
+ * inputBufferHealth, teleportSeq and contactSeq.
+ */
+export const SNAP_HEADER_BITS = 90;
 export const SNAP_SPECTATOR_HEADER_BITS = 70;
 export const SNAP_ENTITY_COUNT_BITS = 7;
 /** A full entity record, id, removed and new bits included. */
@@ -103,10 +146,10 @@ export const ENTITY_REMOVED_BITS = 17;
 /** The largest delta entity record: every field set, origin and velocity absolute. */
 export const ENTITY_DELTA_MAX_BITS = 233;
 /** The largest delta local block: every field set, origin and velocity absolute. */
-export const LOCAL_DELTA_MAX_BITS = 219;
+export const LOCAL_DELTA_MAX_BITS = 311;
 /** A full live snapshot with no other player: header, local block, entity count. */
 export const SNAP_FULL_FIXED_BITS = SNAP_HEADER_BITS + PLAYER_STATE_BITS + SNAP_ENTITY_COUNT_BITS;
-/** The largest delta live snapshot with no record: header, the largest local block, count (312). */
+/** The largest delta live snapshot with no record: header, the largest local block, count (408). */
 export const SNAP_DELTA_FIXED_BITS =
   SNAP_HEADER_BITS + LOCAL_DELTA_MAX_BITS + SNAP_ENTITY_COUNT_BITS;
 /** The deferred list's count (1…63) and each deferred id (u16, `docs/05` §4.2) (D-046). */
@@ -120,8 +163,9 @@ export const SNAP_REUSED_OUT_BITS = ENTITY_REMOVED_BITS;
 
 /**
  * The most players whose every snapshot fits SNAP_BUDGET_BITS without a scheduler (D-034): the
- * worst delta of the M3 design §2.1 size bounds is 312 + 233 bits per other player, so 36 others
- * fit (8700 bits, 1088 B) and 37 do not, as long as baseline and current frame together hold at
+ * worst delta (M4 design §2.2) is 408 + 233 bits per other player, so 36 others fit (8796 bits,
+ * 1100 B, with 4 bits to spare: M4 may not grow the local block or the header further without
+ * re-deciding 37 → 36) and 37 do not, as long as baseline and current frame together hold at
  * most this many players; the full form is smaller (both checked below). Above it (a match admits
  * up to 64, D-034 amendment) the D-046 byte-budget scheduler keeps every snapshot within
  * SNAP_BUDGET_BITS, deferring what does not fit, and sessions keep mirrors.
@@ -138,10 +182,10 @@ if (
 
 /**
  * The fewest records the byte-budget scheduler fits in any delta snapshot, whatever else it holds
- * (M3 design §2.3, D-046; derived, 34): every other slot costs at most 17 bits when it is left out
- * (a removal, a reused slot sent as removed, a deferred id), and a record at most 216 more, after
- * the fixed bits and the deferred count. With 63 other players and none of them free, ⌊(8800 −
- * 318 − 63 × 17) / (233 − 17)⌋ = 34.
+ * (M3 design §2.3, D-046; derived, 33 since protocol v4): every other slot costs at most 17 bits
+ * when it is left out (a removal, a reused slot sent as removed, a deferred id), and a record at
+ * most 216 more, after the fixed bits and the deferred count. With 63 other players and none of
+ * them free, ⌊(8800 − 414 − 63 × 17) / (233 − 17)⌋ = 33.
  */
 export const SNAP_MIN_CAPACITY = Math.floor(
   (SNAP_BUDGET_BITS -
@@ -161,7 +205,7 @@ export const SNAP_MIN_CAPACITY_FULL = Math.floor(
 /**
  * The most ticks a remote's freshest state in a client's sent stream may lag the snapshot
  * (D-046): the scheduler includes every player left out last tick first, and since at least
- * SNAP_MIN_CAPACITY records fit, at most 63 − 34 = 29 are ever left out, which always fit the next
+ * SNAP_MIN_CAPACITY records fit, at most 63 − 33 = 30 are ever left out, which always fit the next
  * snapshot. So nobody is left out two ticks in a row.
  */
 export const SNAP_MAX_STALENESS = 2;
@@ -178,7 +222,75 @@ if (
   throw new Error("snapshot layout: the byte-budget scheduler's staleness bound does not hold");
 }
 
-/** The fields before the local block, and `teleportSeq` (decode only: the own slot's, D-035). */
+/**
+ * The cvar ranges protocol v4's PlayerState widths were sized for (M4 design §2.2, D-053): a
+ * cvar of this name may never allow a value its field can't hold, or the field would saturate
+ * silently. Timers count ticks, so round(max s × 60) must fit the field; the wall-jump count must
+ * fit 3 bits; the climb height (ledge top − origin, in 1/32 u, the origin 24 u above the feet)
+ * must fit i12; the climb's pop height stays within −8…16 u. Each cvar arrives with the increment
+ * that simulates it and must take its range from here: `playerStateCvarWidthError` checks
+ * PMOVE_CVARS against this table at load, and a guard (`tools/test/guards/cvar-widths.test.ts`)
+ * every other package's tables, so a later range change fails instead of saturating a field.
+ */
+export const PLAYER_STATE_CVAR_LIMITS: readonly {
+  readonly cvar: string;
+  readonly min: number;
+  readonly max: number;
+}[] = Object.freeze([
+  { cvar: "st_regenDelay", min: 0, max: 2.1 }, // s → regenDelay u7 (126 ticks)
+  { cvar: "pm_kickCooldown", min: 0, max: 1.05 }, // s → kickCooldown u6 (63)
+  { cvar: "pm_regrabDelay", min: 0, max: 0.25 }, // s → regrab u4 (15)
+  { cvar: "pm_climbFinishTime", min: 0, max: 0.25 }, // s → regrab u4 while climbing (15)
+  { cvar: "pm_waterJumpTime", min: 0, max: 1.05 }, // s → waterJump u6 (63)
+  { cvar: "bd_time", min: 0, max: 4.25 }, // s → bandage u8 (255)
+  { cvar: "pm_maxWallJumps", min: 0, max: 7 }, // → wallJumps u3
+  // u → climbHeight i12: (max − 24) × 32 ≤ 2047
+  { cvar: "pm_ledgeMaxHeight", min: 0, max: 87.96875 },
+  { cvar: "pm_climbPopHeight", min: -8, max: 16 }, // u
+]);
+
+/** The field width each PLAYER_STATE_CVAR_LIMITS row must fit, as the largest value it holds. */
+function cvarLimitFits(cvar: string, max: number): boolean {
+  const ticks = Math.round(max * TICK_RATE);
+  if (cvar === "st_regenDelay") return ticks <= (1 << REGEN_DELAY_BITS) - 1;
+  if (cvar === "pm_kickCooldown") return ticks <= (1 << KICK_COOLDOWN_BITS) - 1;
+  if (cvar === "pm_regrabDelay" || cvar === "pm_climbFinishTime") {
+    return ticks <= (1 << REGRAB_BITS) - 1;
+  }
+  if (cvar === "pm_waterJumpTime") return ticks <= (1 << WATER_JUMP_BITS) - 1;
+  if (cvar === "bd_time") return ticks <= (1 << BANDAGE_BITS) - 1;
+  if (cvar === "pm_maxWallJumps") return max <= (1 << WALL_JUMPS_BITS) - 1;
+  if (cvar === "pm_ledgeMaxHeight") return (max - 24) * 32 <= (1 << (CLIMB_HEIGHT_BITS - 1)) - 1;
+  return cvar === "pm_climbPopHeight";
+}
+
+/**
+ * Null when the limits table fits the v4 widths and every row of `rows` named in it stays within
+ * its limit; else the reason. Run at load against PMOVE_CVARS (D-053's width checks); the cvar
+ * width guard runs it over every registered table.
+ */
+export function playerStateCvarWidthError(
+  rows: readonly { readonly name: string; readonly min: number; readonly max: number }[],
+): string | null {
+  for (const limit of PLAYER_STATE_CVAR_LIMITS) {
+    if (!cvarLimitFits(limit.cvar, limit.max))
+      return `${limit.cvar}: its range overflows its field`;
+    for (const row of rows) {
+      if (row.name === limit.cvar && (row.max > limit.max || row.min < limit.min)) {
+        return `${row.name}: range ${row.min}…${row.max} past ${limit.min}…${limit.max}`;
+      }
+    }
+  }
+  return null;
+}
+
+const widthError = playerStateCvarWidthError(PMOVE_CVARS);
+if (widthError !== null) throw new Error(`snapshot layout: ${widthError}`);
+
+/**
+ * The fields before the local block, with `teleportSeq` (decode only: the own slot's, D-035) and
+ * `contactSeq` (D-053).
+ */
 export class SnapshotHeader {
   serverTick = 0;
   /** serverTick − the baseline's tick: 0 = full, 1–63 = a delta (D-038). */
@@ -199,6 +311,12 @@ export class SnapshotHeader {
    * sets this and the own slot's to what it read.
    */
   teleportSeq = 0;
+  /**
+   * The receiver's contact counter, 0–15 (M4 design §2.11, D-053): the ticks the server saw this
+   * client touch another player (or changed its state from outside its pmove), wrapping at 16.
+   * Laid out in v4, stepped from M4 increment 4; 0 in a spectator snapshot.
+   */
+  contactSeq = 0;
   /** Decode only: the ids the body's deferred list held (D-046; the encoder derives its own). */
   deferred = 0;
 }
@@ -222,6 +340,53 @@ const L_FLAGS = 1 << 4;
 const L_GROUND = 1 << 5;
 const L_WATER = 1 << 6;
 const L_STAMINA = 1 << 7;
+/** The v4 fields' bits (M4 design §2.2): one per field, the climb's height and yaw as one group. */
+const L_WALL_JUMPS = 1 << 8;
+const L_HEALTH = 1 << 9;
+const L_ARMOR = 1 << 10;
+const L_SUBMERGED = 1 << 11;
+const L_CLIMB = 1 << 12;
+const L_REGEN_DELAY = 1 << 13;
+const L_KICK_COOLDOWN = 1 << 14;
+const L_REGRAB = 1 << 15;
+const L_WATER_JUMP = 1 << 16;
+const L_BANDAGE = 1 << 17;
+/** The delta local block's mask width. */
+export const LOCAL_MASK_BITS = 18;
+
+/**
+ * Per `WorldFrame.locals` lane (LF_* order): its delta mask bit and its width. The climb's two
+ * lanes share L_CLIMB; climbHeight is the one signed lane.
+ */
+const LANE_MASK = new Int32Array([
+  L_WALL_JUMPS,
+  L_HEALTH,
+  L_ARMOR,
+  L_SUBMERGED,
+  L_CLIMB,
+  L_CLIMB,
+  L_REGEN_DELAY,
+  L_KICK_COOLDOWN,
+  L_REGRAB,
+  L_WATER_JUMP,
+  L_BANDAGE,
+]);
+const LANE_BITS = new Uint8Array([
+  WALL_JUMPS_BITS,
+  HEALTH_BITS,
+  ARMOR_BITS,
+  SUBMERGED_BITS,
+  CLIMB_HEIGHT_BITS,
+  CLIMB_YAW_BITS,
+  REGEN_DELAY_BITS,
+  KICK_COOLDOWN_BITS,
+  REGRAB_BITS,
+  WATER_JUMP_BITS,
+  BANDAGE_BITS,
+]);
+if (LANE_MASK.length !== LF_COUNT || LANE_BITS.length !== LF_COUNT) {
+  throw new Error("snapshot layout: the delta local block does not cover every frame lane");
+}
 
 /** Delta entity record mask bits. */
 const E_ORIGIN = 1 << 0;
@@ -246,6 +411,16 @@ export const DELTA_LOCAL_MASK_BITS: Readonly<Record<string, number>> = Object.fr
   "groundEntity + 1": L_GROUND,
   waterLevel: L_WATER,
   stamina: L_STAMINA,
+  wallJumps: L_WALL_JUMPS,
+  health: L_HEALTH,
+  armor: L_ARMOR,
+  submerged: L_SUBMERGED,
+  climb: L_CLIMB,
+  regenDelay: L_REGEN_DELAY,
+  kickCooldown: L_KICK_COOLDOWN,
+  regrab: L_REGRAB,
+  waterJump: L_WATER_JUMP,
+  bandage: L_BANDAGE,
 });
 
 /** The delta entity record's mask bit per field, as `DELTA_LOCAL_MASK_BITS` is the local block's. */
@@ -291,12 +466,29 @@ const listed = new Uint8Array(FRAME_SLOTS);
 const LISTED_RECORD = 1;
 const LISTED_DEFERRED = 2;
 
-/** Whether an entity's two event slots are canonical (kinds 0–3, empty slots last and zero). */
+/**
+ * Whether one event slot is valid (M4 design §2.2): a wire kind (0–7) with its value rule: 0 for
+ * none, JUMP, WALLKICK, GRAB and WATER_JUMP, a client id for BOOT, any 8 bits for STEP and LAND.
+ */
+function eventValid(k: number, v: number): boolean {
+  if (k > PMEV_WIRE_MAX) return false;
+  if (k === PMEV_BOOT) return v < MATCH_MAX_CLIENTS;
+  if (
+    k === PMEV_NONE ||
+    k === PMEV_JUMP ||
+    k === PMEV_WALLKICK ||
+    k === PMEV_GRAB ||
+    k === PMEV_WATER_JUMP
+  ) {
+    return v === 0;
+  }
+  return true;
+}
+
+/** Whether an entity's two event slots are canonical (each valid, an empty slot only last). */
 function eventsValid(k0: number, v0: number, k1: number, v1: number): boolean {
-  if (k0 > PMEV_LAND || k1 > PMEV_LAND) return false;
-  if (k0 === PMEV_NONE && (v0 !== 0 || k1 !== PMEV_NONE)) return false;
-  if (k1 === PMEV_NONE && v1 !== 0) return false;
-  return (k0 !== PMEV_JUMP || v0 === 0) && (k1 !== PMEV_JUMP || v1 === 0);
+  if (k0 === PMEV_NONE && k1 !== PMEV_NONE) return false;
+  return eventValid(k0, v0) && eventValid(k1, v1);
 }
 
 function originInRange(q: number): boolean {
@@ -380,7 +572,22 @@ function localMask(cur: WorldFrame, base: WorldFrame, s: number): number {
   if (cur.ground1[s] !== base.ground1[s]) m |= L_GROUND;
   if (cur.waterLevel[s] !== base.waterLevel[s]) m |= L_WATER;
   if (cur.stamina[s] !== base.stamina[s]) m |= L_STAMINA;
+  const cl = cur.locals;
+  const bl = base.locals;
+  const b = s * LF_COUNT;
+  for (let i = 0; i < LF_COUNT; i++) {
+    if (cl[b + i] !== bl[b + i]) m |= LANE_MASK[i] as number;
+  }
   return m;
+}
+
+/** The bits the v4 lanes of mask `m` take in a delta local block. */
+function laneBits(m: number): number {
+  let bits = 0;
+  for (let i = 0; i < LF_COUNT; i++) {
+    if ((m & (LANE_MASK[i] as number)) !== 0) bits += LANE_BITS[i] as number;
+  }
+  return bits;
 }
 
 /** Which entity fields of slot `s` differ between `cur` and `base` (E_* bits). */
@@ -519,7 +726,7 @@ export function localBlockBits(cur: WorldFrame, base: WorldFrame | null, selfId:
   if (base === null) return PLAYER_STATE_BITS;
   const s = selfId;
   const m = localMask(cur, base, s);
-  let bits = 8;
+  let bits = LOCAL_MASK_BITS + laneBits(m);
   if ((m & L_ORIGIN) !== 0) {
     bits +=
       axisBits(
@@ -570,7 +777,7 @@ export function localBlockBits(cur: WorldFrame, base: WorldFrame | null, selfId:
   }
   if ((m & L_YAW) !== 0) bits += 16;
   if ((m & L_PITCH) !== 0) bits += 16;
-  if ((m & L_FLAGS) !== 0) bits += 10;
+  if ((m & L_FLAGS) !== 0) bits += PMF_BITS;
   if ((m & L_GROUND) !== 0) bits += 16;
   if ((m & L_WATER) !== 0) bits += 2;
   if ((m & L_STAMINA) !== 0) bits += 16;
@@ -691,15 +898,16 @@ function writeLocalDelta(w: BitWriter, cur: WorldFrame, base: WorldFrame, s: num
     vz > LOCAL_VELOCITY_Q_MAX ||
     vz < -LOCAL_VELOCITY_Q_MAX ||
     !pitchInRange(cur.pitch[s] as number) ||
-    (cur.flags[s] as number) > 0x3ff ||
+    (cur.flags[s] as number) > PMF_MASK ||
     (cur.ground1[s] as number) > GROUND1_MAX ||
-    (cur.waterLevel[s] as number) > 3
+    (cur.waterLevel[s] as number) > 3 ||
+    !lanesEncodable(cur, s)
   ) {
     w.fail();
     return;
   }
   const m = localMask(cur, base, s);
-  w.writeBits(m, 8);
+  w.writeBits(m, LOCAL_MASK_BITS);
   if ((m & L_ORIGIN) !== 0) {
     writeAxis(w, ox, base.originX[s] as number, SNAP_ORIGIN_D1, SNAP_ORIGIN_D2, ORIGIN_BITS);
     writeAxis(w, oy, base.originY[s] as number, SNAP_ORIGIN_D1, SNAP_ORIGIN_D2, ORIGIN_BITS);
@@ -714,10 +922,41 @@ function writeLocalDelta(w: BitWriter, cur: WorldFrame, base: WorldFrame, s: num
   }
   if ((m & L_YAW) !== 0) w.writeBits(cur.yaw[s] as number, 16);
   if ((m & L_PITCH) !== 0) w.writeBits((cur.pitch[s] as number) & 0xffff, 16);
-  if ((m & L_FLAGS) !== 0) w.writeBits(cur.flags[s] as number, 10);
+  if ((m & L_FLAGS) !== 0) w.writeBits(cur.flags[s] as number, PMF_BITS);
   if ((m & L_GROUND) !== 0) w.writeBits(cur.ground1[s] as number, 16);
   if ((m & L_WATER) !== 0) w.writeBits(cur.waterLevel[s] as number, 2);
   if ((m & L_STAMINA) !== 0) w.writeBits(cur.stamina[s] as number, 16);
+  const l = cur.locals;
+  const b = s * LF_COUNT;
+  for (let i = 0; i < LF_COUNT; i++) {
+    if ((m & (LANE_MASK[i] as number)) === 0) continue;
+    const v = l[b + i] as number;
+    if (i === LF_CLIMB_HEIGHT) w.writeSigned(v, CLIMB_HEIGHT_BITS);
+    else w.writeBits(v, LANE_BITS[i] as number);
+  }
+}
+
+/**
+ * Whether slot `s`'s v4 lanes are what the full block would take (encodePlayerState): each in its
+ * width (climbHeight signed), the climb lanes 0 unless CLIMBING.
+ */
+function lanesEncodable(f: WorldFrame, s: number): boolean {
+  const l = f.locals;
+  const b = s * LF_COUNT;
+  for (let i = 0; i < LF_COUNT; i++) {
+    const v = l[b + i] as number;
+    const bits = LANE_BITS[i] as number;
+    if (i === LF_CLIMB_HEIGHT) {
+      if (v < -(1 << (bits - 1)) || v >= 1 << (bits - 1)) return false;
+    } else if (v < 0 || v >= 1 << bits) {
+      return false;
+    }
+  }
+  return climbFieldsCanonical(
+    f.flags[s] as number,
+    l[b + LF_CLIMB_HEIGHT] as number,
+    l[b + LF_CLIMB_YAW] as number,
+  );
 }
 
 /**
@@ -749,7 +988,8 @@ function deferrable(cur: WorldFrame, base: WorldFrame | null, s: number): boolea
  * false (the writer's error flag) on anything the layout can't carry: a receiver absent from `cur`
  * (or without state in `base`), a left-out slot the receiver would not rebuild (`deferrable`), a
  * left-out slot in a spectator snapshot, a starve counter outside 0–15 or other than 0 in a
- * spectator snapshot (D-050), a value out of range, or a live snapshot over MAX_SNAPSHOT_BYTES.
+ * spectator snapshot (D-050), a contact counter outside 0–15 (D-053), a value out of range, or a
+ * live snapshot over MAX_SNAPSHOT_BYTES.
  */
 export function encodeSnapshot(
   w: BitWriter,
@@ -796,7 +1036,8 @@ export function encodeSnapshot(
   const flags = (hdr.flags & ~SNAP_FLAG_DEFERRED) | (deferred > 0 ? SNAP_FLAG_DEFERRED : 0);
   if (
     (flags & ~SNAP_FLAG_MASK) !== 0 ||
-    (spectator && ((flags & SNAP_FLAG_STARVED) !== 0 || hdr.starveSeq !== 0))
+    (spectator &&
+      ((flags & SNAP_FLAG_STARVED) !== 0 || hdr.starveSeq !== 0 || hdr.contactSeq !== 0))
   ) {
     w.fail();
   }
@@ -815,6 +1056,8 @@ export function encodeSnapshot(
     if (cur.stamp[selfId] !== t) w.fail();
     w.writeSigned(hdr.inputBufferHealth, 8);
     w.writeBits(cur.teleportSeq[selfId] as number, 8);
+    // The writer refuses a counter outside 0–15.
+    w.writeBits(hdr.contactSeq, SNAP_CONTACT_SEQ_BITS);
     if (base === null) {
       slotToPlayerState(cur, selfId, scratch);
       encodePlayerState(w, scratch);
@@ -848,7 +1091,8 @@ export function encodeSnapshot(
 }
 
 /**
- * Reads the fields before the local block (and health and teleportSeq) into `out`. False on a
+ * Reads the fields before the local block (and inputBufferHealth, teleportSeq and contactSeq)
+ * into `out`. False on a
  * short read, a tick of 0 or past TICK_MAX, a baseline before tick 1 (baseBack ≥ serverTick), or
  * flags the protocol refuses (bit 1, SPECTATOR with STARVED or DEFERRED, SPECTATOR with a starve
  * counter other than 0). Bits 4–7 of the flags byte are the starve counter (D-050): any value
@@ -875,9 +1119,11 @@ export function decodeSnapshotHeader(r: BitReader, out: SnapshotHeader): boolean
   if (spectator) {
     out.inputBufferHealth = 0;
     out.teleportSeq = 0;
+    out.contactSeq = 0;
   } else {
     out.inputBufferHealth = r.readSigned(8);
     out.teleportSeq = r.readBits(8);
+    out.contactSeq = r.readBits(SNAP_CONTACT_SEQ_BITS);
   }
   return !r.error;
 }
@@ -898,6 +1144,7 @@ function copyEntity(out: WorldFrame, s: number, base: WorldFrame, t: number): vo
   out.ground1[s] = 0;
   out.waterLevel[s] = 0;
   out.stamina[s] = 0;
+  clearLocals(out, s);
   out.entVelX[s] = base.entVelX[s] as number;
   out.entVelY[s] = base.entVelY[s] as number;
   out.entVelZ[s] = base.entVelZ[s] as number;
@@ -936,6 +1183,7 @@ function setPending(out: WorldFrame, s: number): void {
   out.ground1[s] = 0;
   out.waterLevel[s] = 0;
   out.stamina[s] = 0;
+  clearLocals(out, s);
   out.team[s] = 0;
   out.teleportSeq[s] = 0;
   out.eventSeq[s] = 0;
@@ -1019,6 +1267,7 @@ function readNewBody(r: BitReader, out: WorldFrame, id: number, t: number): bool
   out.ground1[id] = 0;
   out.waterLevel[id] = 0;
   out.stamina[id] = 0;
+  clearLocals(out, id);
   out.entVelX[id] = vx;
   out.entVelY[id] = vy;
   out.entVelZ[id] = vz;
@@ -1154,7 +1403,7 @@ function readDeltaBody(
  * full block refuses.
  */
 function readLocalDelta(r: BitReader, base: WorldFrame, out: WorldFrame, s: number): boolean {
-  const m = r.readBits(8);
+  const m = r.readBits(LOCAL_MASK_BITS);
   const bx = base.originX[s] as number;
   const by = base.originY[s] as number;
   const bz = base.originZ[s] as number;
@@ -1198,7 +1447,7 @@ function readLocalDelta(r: BitReader, base: WorldFrame, out: WorldFrame, s: numb
   }
   let flags = base.flags[s] as number;
   if ((m & L_FLAGS) !== 0) {
-    const v = r.readBits(10);
+    const v = r.readBits(PMF_BITS);
     if (v === flags) return false;
     flags = v;
   }
@@ -1220,6 +1469,29 @@ function readLocalDelta(r: BitReader, base: WorldFrame, out: WorldFrame, s: numb
     if (v === stamina) return false;
     stamina = v;
   }
+  // The v4 lanes go straight into `out` (a refused packet leaves it partial, as documented).
+  const ol = out.locals;
+  const bl = base.locals;
+  const b = s * LF_COUNT;
+  for (let i = 0; i < LF_COUNT; i++) {
+    const was = bl[b + i] as number;
+    const bit = LANE_MASK[i] as number;
+    if ((m & bit) === 0) {
+      ol[b + i] = was;
+      continue;
+    }
+    const v =
+      i === LF_CLIMB_HEIGHT ? r.readSigned(CLIMB_HEIGHT_BITS) : r.readBits(LANE_BITS[i] as number);
+    if (v === was && bit !== L_CLIMB) return false;
+    ol[b + i] = v;
+  }
+  // The climb group: refused only when both lanes equal the baseline's.
+  const ch = ol[b + LF_CLIMB_HEIGHT] as number;
+  const cy = ol[b + LF_CLIMB_YAW] as number;
+  if ((m & L_CLIMB) !== 0 && ch === bl[b + LF_CLIMB_HEIGHT] && cy === bl[b + LF_CLIMB_YAW]) {
+    return false;
+  }
+  if (!climbFieldsCanonical(flags, ch, cy)) return false;
   if (r.error) return false;
   out.originX[s] = ox;
   out.originY[s] = oy;

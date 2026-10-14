@@ -33,15 +33,15 @@ describe("MultiHarness: clients", () => {
     expect(h.active.length).toBe(full);
     for (const c of h.clients) {
       expect(c.client.active).toBe(true);
-      // Within 1100 B by construction (D-034): at most the worst delta of 37 players, 1088 B, and
-      // a full one (on joining) lists at most the other 36 as new bodies, 86 + 199 + 7 + 36 × 213
-      // bits, 995 B.
-      expect(c.tap.down.maxByType[MSG_SNAPSHOT]).toBeLessThanOrEqual(1088);
-      expect(c.tap.maxFullSnapshot).toBeLessThanOrEqual(995);
+      // Within 1100 B by construction (D-034): at most the worst delta of 37 players, 1100 B, and
+      // a full one (on joining) lists at most the other 36 as new bodies, 90 + 281 + 7 + 36 × 213
+      // bits, 1006 B (protocol v4, D-053).
+      expect(c.tap.down.maxByType[MSG_SNAPSHOT]).toBeLessThanOrEqual(1100);
+      expect(c.tap.maxFullSnapshot).toBeLessThanOrEqual(1006);
     }
     // The links' delays spread the joins over a few ticks, so only the clients in last get all 36
     // others in their first snapshot (the earliest got fewer).
-    expect(Math.max(...h.clients.map((c) => c.tap.maxFullSnapshot))).toBe(995);
+    expect(Math.max(...h.clients.map((c) => c.tap.maxFullSnapshot))).toBe(1006);
     const watched = h.clients[3] as HarnessClient;
     expect(watched.client.store.newest?.presentCount).toBe(full);
     expect(watched.digestsChecked).toBeGreaterThan(50);

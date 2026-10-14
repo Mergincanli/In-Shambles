@@ -13,6 +13,8 @@ import {
   ENTITY_NEW_BITS,
   ENTITY_REMOVED_BITS,
   EVENTS_MAX_PER_MSG,
+  EVK_HIT_CONFIRM,
+  EVK_PLAYER_DEATH,
   EVK_PLAYER_JOIN,
   EVK_PLAYER_LEAVE,
   EVK_SERVER_STATS,
@@ -32,6 +34,7 @@ import {
   InputMsg,
   KickMsg,
   LOCAL_DELTA_MAX_BITS,
+  LOCAL_MASK_BITS,
   MATCH_MAX_CLIENTS,
   MAX_CLIENT_MESSAGE_BYTES,
   MAX_RELIABLE_BYTES,
@@ -44,6 +47,7 @@ import {
   PROTOCOL_VERSION,
   PrintMsg,
   SHORT_TEXT_MAX,
+  SNAP_CONTACT_SEQ_BITS,
   SNAP_DEFERRED_COUNT_BITS,
   SNAP_DEFERRED_ID_BITS,
   SNAP_DELTA_FIXED_BITS,
@@ -62,6 +66,7 @@ import {
   SNAP_MIN_CAPACITY,
   SNAP_ORIGIN_D1,
   SNAP_ORIGIN_D2,
+  SNAP_SPECTATOR_HEADER_BITS,
   SNAP_STARVE_SEQ_BITS,
   SNAP_STARVE_SEQ_MASK,
   SnapshotHeader,
@@ -187,6 +192,17 @@ describe("docs/05 §3.6 protocol layout", () => {
     ]);
   });
 
+  it("puts the contact counter after teleportSeq, outside spectator snapshots (D-053)", () => {
+    const rows = firstTable(layout.slice(layout.indexOf("**Snapshot header**"))).rows.map(
+      (r) => r[0],
+    );
+    expect(rows.slice(-2)).toEqual(["teleportSeq", "contactSeq"]);
+    const row = tableRow("**Snapshot header**", "contactSeq");
+    expect(row).toContain(`contactSeq | ${SNAP_CONTACT_SEQ_BITS} | the receiver's contact counter`);
+    expect(row).toContain("not when spectator");
+    expect(SNAP_HEADER_BITS - SNAP_SPECTATOR_HEADER_BITS).toBe(8 + 8 + SNAP_CONTACT_SEQ_BITS);
+  });
+
   it("gives the delta local block and delta record widths at their largest (D-038)", () => {
     expect(tableBits("**Delta local block**")).toBe(LOCAL_DELTA_MAX_BITS);
     expect(layout).toContain(`which must hold state), at most ${LOCAL_DELTA_MAX_BITS} bits:`);
@@ -235,11 +251,17 @@ describe("docs/05 §3.6 protocol layout", () => {
     };
     expect(maskBits("**Delta local block**")).toEqual(DELTA_LOCAL_MASK_BITS);
     expect(maskBits("**Delta entity record**")).toEqual(DELTA_ENTITY_MASK_BITS);
-    // Eight distinct bits each: the 8-bit mask, all of it in use.
-    for (const table of [DELTA_LOCAL_MASK_BITS, DELTA_ENTITY_MASK_BITS]) {
-      expect(Object.values(table).reduce((a, b) => a | b, 0)).toBe(0xff);
-      expect(new Set(Object.values(table)).size).toBe(8);
+    // Distinct bits filling each mask: the entity record's 8, the local block's 18 since v4
+    // (D-053: one bit per field, the climb's height and yaw sharing one).
+    const masks: [Readonly<Record<string, number>>, number][] = [
+      [DELTA_LOCAL_MASK_BITS, LOCAL_MASK_BITS],
+      [DELTA_ENTITY_MASK_BITS, 8],
+    ];
+    for (const [table, width] of masks) {
+      expect(Object.values(table).reduce((a, b) => a | b, 0)).toBe((1 << width) - 1);
+      expect(new Set(Object.values(table)).size).toBe(width);
     }
+    expect(tableRow("**Delta local block**", "mask")).toContain(`mask | ${LOCAL_MASK_BITS} |`);
   });
 
   it("states the sizes of a full snapshot, the worst delta and a four-cmd INPUT", () => {
@@ -294,6 +316,8 @@ describe("docs/05 §3.6 protocol layout", () => {
       ["`PLAYER_JOIN`", EVK_PLAYER_JOIN],
       ["`PLAYER_LEAVE`", EVK_PLAYER_LEAVE],
       ["`SERVER_STATS`", EVK_SERVER_STATS],
+      ["`PLAYER_DEATH`", EVK_PLAYER_DEATH],
+      ["`HIT_CONFIRM`", EVK_HIT_CONFIRM],
     ];
     expect(table.rows.map((r) => r[1])).toEqual(kinds.map(([name]) => name));
     for (const [name, kind] of kinds) {

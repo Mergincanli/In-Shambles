@@ -307,6 +307,10 @@ describe("client e2e smoke (M2 design §5)", () => {
       .toBeGreaterThan(0);
     await expect.poll(() => speed.isVisible()).toBe(true);
     await expect.poll(() => speed.textContent(), { timeout: 5000 }).toMatch(/\d+ u\/s {2}vz/);
+    // The vitals readout (M4 design §2.12), always on while playing; nothing drains either yet.
+    const vitals = page.locator("#hud-vitals");
+    await expect.poll(() => vitals.isVisible()).toBe(true);
+    await expect.poll(() => vitals.textContent(), { timeout: 5000 }).toBe("HP 100  ST 100");
     // The renderer panel (r_stats) shows renderer.info whenever there is a picture.
     const render = page.locator("#hud-render");
     if ((await readStatus(page)).webgl === "1") {

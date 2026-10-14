@@ -37,8 +37,15 @@ import {
 } from "../../src/net/messages";
 import { PLAYER_STATE_BITS } from "../../src/net/playerStateCodec";
 import {
+  EV_DEATH_BOOT,
+  EV_DEATH_CAUSE_MAX,
+  EV_DEATH_WORLD,
+  EV_HIT_CAUSE_MAX,
+  EV_HIT_GOOMBA,
   EV_LEAVE_KICKED,
   EV_LEAVE_TIMED_OUT,
+  EVK_HIT_CONFIRM,
+  EVK_PLAYER_DEATH,
   EVK_PLAYER_JOIN,
   EVK_PLAYER_LEAVE,
   EVK_SERVER_STATS,
@@ -52,6 +59,8 @@ import {
   MSG_SNAPSHOT,
   MSG_TYPE_MAX,
   PROTOCOL_VERSION,
+  SNAP_CONTACT_SEQ_BITS,
+  SNAP_CONTACT_SEQ_MASK,
   SNAP_FLAG_DEFERRED,
   SNAP_FLAG_SPECTATOR,
   SNAP_FLAG_STARVED,
@@ -66,6 +75,7 @@ import {
   encodeSnapshot,
   entityRecordBits,
   LOCAL_DELTA_MAX_BITS,
+  LOCAL_MASK_BITS,
   localBlockBits,
   SNAP_DEFERRED_COUNT_BITS,
   SNAP_DEFERRED_ID_BITS,
@@ -84,16 +94,40 @@ import {
   copySlot,
   FRAME_SLOTS,
   frameDigest,
+  LF_ARMOR,
+  LF_BANDAGE,
+  LF_CLIMB_HEIGHT,
+  LF_CLIMB_YAW,
+  LF_COUNT,
+  LF_HEALTH,
+  LF_KICK_COOLDOWN,
+  LF_REGEN_DELAY,
+  LF_REGRAB,
+  LF_SUBMERGED,
+  LF_WALL_JUMPS,
+  LF_WATER_JUMP,
   playerStateToSlot,
   slotToPlayerState,
   WorldFrame,
 } from "../../src/net/worldFrame";
 import { Mulberry32 } from "../../src/rng/mulberry32";
 import { ENTITY_FLAG_MASK, TEAM_1 } from "../../src/sim/entity";
-import { PMEV_JUMP, PMEV_LAND, PMEV_STEP } from "../../src/sim/events";
+import {
+  PMEV_BOOT,
+  PMEV_GOOMBA,
+  PMEV_GRAB,
+  PMEV_JUMP,
+  PMEV_LAND,
+  PMEV_SLIDE_START,
+  PMEV_STEP,
+  PMEV_WALLKICK,
+  PMEV_WATER_JUMP,
+} from "../../src/sim/events";
 import {
   copyPlayerState,
   PlayerState,
+  PMF_CLIMBING,
+  PMF_MASK,
   playerStateEquals,
   quantizePlayerState,
 } from "../../src/sim/playerState";
@@ -184,8 +218,9 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
           out.hdr.baseBack,
           out.hdr.flags,
           out.hdr.starveSeq,
+          out.hdr.contactSeq,
           out.hdr.cvarHash,
-        ]).toEqual([h.serverTick, h.baseBack, h.flags, h.starveSeq, h.cvarHash]);
+        ]).toEqual([h.serverTick, h.baseBack, h.flags, h.starveSeq, h.contactSeq, h.cvarHash]);
         const self = m.selfId;
         if (h.baseBack > 0) deltas++;
         // The exact size functions add up to what the encoder wrote (M3 design §2.3), a left-out
@@ -281,6 +316,39 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
         expect(decodeSnapshotHeader(readerOver(patched), hdr), `spectator ${seq}`).toBe(false);
         expect(decodeSnapshotParts(readerOver(patched), out), `spectator ${seq}`).toBe(false);
       }
+    });
+
+    it("SNAPSHOT: the contact counter takes every value 0–15 after teleportSeq (D-053)", () => {
+      const w = newWriter();
+      const m = new SnapshotParts();
+      const out = new SnapshotParts();
+      m.hdr.serverTick = 1000;
+      randomFrame(new Mulberry32(0xc047), m.frame, 1000, SNAP_SELF, 3);
+      for (let seq = 0; seq <= SNAP_CONTACT_SEQ_MASK; seq++) {
+        m.hdr.contactSeq = seq;
+        w.reset();
+        expect(encodeSnapshotParts(w, m), `contactSeq ${seq}`).toBe(true);
+        // Bits 86–89: after the header's teleportSeq, before the local block.
+        const r = readerOver(w.bytes, w.byteLength);
+        r.readBits(32);
+        r.readBits(32);
+        r.readBits(22);
+        expect(r.readBits(SNAP_CONTACT_SEQ_BITS), `contactSeq ${seq}`).toBe(seq);
+        expect(decodeSnapshotParts(readerOver(w.bytes, w.byteLength), out)).toBe(true);
+        expect(out.hdr.contactSeq).toBe(seq);
+        expect(frameDigest(out.frame, SNAP_SELF)).toBe(frameDigest(m.frame, SNAP_SELF));
+      }
+      // A spectator snapshot carries none: the decoder reads 0.
+      const spec = new SnapshotParts();
+      spec.hdr.serverTick = 1000;
+      spec.hdr.flags = SNAP_FLAG_SPECTATOR;
+      randomFrame(new Mulberry32(0xc048), spec.frame, 1000, -1, 3);
+      const hdr = new SnapshotHeader();
+      hdr.contactSeq = 9;
+      expect(
+        decodeSnapshotHeader(readerOver(encodedBy((wr) => encodeSnapshotParts(wr, spec))), hdr),
+      ).toBe(true);
+      expect(hdr.contactSeq).toBe(0);
     });
 
     it("SNAPSHOT: any quantized state with a sanitized pitch encodes, and decodes to itself", () => {
@@ -464,6 +532,35 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
             m.hdr.starveSeq = 1;
           },
         ],
+        ["contact counter 16 (D-053)", (m) => (m.hdr.contactSeq = 16)],
+        ["contact counter −1", (m) => (m.hdr.contactSeq = -1)],
+        [
+          "spectator + a contact counter",
+          (m) => {
+            m.hdr.flags = SNAP_FLAG_SPECTATOR;
+            m.hdr.contactSeq = 1;
+          },
+        ],
+        // The v4 local fields (M4 design §2.2): each past its width, and the canonical rule.
+        ["local flag bit 11", (m) => (m.frame.flags[SNAP_SELF] = 1 << 11)],
+        ["health 16384", (m) => (m.frame.locals[SNAP_SELF * LF_COUNT + LF_HEALTH] = 16384)],
+        ["health −1", (m) => (m.frame.locals[SNAP_SELF * LF_COUNT + LF_HEALTH] = -1)],
+        ["wallJumps 8", (m) => (m.frame.locals[SNAP_SELF * LF_COUNT + LF_WALL_JUMPS] = 8)],
+        ["bandage 256", (m) => (m.frame.locals[SNAP_SELF * LF_COUNT + LF_BANDAGE] = 256)],
+        [
+          "climbHeight without CLIMBING",
+          (m) => {
+            m.frame.flags[SNAP_SELF] = 0;
+            m.frame.locals[SNAP_SELF * LF_COUNT + LF_CLIMB_HEIGHT] = 5;
+          },
+        ],
+        [
+          "climbHeight 2048 while CLIMBING",
+          (m) => {
+            m.frame.flags[SNAP_SELF] = PMF_CLIMBING;
+            m.frame.locals[SNAP_SELF * LF_COUNT + LF_CLIMB_HEIGHT] = 2048;
+          },
+        ],
         ["receiver absent", (m) => m.frame.setAbsent(SNAP_SELF)],
         ["receiver's stamp not the tick", (m) => m.frame.setPresent(SNAP_SELF, 999)],
         [
@@ -484,9 +581,25 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
         ["pitch past −16201", (m) => (m.frame.pitch[other(m)] = -PITCH_LIMIT_U16 - 1)],
         ["team 3", (m) => (m.frame.team[other(m)] = 3)],
         [
-          "event kind 4",
+          "event kind 8 (local only)",
           (m) => {
-            m.frame.evKind[other(m) * 2] = 4;
+            m.frame.evKind[other(m) * 2] = PMEV_SLIDE_START;
+          },
+        ],
+        [
+          "BOOT of id 64",
+          (m) => {
+            const e = other(m) * 2;
+            m.frame.evKind[e] = PMEV_BOOT;
+            m.frame.evValue[e] = 64;
+          },
+        ],
+        [
+          "GRAB with a value",
+          (m) => {
+            const e = other(m) * 2;
+            m.frame.evKind[e] = PMEV_GRAB;
+            m.frame.evValue[e] = 1;
           },
         ],
         [
@@ -538,7 +651,7 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
       for (let s = 0; s < FRAME_SLOTS; s++) copySlot(m.base, s, m.frame, s);
       const unchanged = newWriter();
       expect(encodeSnapshot(unchanged, m.hdr, m.frame, m.base, SNAP_SELF)).toBe(true);
-      expect(unchanged.bitLength).toBe(SNAP_HEADER_BITS + 8 + SNAP_ENTITY_COUNT_BITS);
+      expect(unchanged.bitLength).toBe(SNAP_HEADER_BITS + LOCAL_MASK_BITS + SNAP_ENTITY_COUNT_BITS);
       expect(snapshotWith((p) => (p.frame.flags[other(p)] = 0x3ff))).toBe(true);
       const input = new InputMsg();
       expect(encodeInput(newWriter(), input)).toBe(false);
@@ -580,10 +693,12 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
 
     /**
      * A valid live snapshot of tick 1000 for receiver SNAP_SELF (9) with records 3, 20 and 40,
-     * every field 0: header 0–85 (type 0, serverTick 8, baseBack 40, flags 46, starveSeq 50,
-     * cvarHash 54, health 70, teleportSeq 78), local block 86–284 (origin 86/107/128, velocity
-     * 149/169/189, yaw 209, pitch 225, flags 241, groundEntity + 1 251, waterLevel 267, stamina
-     * 269), entityCount 285, then 213-bit records from 292.
+     * every field 0: header 0–89 (type 0, serverTick 8, baseBack 40, flags 46, starveSeq 50,
+     * cvarHash 54, health 70, teleportSeq 78, contactSeq 86), local block 90–370 (origin
+     * 90/111/132, velocity 153/173/193, yaw 213, pitch 229, flags 245, groundEntity + 1 256,
+     * waterLevel 272, stamina 274, then the v4 fields: wallJumps 290, health 293, armor 307,
+     * submerged 309, climbHeight 320, climbYaw 332, regenDelay 340, kickCooldown 347, regrab 353,
+     * waterJump 357, bandage 363), entityCount 371, then 213-bit records from 378.
      */
     function baseSnapshot(): Uint8Array {
       const m = new SnapshotParts();
@@ -594,7 +709,7 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
       return encodedBy((w) => encodeSnapshotParts(w, m));
     }
 
-    /** Bit offsets of a record's fields (record k starts at 292 + 213 k). */
+    /** Bit offsets of a record's fields (record k starts at 378 + 213 k). */
     const REC = {
       id: 0,
       removed: 16,
@@ -637,14 +752,18 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
         ["spectator + starved", [46, 8, SNAP_FLAG_SPECTATOR | SNAP_FLAG_STARVED]],
         // Spectator + a starve counter (D-050) is patched onto a real spectator snapshot in "the
         // starve counter takes every value 0–15": on this live one SPECTATOR alone is refused.
-        ["local origin x past +16384", [86, 21, 524289]],
-        ["local origin z past −16384", [128, 21, (1 << 21) - 524289]],
-        ["local velocity −2^19", [149, 20, 1 << 19]],
-        ["local pitch past +16201", [225, 16, PITCH_LIMIT_U16 + 1]],
-        ["local pitch past −16201", [225, 16, 0x10000 - PITCH_LIMIT_U16 - 1]],
-        ["groundEntity past ENTITY_WORLD", [251, 16, 32769]],
-        ["count over the live cap", [285, 7, 64]],
-        ["count 127", [285, 7, 127]],
+        ["local origin x past +16384", [90, 21, 524289]],
+        ["local origin z past −16384", [132, 21, (1 << 21) - 524289]],
+        ["local velocity −2^19", [153, 20, 1 << 19]],
+        ["local pitch past +16201", [229, 16, PITCH_LIMIT_U16 + 1]],
+        ["local pitch past −16201", [229, 16, 0x10000 - PITCH_LIMIT_U16 - 1]],
+        ["groundEntity past ENTITY_WORLD", [256, 16, 32769]],
+        // The canonical rule (M4 design §2.2): the climb fields are 0 unless CLIMBING.
+        ["climbHeight without CLIMBING", [320, 12, 1]],
+        ["climbHeight −1 without CLIMBING", [320, 12, 0xfff]],
+        ["climbYaw without CLIMBING", [332, 8, 1]],
+        ["count over the live cap", [371, 7, 64]],
+        ["count 127", [371, 7, 127]],
         ["id ≥ 64", [rec(0, "id"), 16, 64]],
         ["id 0xffff", [rec(2, "id"), 16, 0xffff]],
         ["ids unsorted", [rec(0, "id"), 16, 30]],
@@ -660,8 +779,13 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
         ["entity flag bit 5 (jump held)", [rec(0, "flags") + 5, 1, 1]],
         ["entity flag bit 6 (crouch pressed in air)", [rec(2, "flags") + 6, 1, 1]],
         ["team 3", [rec(1, "team"), 2, 3]],
-        ["event kind 4", [rec(0, "k0"), 4, 4]],
+        ["event kind 8 (SLIDE_START is local only)", [rec(0, "k0"), 4, PMEV_SLIDE_START]],
+        ["event kind 11 (GOOMBA is local only)", [rec(0, "k0"), 4, PMEV_GOOMBA]],
         ["event kind 15", [rec(0, "k0"), 4, 15], [rec(0, "k1"), 4, 15]],
+        ["BOOT of id 64", [rec(0, "k0"), 4, PMEV_BOOT], [rec(0, "v0"), 8, 64]],
+        ["WALLKICK with a value", [rec(0, "k0"), 4, PMEV_WALLKICK], [rec(0, "v0"), 8, 1]],
+        ["GRAB with a value", [rec(1, "k0"), 4, PMEV_GRAB], [rec(1, "v0"), 8, 2]],
+        ["WATER_JUMP with a value", [rec(2, "k0"), 4, PMEV_WATER_JUMP], [rec(2, "v0"), 8, 255]],
         ["an empty first slot before a second", [rec(0, "k1"), 4, PMEV_STEP]],
         ["a value in an empty slot", [rec(0, "v0"), 8, 1]],
         ["a value in an empty second slot", [rec(0, "k0"), 4, PMEV_LAND], [rec(0, "v1"), 8, 9]],
@@ -675,10 +799,32 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
       }
       // The largest values that are in range still decode.
       const good: [string, ...Patch[]][] = [
-        ["local origin +16384", [86, 21, 524288]],
-        ["local velocity −(2^19 − 1)", [149, 20, (1 << 20) - 524287]],
-        ["local pitch +16201", [225, 16, PITCH_LIMIT_U16]],
-        ["groundEntity ENTITY_WORLD", [251, 16, 32768]],
+        ["local origin +16384", [90, 21, 524288]],
+        ["local velocity −(2^19 − 1)", [153, 20, (1 << 20) - 524287]],
+        ["local pitch +16201", [229, 16, PITCH_LIMIT_U16]],
+        ["groundEntity ENTITY_WORLD", [256, 16, 32768]],
+        // The v4 fields at their widest (M4 design §2.2).
+        ["every local flag, GRAB_LOCK included", [245, 11, PMF_MASK]],
+        [
+          "the v4 counters at their widths' maxima",
+          [290, 3, 7],
+          [293, 14, 16383],
+          [307, 2, 3],
+          [309, 11, 2047],
+          [340, 7, 127],
+          [347, 6, 63],
+          [353, 4, 15],
+          [357, 6, 63],
+          [363, 8, 255],
+        ],
+        [
+          "the climb fields while CLIMBING, at both ends",
+          [245, 11, PMF_CLIMBING],
+          [320, 12, 1 << 11],
+          [332, 8, 255],
+        ],
+        ["climbHeight +2047 while CLIMBING", [245, 11, PMF_CLIMBING], [320, 12, 2047]],
+        ["contact counter 15 (D-053)", [86, 4, 15]],
         // Bits 4–7 are the starve counter (D-050): any value, with or without STARVED.
         ["starve counter 15", [50, 4, 15]],
         ["starve counter 1 + starved", [46, 8, SNAP_FLAG_STARVED | (1 << 4)]],
@@ -696,6 +842,13 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
           [rec(0, "k1"), 4, PMEV_STEP],
           [rec(0, "v1"), 8, 255],
         ],
+        [
+          "BOOT 63 then WALLKICK",
+          [rec(1, "k0"), 4, PMEV_BOOT],
+          [rec(1, "v0"), 8, 63],
+          [rec(1, "k1"), 4, PMEV_WALLKICK],
+        ],
+        ["GRAB then WATER_JUMP", [rec(2, "k0"), 4, PMEV_GRAB], [rec(2, "k1"), 4, PMEV_WATER_JUMP]],
         ["the receiver's id between two records", [rec(0, "id"), 16, SNAP_SELF - 1]],
       ];
       const out = new SnapshotParts();
@@ -842,23 +995,27 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
       hello.buildHash = "abc";
       hello.nonce = 7;
       const now = encodedBy((w) => encodeHello(w, hello));
-      // type 1, protocolVersion 3 (u16, LSB-first; D-050): pinned.
-      expect(hex(now.subarray(0, 3))).toBe("010300");
+      // type 1, protocolVersion 4 (u16, LSB-first; D-053): pinned.
+      expect(hex(now.subarray(0, 3))).toBe("010400");
       expect(peekHelloVersion(now, now.length)).toBe(PROTOCOL_VERSION);
-      // v1 and v2 HELLOs' first 3 B, which the server reads to KICK them with a reason.
-      hello.protocolVersion = 1;
-      expect(hex(encodedBy((w) => encodeHello(w, hello)).subarray(0, 3))).toBe("010100");
-      hello.protocolVersion = 2;
-      expect(hex(encodedBy((w) => encodeHello(w, hello)).subarray(0, 3))).toBe("010200");
-      // A v4 HELLO with a field v3 doesn't know: v3's decoder refuses it, the peek still works.
+      // v1–v3 HELLOs' first 3 B, which the server reads to KICK them with a reason.
+      for (const [v, bytes] of [
+        [1, "010100"],
+        [2, "010200"],
+        [3, "010300"],
+      ] as const) {
+        hello.protocolVersion = v;
+        expect(hex(encodedBy((w) => encodeHello(w, hello)).subarray(0, 3))).toBe(bytes);
+      }
+      // A v5 HELLO with a field v4 doesn't know: v4's decoder refuses it, the peek still works.
       const w = newWriter();
-      hello.protocolVersion = 4;
+      hello.protocolVersion = 5;
       encodeHello(w, hello);
       w.writeBits(0xabcd, 16);
-      const v4 = w.bytes.slice(0, w.byteLength);
-      expect(decodeHello(readerOver(v4), new HelloMsg())).toBe(false);
-      expect(peekHelloVersion(v4, v4.length)).toBe(4);
-      expect(peekHelloVersion(v4, 2)).toBe(-1);
+      const v5 = w.bytes.slice(0, w.byteLength);
+      expect(decodeHello(readerOver(v5), new HelloMsg())).toBe(false);
+      expect(peekHelloVersion(v5, v5.length)).toBe(5);
+      expect(peekHelloVersion(v5, 2)).toBe(-1);
       expect(peekHelloVersion(encodedBy(encodeReady), 1)).toBe(-1);
       const ping = encodedBy((wr) => encodePing(wr, new PingMsg()));
       expect(peekHelloVersion(ping, ping.length)).toBe(-1);
@@ -896,7 +1053,19 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
       const join = m.add(EVK_PLAYER_JOIN);
       const leave = m.add(EVK_PLAYER_LEAVE);
       const stats = m.add(EVK_SERVER_STATS);
-      if (join === null || leave === null || stats === null) throw new Error("full");
+      const death = m.add(EVK_PLAYER_DEATH);
+      const suicide = m.add(EVK_PLAYER_DEATH);
+      const hit = m.add(EVK_HIT_CONFIRM);
+      if (
+        join === null ||
+        leave === null ||
+        stats === null ||
+        death === null ||
+        suicide === null ||
+        hit === null
+      ) {
+        throw new Error("full");
+      }
       join.clientId = 63;
       join.team = TEAM_1;
       leave.clientId = 0;
@@ -905,21 +1074,37 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
       stats.tickP99Us = 4000;
       stats.tickMaxUs = 0xffff;
       stats.players = 64;
+      // The M4 subset of the combat feed (M4 design §2.2, D-053).
+      death.victim = 62;
+      death.cause = EV_DEATH_BOOT;
+      death.hasKiller = 1;
+      death.killer = 63;
+      suicide.victim = 7;
+      suicide.cause = EV_DEATH_WORLD;
+      hit.victim = 63;
+      hit.cause = EV_HIT_GOOMBA;
       const w = newWriter();
       expect(encodeEvents(w, m)).toBe(true);
       expect(eventBits(EVK_PLAYER_JOIN)).toBe(12);
       expect(eventBits(EVK_PLAYER_LEAVE)).toBe(12);
       expect(eventBits(EVK_SERVER_STATS)).toBe(59);
+      expect(eventBits(EVK_PLAYER_DEATH)).toBe(20);
+      expect(eventBits(EVK_HIT_CONFIRM)).toBe(13);
       expect(eventBits(0)).toBe(0);
-      expect(w.bitLength).toBe(8 + 6 + 12 + 12 + 59);
+      expect(eventBits(6)).toBe(0);
+      // A death without a killer leaves the killer's 6 bits out.
+      expect(w.bitLength).toBe(8 + 6 + 12 + 12 + 59 + 20 + 14 + 13);
       const bytes = w.bytes.slice(0, w.byteLength);
       expect(peekMessageType(bytes, bytes.length)).toBe(MSG_EVENTS);
       const out = new EventsMsg();
       expect(decodeEvents(readerOver(bytes), out)).toBe(true);
-      expect(out.count).toBe(3);
+      expect(out.count).toBe(6);
       expect({ ...out.events[0] }).toEqual({ ...join });
       expect({ ...out.events[1] }).toEqual({ ...leave });
       expect({ ...out.events[2] }).toEqual({ ...stats });
+      expect({ ...out.events[3] }).toEqual({ ...death });
+      expect({ ...out.events[4] }).toEqual({ ...suicide });
+      expect({ ...out.events[5] }).toEqual({ ...hit });
       // A decoded record carries only its kind's fields: the pooled record is cleared first.
       out.events[1]?.clear();
       (out.events[1] as { team: number }).team = 2;
@@ -950,7 +1135,7 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
       expect(encodes(EVK_PLAYER_JOIN, {})).toBe(true);
       expect(encodes(EVK_PLAYER_JOIN, {}, 0)).toBe(false);
       expect(encodes(EVK_PLAYER_JOIN, {}, 64)).toBe(false);
-      for (const kind of [0, 4, 15]) expect(encodes(kind, {})).toBe(false);
+      for (const kind of [0, 6, 15]) expect(encodes(kind, {})).toBe(false);
       expect(encodes(EVK_PLAYER_JOIN, { clientId: 64 })).toBe(false);
       expect(encodes(EVK_PLAYER_JOIN, { team: 3 })).toBe(false);
       expect(encodes(EVK_PLAYER_LEAVE, { reason: EV_LEAVE_KICKED })).toBe(true);
@@ -959,9 +1144,51 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
       expect(encodes(EVK_SERVER_STATS, { players: 65 })).toBe(false);
       expect(encodes(EVK_SERVER_STATS, { tickMaxUs: 0x10000 })).toBe(false);
       expect(encodes(EVK_SERVER_STATS, { tickP50Us: -1 })).toBe(false);
+      // PLAYER_DEATH and HIT_CONFIRM (D-053).
+      expect(encodes(EVK_PLAYER_DEATH, { victim: 63, cause: EV_DEATH_WORLD })).toBe(true);
+      expect(encodes(EVK_PLAYER_DEATH, { victim: 64 })).toBe(false);
+      for (const cause of [5, 7]) expect(encodes(EVK_PLAYER_DEATH, { cause })).toBe(false);
+      expect(encodes(EVK_PLAYER_DEATH, { hasKiller: 1, killer: 63 })).toBe(true);
+      expect(encodes(EVK_PLAYER_DEATH, { hasKiller: 1, killer: 64 })).toBe(false);
+      expect(encodes(EVK_PLAYER_DEATH, { hasKiller: 2 })).toBe(false);
+      // A killer without hasKiller would not survive the round trip.
+      expect(encodes(EVK_PLAYER_DEATH, { killer: 3 })).toBe(false);
+      expect(encodes(EVK_HIT_CONFIRM, { victim: 63, cause: EV_HIT_GOOMBA })).toBe(true);
+      expect(encodes(EVK_HIT_CONFIRM, { victim: 64 })).toBe(false);
+      for (const cause of [2, 7]) expect(encodes(EVK_HIT_CONFIRM, { cause })).toBe(false);
     });
 
-    it("the decoder refuses a count of 0, kinds 0 and 4–15, team 3, reason 3 and players past 64", () => {
+    it("the decoder refuses a death cause past 4 and a hit cause past 1 (D-053)", () => {
+      // type 0–7, count 8–13, kind 14–17, victim 18–23, cause 24–26, then DEATH's hasKiller 27
+      // and killer 28–33.
+      const one = (kind: number, fill: (e: EventRecord) => void) => {
+        const m = new EventsMsg();
+        fill(m.add(kind) as EventRecord);
+        return encodedBy((w) => encodeEvents(w, m));
+      };
+      const out = new EventsMsg();
+      const death = one(EVK_PLAYER_DEATH, (e) => {
+        e.victim = 4;
+        e.hasKiller = 1;
+        e.killer = 9;
+      });
+      expect(decodeEvents(readerOver(death), out)).toBe(true);
+      expect([out.events[0]?.victim, out.events[0]?.hasKiller, out.events[0]?.killer]).toEqual([
+        4, 1, 9,
+      ]);
+      for (let cause = 0; cause < 8; cause++) {
+        const ok = decodeEvents(readerOver(patchBits(death, 24, 3, cause)), out);
+        expect(ok, `death cause ${cause}`).toBe(cause <= EV_DEATH_CAUSE_MAX);
+      }
+      const hit = one(EVK_HIT_CONFIRM, (e) => (e.victim = 63));
+      expect(decodeEvents(readerOver(hit), out)).toBe(true);
+      for (let cause = 0; cause < 8; cause++) {
+        const ok = decodeEvents(readerOver(patchBits(hit, 24, 3, cause)), out);
+        expect(ok, `hit cause ${cause}`).toBe(cause <= EV_HIT_CAUSE_MAX);
+      }
+    });
+
+    it("the decoder refuses a count of 0, kinds 0 and 6–15, team 3, reason 3 and players past 64", () => {
       // type 0–7, count 8–13, then the first event: kind 14–17, JOIN id 18–23 and team 24–25;
       // SERVER_STATS p50 18–33, p99 34–49, max 50–65, players 66–72.
       const out = new EventsMsg();
@@ -971,7 +1198,11 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
       for (let kind = 0; kind < 16; kind++) {
         const ok = decodeEvents(readerOver(patchBits(join, 14, 4, kind)), out);
         // JOIN and LEAVE share a layout; SERVER_STATS is longer, so the JOIN's bits run short.
-        expect(ok, `kind ${kind}`).toBe(kind === EVK_PLAYER_JOIN || kind === EVK_PLAYER_LEAVE);
+        // PLAYER_DEATH reads the JOIN's id and team as victim 5, cause 2 (goomba) and no killer,
+        // within the padding byte; HIT_CONFIRM reads the same cause 2, which it refuses.
+        expect(ok, `kind ${kind}`).toBe(
+          kind === EVK_PLAYER_JOIN || kind === EVK_PLAYER_LEAVE || kind === EVK_PLAYER_DEATH,
+        );
       }
       expect(decodeEvents(readerOver(patchBits(join, 24, 2, 3)), out)).toBe(false);
       const leave = patchBits(join, 14, 4, EVK_PLAYER_LEAVE);
@@ -1063,6 +1294,17 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
     const L_GROUND = 32;
     const L_WATER = 64;
     const L_STAMINA = 128;
+    // The v4 fields (M4 design §2.2): one bit each, the climb's height and yaw together.
+    const L_WALL_JUMPS = 1 << 8;
+    const L_HEALTH = 1 << 9;
+    const L_ARMOR = 1 << 10;
+    const L_SUBMERGED = 1 << 11;
+    const L_CLIMB = 1 << 12;
+    const L_REGEN_DELAY = 1 << 13;
+    const L_KICK_COOLDOWN = 1 << 14;
+    const L_REGRAB = 1 << 15;
+    const L_WATER_JUMP = 1 << 16;
+    const L_BANDAGE = 1 << 17;
 
     /**
      * The baseline of the hand-written deltas: tick 990, the receiver SNAP_SELF and players 3, 20
@@ -1094,7 +1336,8 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
       writeTick(w, tick);
       w.writeBits(baseBack, 6);
       w.writeBits(flags, 8);
-      zeros(w, 16 + 8 + 8);
+      // cvarHash, inputBufferHealth, teleportSeq, contactSeq (D-053).
+      zeros(w, 16 + 8 + 8 + 4);
       body(w);
       expect(w.error).toBe(false);
       return w.bytes.slice(0, w.byteLength);
@@ -1116,7 +1359,7 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
     /** No local change, then `count` records. */
     function records(count: number, body: (w: BitWriter) => void): (w: BitWriter) => void {
       return (w) => {
-        w.writeBits(0, 8);
+        w.writeBits(0, LOCAL_MASK_BITS);
         w.writeBits(count, 7);
         body(w);
       };
@@ -1195,7 +1438,7 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
       h.baseBack = 10;
       expect(encodeSnapshot(w, h, cur, base, SNAP_SELF)).toBe(true);
       // Header, no local change, count 1, then the record: id 40, removed 0, new 1.
-      expect(w.bitLength).toBe(86 + 8 + 7 + ENTITY_NEW_BITS);
+      expect(w.bitLength).toBe(SNAP_HEADER_BITS + LOCAL_MASK_BITS + 7 + ENTITY_NEW_BITS);
       const bytes = w.bytes.slice(0, w.byteLength);
       expect(decodesAgainst(bytes, base)).toBe(true);
       expect([decoded.yaw[40], decoded.stamp[40]]).toEqual([5, 1000]);
@@ -1343,9 +1586,39 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
       cur.setPresent(40, 0);
       const w = newWriter();
       expect(encodeSnapshot(w, h, cur, base, SNAP_SELF)).toBe(true);
-      expect(w.bitLength).toBe(SNAP_HEADER_BITS + 8 + SNAP_ENTITY_COUNT_BITS + 6 + 2 * 16);
+      expect(w.bitLength).toBe(
+        SNAP_HEADER_BITS + LOCAL_MASK_BITS + SNAP_ENTITY_COUNT_BITS + 6 + 2 * 16,
+      );
       expect(decodesAgainst(w.bytes.slice(0, w.byteLength), base)).toBe(true);
       expect(frameDigest(decoded, SNAP_SELF)).toBe(frameDigest(cur, SNAP_SELF));
+    });
+
+    it("the delta encoder refuses a local block it can't carry, changed or not (D-053)", () => {
+      const h = new SnapshotHeader();
+      h.serverTick = 1000;
+      h.baseBack = 10;
+      const l = SNAP_SELF * LF_COUNT;
+      const pairWith = (dirty: (f: WorldFrame) => void) => {
+        const base = handBase();
+        dirty(base);
+        const cur = new WorldFrame();
+        for (const s of [SNAP_SELF, 3, 20, 40]) {
+          copySlot(cur, s, base, s);
+          cur.setPresent(s, 1000);
+        }
+        return encodeSnapshot(newWriter(), h, cur, base, SNAP_SELF);
+      };
+      expect(pairWith(() => {})).toBe(true);
+      // Both frames hold the bad value, so the lane is unchanged and not in the mask: only the
+      // encoder's own check can refuse it (every client would refuse what it wrote).
+      const refused: [string, (f: WorldFrame) => void][] = [
+        ["climbHeight without CLIMBING", (f) => (f.locals[l + LF_CLIMB_HEIGHT] = 5)],
+        ["climbYaw without CLIMBING", (f) => (f.locals[l + LF_CLIMB_YAW] = 9)],
+        ["health 16384", (f) => (f.locals[l + LF_HEALTH] = 16384)],
+        ["wallJumps 8", (f) => (f.locals[l + LF_WALL_JUMPS] = 8)],
+        ["waterLevel 4 (M3)", (f) => (f.waterLevel[SNAP_SELF] = 4)],
+      ];
+      for (const [label, dirty] of refused) expect(pairWith(dirty), label).toBe(false);
     });
 
     it("refuses what the delta encoder never writes (the NET-01 patched-field table)", () => {
@@ -1371,7 +1644,7 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
       const local =
         (mask: number, fields: Body): Body =>
         (w) => {
-          w.writeBits(mask, 8);
+          w.writeBits(mask, LOCAL_MASK_BITS);
           fields(w);
           w.writeBits(0, 7);
         };
@@ -1396,11 +1669,31 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
         ["team 2", one(3, E_TEAM, (w) => w.writeBits(2, 2))],
         ["a teleport", one(3, E_TELEPORT, (w) => w.writeBits(1, 8))],
         ["an event", events(1, PMEV_STEP, 3)],
+        ["a BOOT of id 63 (M4 design §2.2)", events(1, PMEV_BOOT, 63)],
+        ["a WATER_JUMP", events(1, PMEV_WATER_JUMP, 0)],
         ["every entity flag", one(3, E_FLAGS, (w) => w.writeBits(ENTITY_FLAG_MASK, 10))],
         ["pitch −16201", one(3, E_PITCH, (w) => w.writeBits(-PITCH_LIMIT_U16 & 0xffff, 16))],
         ["local yaw", local(L_YAW, (w) => w.writeBits(7, 16))],
         ["local pitch", local(L_PITCH, (w) => w.writeBits(7, 16))],
-        ["local flags", local(L_FLAGS, (w) => w.writeBits(1, 10))],
+        ["local flags", local(L_FLAGS, (w) => w.writeBits(1, 11))],
+        ["local GRAB_LOCK (bit 10)", local(L_FLAGS, (w) => w.writeBits(1 << 10, 11))],
+        ["local wallJumps 7", local(L_WALL_JUMPS, (w) => w.writeBits(7, 3))],
+        ["local health 16383", local(L_HEALTH, (w) => w.writeBits(16383, 14))],
+        ["local armor 3", local(L_ARMOR, (w) => w.writeBits(3, 2))],
+        ["local submerged 2047", local(L_SUBMERGED, (w) => w.writeBits(2047, 11))],
+        ["local regenDelay 127", local(L_REGEN_DELAY, (w) => w.writeBits(127, 7))],
+        ["local kickCooldown 63", local(L_KICK_COOLDOWN, (w) => w.writeBits(63, 6))],
+        ["local regrab 15", local(L_REGRAB, (w) => w.writeBits(15, 4))],
+        ["local waterJump 63", local(L_WATER_JUMP, (w) => w.writeBits(63, 6))],
+        ["local bandage 255", local(L_BANDAGE, (w) => w.writeBits(255, 8))],
+        [
+          "local climb while CLIMBING (height −2048, yaw 0)",
+          local(L_FLAGS | L_CLIMB, (w) => {
+            w.writeBits(PMF_CLIMBING, 11);
+            w.writeSigned(-2048, 12);
+            w.writeBits(0, 8);
+          }),
+        ],
         ["local waterLevel", local(L_WATER, (w) => w.writeBits(3, 2))],
         ["local stamina", local(L_STAMINA, (w) => w.writeBits(100, 16))],
         ["local ground ENTITY_WORLD", local(L_GROUND, (w) => w.writeBits(32768, 16))],
@@ -1416,6 +1709,36 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
       for (const [label, body] of accepted) {
         expect(decodesAgainst(handDelta(body), base), label).toBe(true);
       }
+      // Each v4 mask bit carries its own lane (docs/05 §3.6): the value lands there and nowhere
+      // else, so two lanes of one width can't trade bits with a symmetric encoder and decoder.
+      const self = SNAP_SELF * LF_COUNT;
+      const lanes: [number, number, number, number][] = [
+        [L_WALL_JUMPS, 3, 5, LF_WALL_JUMPS],
+        [L_HEALTH, 14, 9001, LF_HEALTH],
+        [L_ARMOR, 2, 2, LF_ARMOR],
+        [L_SUBMERGED, 11, 1234, LF_SUBMERGED],
+        [L_REGEN_DELAY, 7, 101, LF_REGEN_DELAY],
+        [L_KICK_COOLDOWN, 6, 33, LF_KICK_COOLDOWN],
+        [L_REGRAB, 4, 11, LF_REGRAB],
+        [L_WATER_JUMP, 6, 47, LF_WATER_JUMP],
+        [L_BANDAGE, 8, 222, LF_BANDAGE],
+      ];
+      for (const [bit, width, value, lane] of lanes) {
+        const body = local(bit, (w) => w.writeBits(value, width));
+        expect(decodesAgainst(handDelta(body), base), `bit ${bit}`).toBe(true);
+        for (let k = 0; k < LF_COUNT; k++) {
+          expect(decoded.locals[self + k], `bit ${bit}, lane ${k}`).toBe(k === lane ? value : 0);
+        }
+      }
+      const climb = local(L_FLAGS | L_CLIMB, (w) => {
+        w.writeBits(PMF_CLIMBING, 11);
+        w.writeSigned(-7, 12);
+        w.writeBits(9, 8);
+      });
+      expect(decodesAgainst(handDelta(climb), base)).toBe(true);
+      expect([decoded.locals[self + LF_CLIMB_HEIGHT], decoded.locals[self + LF_CLIMB_YAW]]).toEqual(
+        [-7, 9],
+      );
       const refused: [string, Body][] = [
         ["mask 0", one(3, 0, () => {})],
         ["an origin group of class 0 only", origin(0, 0, 0)],
@@ -1438,7 +1761,9 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
         ["team 3", one(3, E_TEAM, (w) => w.writeBits(3, 2))],
         ["teleportSeq equal to the baseline", one(3, E_TELEPORT, (w) => w.writeBits(0, 8))],
         ["events equal to the baseline", events(0, 0, 0)],
-        ["event kind 4", events(1, 4, 0)],
+        ["event kind 8 (local only)", events(1, PMEV_SLIDE_START, 0)],
+        ["BOOT of id 64", events(1, PMEV_BOOT, 64)],
+        ["WALLKICK with a value", events(1, PMEV_WALLKICK, 1)],
         ["JUMP with a value", events(1, PMEV_JUMP, 1)],
         ["a delta for a slot the baseline lacks", one(4, E_YAW, (w) => w.writeBits(5, 16))],
         ["a removal of a slot the baseline lacks", records(1, (w) => rec(w, 4, 1))],
@@ -1452,7 +1777,31 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
         ],
         ["a local yaw equal to the baseline", local(L_YAW, (w) => w.writeBits(0, 16))],
         ["a local pitch equal to the baseline", local(L_PITCH, (w) => w.writeBits(0, 16))],
-        ["local flags equal to the baseline", local(L_FLAGS, (w) => w.writeBits(0, 10))],
+        ["local flags equal to the baseline", local(L_FLAGS, (w) => w.writeBits(0, 11))],
+        ["a local health equal to the baseline", local(L_HEALTH, (w) => w.writeBits(0, 14))],
+        ["a local bandage equal to the baseline", local(L_BANDAGE, (w) => w.writeBits(0, 8))],
+        [
+          "a local climb group equal to the baseline",
+          local(L_FLAGS | L_CLIMB, (w) => {
+            w.writeBits(PMF_CLIMBING, 11);
+            w.writeSigned(0, 12);
+            w.writeBits(0, 8);
+          }),
+        ],
+        [
+          "climb fields without CLIMBING (the canonical rule)",
+          local(L_CLIMB, (w) => {
+            w.writeSigned(5, 12);
+            w.writeBits(0, 8);
+          }),
+        ],
+        [
+          "a climb yaw without CLIMBING",
+          local(L_CLIMB, (w) => {
+            w.writeSigned(0, 12);
+            w.writeBits(9, 8);
+          }),
+        ],
         ["a local ground equal to the baseline", local(L_GROUND, (w) => w.writeBits(0, 16))],
         ["a local waterLevel equal to the baseline", local(L_WATER, (w) => w.writeBits(0, 2))],
         ["a local stamina equal to the baseline", local(L_STAMINA, (w) => w.writeBits(0, 16))],
@@ -1471,6 +1820,25 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
       for (const [label, body] of refused) {
         expect(decodesAgainst(handDelta(body), base), label).toBe(false);
       }
+      // The canonical rule judges the new flags against the climb lanes as they end up: against
+      // a baseline mid-climb, clearing CLIMBING alone leaves the climb fields set (refused), while
+      // clearing it with the climb group zeroed, or changing another flag, is fine.
+      const climbing = handBase();
+      climbing.flags[SNAP_SELF] = PMF_CLIMBING;
+      climbing.locals[SNAP_SELF * LF_COUNT + LF_CLIMB_HEIGHT] = 5;
+      const flagsOnly = (v: number) => local(L_FLAGS, (w) => w.writeBits(v, 11));
+      expect(decodesAgainst(handDelta(flagsOnly(0)), climbing), "CLIMBING cleared alone").toBe(
+        false,
+      );
+      expect(decodesAgainst(handDelta(flagsOnly(PMF_CLIMBING | 1)), climbing)).toBe(true);
+      const cleared = local(L_FLAGS | L_CLIMB, (w) => {
+        w.writeBits(0, 11);
+        w.writeSigned(0, 12);
+        w.writeBits(0, 8);
+      });
+      expect(decodesAgainst(handDelta(cleared), climbing), "CLIMBING cleared with the group").toBe(
+        true,
+      );
       // The header: a baseline before tick 1. The body: a baseline without the receiver.
       expect(
         decodesAgainst(
@@ -1519,7 +1887,7 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
         for (let s = 0; s < FRAME_SLOTS; s++) copySlot(cur, s, base, s);
         for (const s of [SNAP_SELF, 3, 20, 40]) cur.setPresent(s, 1000);
       };
-      const fixed = SNAP_HEADER_BITS + 8 + SNAP_ENTITY_COUNT_BITS;
+      const fixed = SNAP_HEADER_BITS + LOCAL_MASK_BITS + SNAP_ENTITY_COUNT_BITS;
       // [delta, payload bits] per class: i7 / i13 / absolute i21 for origins, i6 / i11 / i16 for
       // entity velocities, i7 / i13 / i20 for the local velocity.
       const originCases: [number, number][] = [
@@ -1609,12 +1977,22 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
       cur.ground1[SNAP_SELF] = 1;
       cur.waterLevel[SNAP_SELF] = 1;
       cur.stamina[SNAP_SELF] = 1;
+      cur.flags[SNAP_SELF] = PMF_CLIMBING;
+      cur.locals.fill(1, SNAP_SELF * LF_COUNT, (SNAP_SELF + 1) * LF_COUNT);
       expect(localBlockBits(cur, base, SNAP_SELF)).toBe(LOCAL_DELTA_MAX_BITS);
-      expect(roundTrip("every local field")).toBe(fixed - 8 + LOCAL_DELTA_MAX_BITS);
+      expect(roundTrip("every local field")).toBe(fixed - LOCAL_MASK_BITS + LOCAL_DELTA_MAX_BITS);
+      // Each v4 lane alone, at its width (the climb's two lanes as one group).
+      const laneWidths = [3, 14, 2, 11, 20, 20, 7, 6, 4, 6, 8];
+      for (let i = 0; i < LF_COUNT; i++) {
+        reset();
+        cur.flags[SNAP_SELF] = PMF_CLIMBING;
+        cur.locals[SNAP_SELF * LF_COUNT + i] = 1;
+        expect(roundTrip(`lane ${i}`)).toBe(fixed + 11 + (laneWidths[i] as number));
+      }
     });
   });
 
-  it("fits the v2 sizes (M3 design §2.1 goldens): 862 B full at 32 players, an INPUT of 4 cmds in 55 B", () => {
+  it("fits the v4 sizes (M4 design §2.2 goldens): 873 B full at 32 players, an INPUT of 4 cmds in 55 B", () => {
     const w = newWriter();
     const m = new SnapshotParts();
     const rng = new Mulberry32(0x512e);
@@ -1629,18 +2007,20 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
       );
       return [w.bitLength, w.byteLength];
     };
-    expect(SNAP_HEADER_BITS).toBe(86);
+    expect(SNAP_HEADER_BITS).toBe(90);
     expect(SNAP_SPECTATOR_HEADER_BITS).toBe(70);
     expect(ENTITY_NEW_BITS).toBe(213);
-    // Alone: 86 + 199 + 7. The full snapshot of a 32-player match: + 31 × 213. 37 players (the
+    expect(PLAYER_STATE_BITS).toBe(281);
+    // Alone: 90 + 281 + 7. The full snapshot of a 32-player match: + 31 × 213. 37 players (the
     // cap until the scheduler, D-034): + 36 × 213. The most a live full snapshot holds: 39.
-    expect(size(0)).toEqual([292, 37]);
-    expect(size(15)).toEqual([3487, 436]);
-    expect(size(31)).toEqual([6895, 862]);
-    expect(size(36)).toEqual([7960, 995]);
-    expect(size(LIVE_FULL_MAX_OTHERS)).toEqual([8599, 1075]);
-    // 64 players unscheduled: 13711 bits, past the budget (the D-046 scheduler defers).
-    expect(SNAP_FULL_FIXED_BITS + 63 * ENTITY_NEW_BITS).toBe(13711);
+    expect(size(0)).toEqual([378, 48]);
+    expect(size(15)).toEqual([3573, 447]);
+    expect(size(31)).toEqual([6981, 873]);
+    expect(size(36)).toEqual([8046, 1006]);
+    expect(LIVE_FULL_MAX_OTHERS).toBe(39);
+    expect(size(LIVE_FULL_MAX_OTHERS)).toEqual([8685, 1086]);
+    // 64 players unscheduled: 13797 bits, past the budget (the D-046 scheduler defers).
+    expect(SNAP_FULL_FIXED_BITS + 63 * ENTITY_NEW_BITS).toBe(13797);
     // Spectator (demo files only): 70 + 7 + 213 per player, up to all 64, within 2048 B.
     expect(size(0, true)).toEqual([77, 10]);
     const allSpectated = size(64, true);
@@ -1654,7 +2034,7 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
     expect([w.bitLength, w.byteLength]).toEqual([435, 55]);
   });
 
-  it("fits the worst deltas (M3 design §2.1 goldens): 942 B at 32 players, 1088 B at 37 and scheduled at 64", () => {
+  it("fits the worst deltas (M4 design §2.2 goldens): 954 B at 32 players, 1100 B at 37, 1073 B scheduled at 64", () => {
     const w = newWriter();
     const m = new SnapshotParts();
     /**
@@ -1692,6 +2072,9 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
         cur.ground1[SNAP_SELF] = 1;
         cur.waterLevel[SNAP_SELF] = 1;
         cur.stamina[SNAP_SELF] = 1;
+        // Every v4 lane too, the climb's with CLIMBING set (M4 design §2.2).
+        cur.flags[SNAP_SELF] = 1 | PMF_CLIMBING;
+        cur.locals.fill(1, SNAP_SELF * LF_COUNT, (SNAP_SELF + 1) * LF_COUNT);
       }
       let s = 0;
       for (let n = 0; n < others + removals; n++, s++) {
@@ -1726,9 +2109,10 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
       return [w.bitLength, w.byteLength];
     };
     expect([LOCAL_DELTA_MAX_BITS, ENTITY_DELTA_MAX_BITS, ENTITY_REMOVED_BITS]).toEqual([
-      219, 233, 17,
+      311, 233, 17,
     ]);
-    expect(SNAP_DELTA_FIXED_BITS).toBe(312);
+    expect(LOCAL_MASK_BITS).toBe(18);
+    expect(SNAP_DELTA_FIXED_BITS).toBe(408);
     // The smallest delta record (docs/05 §3.6: 28–233 bits): id, removed, new, mask, a team.
     const smallBase = new WorldFrame();
     const small = new WorldFrame();
@@ -1736,19 +2120,19 @@ describe("NET-01: codec round trips and fuzzed decoders (docs/05 §3.6, §14)", 
     small.setPresent(3, 600);
     small.team[3] = 1;
     expect(entityRecordBits(small, smallBase, 3)).toBe(28);
-    // 86 + 219 + 7 + 31 × 233 at 32 players; + 36 × 233 at 37 (SNAP_FIT_MAX_PLAYERS: the cap
-    // until the scheduler, D-034), within 1100 B by construction.
-    expect(worst(31)).toEqual([7535, 942]);
+    // 90 + 311 + 7 + 31 × 233 at 32 players; + 36 × 233 at 37 (SNAP_FIT_MAX_PLAYERS: the cap
+    // until the scheduler, D-034), within 1100 B by construction with 4 bits to spare.
+    expect(worst(31)).toEqual([7631, 954]);
     expect(SNAP_FIT_MAX_PLAYERS).toBe(37);
-    expect(worst(SNAP_FIT_MAX_PLAYERS - 1)).toEqual([8700, 1088]);
-    // 36 remotes and 6 removals (43 → 37 players inside the ack window) are 8802 bits: past the
+    expect(worst(SNAP_FIT_MAX_PLAYERS - 1)).toEqual([8796, 1100]);
+    // 36 remotes and 6 removals (43 → 37 players inside the ack window) are 8898 bits: past the
     // budget, so the encoder refuses (the D-046 scheduler's case).
-    expect(worst(36, false, 6)).toEqual([8802, -1]);
-    // 63 remotes (64 players): 14991 bits unscheduled. The scheduler's worst: 34 records fit
-    // (SNAP_MIN_CAPACITY), 29 deferred ids: 86 + 219 + 7 + 6 + 34 × 233 + 29 × 16.
-    expect(worst(63)).toEqual([14991, -1]);
-    expect(worst(63, false, 0, 29)).toEqual([8704, 1088]);
-    expect([SNAP_MIN_CAPACITY, SNAP_MIN_CAPACITY_FULL, SNAP_MAX_STALENESS]).toEqual([34, 37, 2]);
+    expect(worst(36, false, 6)).toEqual([8898, -1]);
+    // 63 remotes (64 players): 15087 bits unscheduled. The scheduler's worst: 33 records fit
+    // (SNAP_MIN_CAPACITY), 30 deferred ids: 90 + 311 + 7 + 6 + 33 × 233 + 30 × 16.
+    expect(worst(63)).toEqual([15087, -1]);
+    expect(worst(63, false, 0, 30)).toEqual([8583, 1073]);
+    expect([SNAP_MIN_CAPACITY, SNAP_MIN_CAPACITY_FULL, SNAP_MAX_STALENESS]).toEqual([33, 37, 2]);
     // Spectator (demo files only): 70 + 7 + 233 per player.
     expect(worst(32, true)).toEqual([7533, 942]);
     const all = worst(64, true);

@@ -3,6 +3,7 @@ import {
   EV_LEAVE_TIMED_OUT,
   EVK_PLAYER_JOIN,
   EVK_PLAYER_LEAVE,
+  EVK_SERVER_STATS,
   type EventRecord,
   type EventsMsg,
   MATCH_MAX_CLIENTS,
@@ -74,7 +75,7 @@ export class Roster {
       this.joined[id] = 0;
       this.team[id] = 0;
       notice(notices, `player ${id} ${leaveText(e.reason)}`);
-    } else {
+    } else if (e.kind === EVK_SERVER_STATS) {
       const s = this.server;
       s[SV_TICK_P50_US] = e.tickP50Us;
       s[SV_TICK_P99_US] = e.tickP99Us;
@@ -82,6 +83,8 @@ export class Roster {
       s[SV_PLAYERS] = e.players;
       s[SV_REPORTS] = (s[SV_REPORTS] as number) + 1;
     }
+    // PLAYER_DEATH and HIT_CONFIRM (protocol v4, D-053) decode but change nothing yet: the death's
+    // console line comes with deaths (M4 increment 7), the impact sound with the boot (13).
   }
 }
 
