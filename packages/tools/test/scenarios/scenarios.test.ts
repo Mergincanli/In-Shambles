@@ -15,7 +15,9 @@ import {
   PlayerState,
   PMEV_JUMP,
   PMEV_LAND,
+  PMF_CROUCHED,
   PMF_GROUNDED,
+  quantizePlayerState,
   UserCmd,
   vec3,
 } from "@game/shared";
@@ -154,12 +156,79 @@ describe("ScenarioRunner", () => {
   it("places players at rest with full stamina, grounded on the world or airborne", () => {
     const ps = new PlayerState();
     ps.velocity.fill(5);
+    ps.viewPitch = 300;
+    ps.waterLevel = 2;
+    ps.flags = PMF_CROUCHED;
     placePlayer(ps, [1, 2, 3], 0x1_0001);
     expect([...ps.origin, ...ps.velocity]).toEqual([1, 2, 3, 0, 0, 0]);
-    expect([ps.viewYaw, ps.flags, ps.groundEntity]).toEqual([1, PMF_GROUNDED, ENTITY_WORLD]);
-    expect(ps.stamina).toBe(SCENARIO_STAMINA);
-    placePlayer(ps, [1, 2, 3], 0, false);
+    expect([ps.viewYaw, ps.viewPitch, ps.flags, ps.groundEntity]).toEqual([
+      1,
+      0,
+      PMF_GROUNDED,
+      ENTITY_WORLD,
+    ]);
+    expect([ps.waterLevel, ps.stamina]).toEqual([0, SCENARIO_STAMINA]);
+    placePlayer(ps, [1, 2, 3], 0, { grounded: false });
     expect([ps.flags, ps.groundEntity]).toEqual([0, ENTITY_NONE]);
+  });
+
+  it("resets every field PlayerState has, whatever the state held before", () => {
+    // Field-agnostic, so a field PlayerState gains is covered without editing this test.
+    const dirty = new PlayerState();
+    const fields = dirty as unknown as Record<string, unknown>;
+    const keys = Object.keys(fields);
+    for (const key of keys) {
+      const value = fields[key];
+      if (value instanceof Float64Array || value instanceof Float32Array) value.fill(7.5);
+      else if (ArrayBuffer.isView(value)) (value as Int32Array).fill(7);
+      else if (typeof value === "number") fields[key] = 77;
+      else throw new Error(`PlayerState.${key}: teach this test to dirty a ${typeof value}`);
+    }
+    expect(dirty, "every field dirtied").not.toEqual(new PlayerState());
+    for (const options of [{}, { grounded: false }, { velocity: [10, 20, 30] as const }]) {
+      expect(placePlayer(dirty, [1, 2, 3], 5, options), JSON.stringify(options)).toEqual(
+        placePlayer(new PlayerState(), [1, 2, 3], 5, options),
+      );
+    }
+    // The origin and the velocity may be the state's own.
+    const own = placePlayer(new PlayerState(), [4, 5, 6], 0, { velocity: [1, 2, 3] });
+    placePlayer(own, own.origin, 0, { velocity: own.velocity });
+    expect([...own.origin, ...own.velocity]).toEqual([4, 5, 6, 1, 2, 3]);
+  });
+
+  it("places players moving, with any stamina, quantized as the server holds every state", () => {
+    const ps = placePlayer(new PlayerState(), [1.01, 2, 3], 0, {
+      grounded: false,
+      velocity: [400.02, -20, 270],
+      stamina: 1234.4,
+    });
+    expect([...ps.origin, ...ps.velocity]).toEqual([1, 2, 3, 400, -20, 270]);
+    expect([ps.stamina, ps.flags]).toEqual([1234, 0]);
+    expect(quantizePlayerState(copyPlayerState(new PlayerState(), ps))).toEqual(ps);
+  });
+
+  it("keeps every recorded state whole, and refuses a state it has not recorded", () => {
+    const ps = placeAtAnchor(new PlayerState(), courseAnchor(course, "runway_start"));
+    const start = copyPlayerState(new PlayerState(), ps);
+    const record = runner.run(ps, new HopForward(0, { runUpTicks: 3, hops: 1 }), 30, 40);
+    expect(record.state(0)).toEqual(start);
+    expect(record.state(30)).toEqual(ps);
+    for (let i = 0; i < record.count; i++) {
+      const s = record.state(i);
+      expect([...s.origin, ...s.velocity]).toEqual([
+        record.x(i),
+        record.y(i),
+        record.z(i),
+        ...record.velocity.subarray(3 * i, 3 * i + 3),
+      ]);
+      expect([s.flags, s.viewYaw]).toEqual([record.flags[i], record.viewYaw[i]]);
+      expect(quantizePlayerState(copyPlayerState(new PlayerState(), s)), `state ${i}`).toEqual(s);
+    }
+    // The airborne states differ from the grounded ones in more than the columns hold.
+    expect(record.state(10).groundEntity).not.toBe(record.state(0).groundEntity);
+    for (const i of [-1, 31, 40, 1.5]) expect(() => record.state(i), String(i)).toThrow(RangeError);
+    record.clear();
+    expect(() => record.state(0)).toThrow(/not recorded \(count 0\)/);
   });
 });
 

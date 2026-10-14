@@ -36,15 +36,12 @@ import { GameRenderer } from "../render/renderer";
 import type { WorkerOutMsg, WorkerStartMsg } from "../worker/messages";
 import { DemoGame } from "./demoGame";
 import { Game, type StatusSink } from "./game";
-import { fetchMap, loadServerMap } from "./maps";
+import { chooseWorkerMap, fetchMap, loadServerMap } from "./maps";
 import { type BootParams, connectSearch, demoSearch, parseServerUrl } from "./params";
 import { browserStorage, type HeldCheats, loadSettings, SettingsSaver } from "./settings";
 
 /** The net simulator's seed on the page: one fixed schedule per profile (D-028). */
 const NETSIM_SEED = 0x5eed;
-
-/** The local server's map (M2): the movement course. */
-const WORKER_MAP = "movement_lab";
 
 export interface Booted {
   readonly game: Game;
@@ -57,10 +54,11 @@ export interface Booted {
 
 /**
  * Starts the game on `canvas` (M2 design §1 app/boot.ts, D-031). By default it fetches
- * movement_lab (every map is a bundled `?url` asset, app/maps.ts), starts the server Worker with a
- * copy of the bytes and the server ends of two MessageChannels, and connects over the page's
- * ends. With `?connect=ws://…` it opens a WebSocket to that dedicated server instead and loads the
- * map the server's WELCOME names (READY waits for it). Either link goes through the net
+ * movement_lab, or the course `?map=` names (D-063; every map is a bundled `?url` asset,
+ * app/maps.ts), starts the server Worker with a copy of the bytes and the server ends of two
+ * MessageChannels, and connects over the page's ends. With `?connect=ws://…` it opens a WebSocket
+ * to that dedicated server instead and loads the map the server's WELCOME names (READY waits for
+ * it). Either link goes through the net
  * simulator, at `?net_profile=` (else `lan`) until the `net_profile` command picks another. Then
  * the scene, the HUD, the console and the input, and the frame loop. Autotest pages skip saved
  * settings and pointer lock.
@@ -79,6 +77,7 @@ export async function boot(
       ? null
       : `unknown net_profile ${params.netProfile}; using lan`;
   if (params.netProfile !== null) profile = findNetProfile(params.netProfile) ?? NET_PROFILE_LAN;
+  const workerMap = chooseWorkerMap(params.map, params.connect);
   let base: Transport;
   let worker: Worker | null = null;
   let cmap: Cmap | null = null;
@@ -93,7 +92,7 @@ export async function boot(
     base = new WebSocketTransport(socket);
   } else {
     server = "the local server (Worker)";
-    const file = await fetchMap(WORKER_MAP);
+    const file = await fetchMap(workerMap.name);
     cmap = file.cmap;
     const started = startWorker(file.bytes, buildHash, onError);
     worker = started.worker;
@@ -238,9 +237,10 @@ export async function boot(
   attachMouseButtons(canvas, lock, router, () => !params.autotest && !gameConsole.open);
   gameConsole.print("In Shambles console: help lists the commands; Backquote or Escape closes it.");
   gameConsole.print(`playing on ${server}`);
-  if (profileWarning !== null) {
-    console.warn(profileWarning);
-    gameConsole.print(profileWarning);
+  for (const warning of [profileWarning, workerMap.warning]) {
+    if (warning === null) continue;
+    console.warn(warning);
+    gameConsole.print(warning);
   }
   for (const w of settingWarnings) gameConsole.print(w);
 

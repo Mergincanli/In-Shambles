@@ -172,17 +172,21 @@ packages/server/src/
                        /status and /metrics), wsTransport.ts (WsTransport, D-030); webtransport adapter (M9)
 
 packages/client/src/
-  app/                 boot.ts (the local server: fetch movement_lab, start the server Worker, connect
+  app/                 boot.ts (the local server: fetch movement_lab, or the course ?map= names
+                       (D-063), start the server Worker, connect
                        over PortTransport; or, with ?connect=, a WebSocketTransport to a dedicated
                        server and the map its WELCOME names (D-031); the net simulator at
                        ?net_profile=; build the scene, start the frame loop; with ?demo=, bootDemo:
                        the demo validated, its map, DemoGame, D-044), maps.ts (every
                        content/maps/*.cmap as a bundled ?url asset, fetched by name and checked
-                       against WELCOME's hash), game.ts (the frame loop, the view pose, the autotest
+                       against WELCOME's hash; chooseWorkerMap: ?map= looked up among them by name,
+                       never a path, an unknown name or one beside ?connect= warned and
+                       movement_lab played), game.ts (the frame loop, the view pose, the autotest
                        status; the third-person pull-back), demoGame.ts (demo playback's frame loop:
                        the follow camera, the capsules, the "following #id" line), params.ts (the
-                       ?autotest=1, ?bot=, ?cam=, ?connect=, ?net_profile=, ?demo= URL hooks; server
-                       addresses), settings.ts (ARCHIVE cvars and binds saved in
+                       ?autotest=1, ?bot=, ?cam=, ?connect=, ?map=, ?net_profile=, ?demo= URL hooks
+                       (?demo= plays its header's map and ignores ?map=; the console's connect and
+                       demo drop ?map=); server addresses), settings.ts (ARCHIVE cvars and binds saved in
                        localStorage, §6); later routing (menu ↔ match)
   net/                 DOM-free (tsconfig.net.json), exported as @game/client/net for tests and bots:
     clientSim.ts       ClientSim: one frame = poll (reconcile) → clock step → tick accumulator
@@ -219,7 +223,9 @@ packages/client/src/
     portTransport.ts   PortTransport over two MessagePort-like ports (the Worker link)
     webSocketTransport.ts  WebSocketTransport over a structural SocketLike (the browser's or Node's
                        WebSocket): channel from the type byte, pooled inbox, close reasons (D-030)
-    scriptedInput.ts   StrafeCircuit, MixedInput (?bot= input, NET tests, M3 bots)
+    scriptedInput.ts   idle (NeutralInput: stands still, the M4 bump, boot and stomp dummy),
+                       StrafeCircuit, MixedInput (?bot= input, NET tests, M3 bots); an unknown
+                       ?bot= stands still with a warning
     remotes.ts         remote interpolation (D-037): RenderClock, InterpDelay (with the
                        scheduler's defer lag, D-046),
                        RemoteInterpolator (samples by stamp, snaps on the teleport counter,
@@ -281,7 +287,8 @@ packages/tools/src/
   vectors/             determinism test vectors for packages/shared/test/vectors (pnpm --filter @game/tools vectors)
   code/                source scanner (code vs. strings/comments) and the D-016 banned-math list, for the guards
   scenarios/           movement scenarios (D-025): runner.ts (real pmove on a course, scripted
-                       cmds), bots.ts (hold, hop, strafe bots), course.ts (committed courses as the
+                       cmds; every recorded state kept whole; placePlayer with velocity and
+                       stamina, quantized, D-064), bots.ts (hold, hop, strafe bots), course.ts (committed courses as the
                        game loads them), metrics.ts, determinismProbe.ts and probeBuilds.ts (MV-19)
   bots/                pnpm bots (M3, D-036): cli.ts and command.ts (flags, exit codes), runner.ts
                        (N ClientSims on Node's WebSocket, each behind its own NetSim, one 60 Hz

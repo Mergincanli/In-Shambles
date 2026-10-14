@@ -28,6 +28,40 @@ export function mapUrl(name: string): string | undefined {
   return MAP_URLS.get(name);
 }
 
+/** The local server's map when the page names none (M2): the movement course. */
+export const DEFAULT_WORKER_MAP = "movement_lab";
+
+/** The map the local server runs, and why it is not the one asked for (null when it is). */
+export interface WorkerMapChoice {
+  readonly name: string;
+  readonly warning: string | null;
+}
+
+/**
+ * The map the local server (Worker) runs for `?map=<course>` (D-063): one of the maps this build
+ * ships, looked up by name, so the parameter can name a course but never a path or a URL. Absent
+ * (null), it is the movement course; a name this build lacks falls back to it with a warning, as
+ * an unknown `?net_profile=` falls back to `lan`. A dedicated server picks its own map
+ * (`pnpm dev:server --map`), so with `?connect=` the parameter is ignored with a warning.
+ */
+export function chooseWorkerMap(requested: string | null, connect: string | null): WorkerMapChoice {
+  if (requested === null) return { name: DEFAULT_WORKER_MAP, warning: null };
+  const bundled = mapUrl(requested) !== undefined;
+  if (connect !== null) {
+    // Only a bundled name goes into the suggested command: the URL is anyone's to write.
+    const hint = bundled ? ` (pnpm dev:server --map ${requested})` : "";
+    return {
+      name: DEFAULT_WORKER_MAP,
+      warning: `?map=${JSON.stringify(requested)} is ignored: it picks the local server's map, and a dedicated server runs its own${hint}`,
+    };
+  }
+  if (bundled) return { name: requested, warning: null };
+  return {
+    name: DEFAULT_WORKER_MAP,
+    warning: `unknown map ${JSON.stringify(requested)} (this client has ${bundledMaps().join(", ")}); playing ${DEFAULT_WORKER_MAP}`,
+  };
+}
+
 /** A downloaded map: decoded, and its file's bytes (the Worker gets a copy). */
 export interface MapFile {
   readonly cmap: Cmap;

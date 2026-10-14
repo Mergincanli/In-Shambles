@@ -62,7 +62,7 @@ describe("MV-06: slopes on movement_lab", () => {
       at,
     );
     expect(snap).not.toBe(SNAP_PREVIOUS);
-    const ps = placePlayer(new PlayerState(), at, degreesToU16(90), false);
+    const ps = placePlayer(new PlayerState(), at, degreesToU16(90), { grounded: false });
     const record = runner.run(ps, idle(degreesToU16(90)), 180);
     let firstGrounded = -1;
     for (let i = 0; i < record.count && firstGrounded < 0; i++) {

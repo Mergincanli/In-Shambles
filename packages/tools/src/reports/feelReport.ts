@@ -337,12 +337,9 @@ class Measure {
   waterAndLadder(): void {
     const deep = this.anchor("water_deep");
     const mid = (yaw: number) =>
-      placePlayer(
-        new PlayerState(),
-        [deep.origin[0], deep.origin[1], deep.origin[2] + 64],
-        yaw,
-        false,
-      );
+      placePlayer(new PlayerState(), [deep.origin[0], deep.origin[1], deep.origin[2] + 64], yaw, {
+        grounded: false,
+      });
     const swimCap = RUN_CAP * P.swimScale;
     const swim = this.runner.run(mid(NORTH), new HoldInput(NORTH), 75);
     const s = horizontalSpeed(swim, swim.ticksRun);

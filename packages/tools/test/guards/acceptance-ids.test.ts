@@ -12,8 +12,10 @@ import { fromRoot } from "../../src/paths";
 // real-time legs (`pnpm test:load`, `packages/tools/load/*.load.ts`) need a describe there too,
 // besides the fast smoke in a `test/` file. A test that lands in a later increment of the
 // milestone waits in `pending` ("<ID>" for the fast file, "<ID> long" or "<ID> load" for a tier),
-// which must be empty by the time docs/09 marks the milestone done. This guard's own describe must
-// not start with an ID prefix.
+// which must be empty by the time docs/09 marks the milestone done. A pending test an earlier
+// milestone already requires (M4's MV-01, re-targeted in M4 increment 3) keeps its file while it
+// waits; any other pending test has none yet (D-064). This guard's own describe must not start
+// with an ID prefix.
 
 /** Where an ID's tests run besides `pnpm test` (M3 design §2.16). */
 type Tier = "long" | "load";
@@ -23,7 +25,10 @@ interface Milestone {
   readonly ids: readonly string[];
   /** IDs that also need a test in a tier's files. */
   readonly tiers?: Readonly<Record<string, Tier>>;
-  /** Tests still to come, as "<ID>" or "<ID> <tier>"; each must name its increment. */
+  /**
+   * Tests still to come or still to change, as "<ID>" or "<ID> <tier>"; each names the increment
+   * it waits for.
+   */
   readonly pending: Readonly<Record<string, string>>;
 }
 
@@ -89,20 +94,133 @@ const MILESTONES: Readonly<Record<string, Milestone>> = {
     // NET-10 describe, so the guard holds both long files).
     pending: {},
   },
+  // docs/09 lists "MV-01…MV-20" and "NET-03/04" (D-064); the tiers are the M4 design §5 table's
+  // "Lg" legs, plus MV-06's long sweep, which M2 already requires (D-032). Every test starts M4 pending: a new one until its file lands, an M2 or M3 one (which
+  // keeps its file) until the last increment it names. Increment 17 (the feel sign-off) empties
+  // what is left and marks docs/09 done (M4 design §6).
+  M4: {
+    ids: [
+      "MV-01",
+      "MV-02",
+      "MV-03",
+      "MV-04",
+      "MV-05",
+      "MV-06",
+      "MV-07",
+      "MV-08",
+      "MV-09",
+      "MV-10",
+      "MV-11",
+      "MV-12",
+      "MV-13",
+      "MV-14",
+      "MV-15",
+      "MV-16",
+      "MV-17",
+      "MV-18",
+      "MV-19",
+      "MV-20",
+      "NET-03",
+      "NET-04",
+    ],
+    tiers: {
+      "MV-06": "long",
+      "MV-09": "long",
+      "MV-11": "long",
+      "MV-12": "long",
+      "MV-13": "long",
+      "MV-15": "long",
+      "MV-18": "long",
+      "MV-19": "long",
+      "MV-20": "long",
+      "NET-03": "long",
+      "NET-04": "long",
+    },
+    pending: {
+      "MV-01": "increment 3 re-targets it to the active parameters (D-052)",
+      "MV-02": "increment 6 (sprint)",
+      "MV-03": "increment 3 re-targets it",
+      "MV-04": "increment 3 re-targets it and adds the jump-onto",
+      "MV-05": "increment 3 re-targets it; increment 7 adds the jump-onto's health",
+      "MV-06": "increment 3 re-targets it",
+      "MV-06 long": "increment 3 re-targets its sweep",
+      "MV-07": "increment 3 re-targets it",
+      "MV-08": "increment 3 re-targets it",
+      "MV-09": "increment 6 (the circle-jump smoke)",
+      "MV-09 long": "increment 6 (the full circle-jump run)",
+      "MV-10": "increment 8 (walls); increment 12 adds the players",
+      "MV-11": "increment 8 (wall jumps); increment 10 adds the kick-then-grab",
+      "MV-11 long": "increment 8 (the chimney phase sweep)",
+      "MV-12": "increment 9 (power slide)",
+      "MV-12 long": "increment 9 (the entry-speed sweep)",
+      "MV-13": "increment 10 (ledge grab)",
+      "MV-13 long": "increment 10 (the tick-phase sweep)",
+      "MV-14": "increment 6 (stamina); increment 7 adds health",
+      "MV-15": "increment 7 (fall damage)",
+      "MV-15 long": "increment 7 (the drop sweep)",
+      "MV-16": "increment 12 (goomba and boot)",
+      "MV-17": "increment 3 re-targets it; increment 11 completes water",
+      "MV-18": "increment 3 re-targets it; increment 11 completes ladders",
+      "MV-18 long": "increment 11 (the top-mount phase sweep)",
+      "MV-19": "increment 6 adds sprint; increment 15 the M4 yard and a second player",
+      "MV-19 long": "increment 15 extends it",
+      "MV-20": "increment 14 (the recorder and the restart from the wire)",
+      "MV-20 long": "increment 14 (the 3-minute tour)",
+      "NET-03": "increment 3 adds the preset switch; increments 6–11 the mechanics tour",
+      "NET-03 long": "increment 6 (the mechanics tour's long leg)",
+      "NET-04": "increment 4 adds solid players; increments 6–12 the tour legs",
+      "NET-04 long": "increment 4 adds the solid-player legs; increments 6–12 the tour legs",
+    },
+  },
 };
 
 const roadmap = readFileSync(fromRoot("docs", "09-roadmap.md"), "utf8");
 
+/** One number of an ID list, with a range ("01…20", "01…MV-20") or slashes ("03/04") after it. */
+const ID_ITEM = String.raw`\d+(?:\s*(?:…|\.\.\.|–|/)\s*(?:(?:MV|NET|BAL)-)?\d+)*(?:\s*\([^)]*\))?`;
+const ID_LIST = new RegExp(String.raw`\b(MV|NET|BAL)-(${ID_ITEM}(?:\s*,\s*${ID_ITEM})*)`, "g");
+
+/** A range or a slash right after a list ends at a parenthesised note ("MV-01 (basic)…03"). */
+const AFTER_NOTE = /^\s*(?:…|\.\.\.|–|\/)\s*(?:[A-Z]+-)?\d/;
+
 /**
- * IDs in an acceptance list, where one prefix covers a comma list ("MV-01, 03, 17 (basic), 19")
- * and parenthesised notes are skipped.
+ * IDs in an acceptance list, where one prefix covers a comma list ("MV-01, 03, 17 (basic), 19"),
+ * a range ("MV-01…MV-20", also with "..." or an en dash, the end's prefix optional) or a slash
+ * list ("NET-03/04"), and parenthesised notes are skipped. The numbers of a range or a slash list
+ * take its first number's width ("NET-03/4" is NET-03 and NET-04). Throws on a range or a slash
+ * list that runs backwards, an end with another prefix, or a range or slash after a note, so a
+ * typo in docs/09 fails loudly instead of listing the wrong IDs.
  */
 function acceptanceIds(text: string): string[] {
   const out: string[] = [];
-  const list = /\b(MV|NET|BAL)-(\d+(?:\s*\([^)]*\))?(?:\s*,\s*\d+(?:\s*\([^)]*\))?)*)/g;
-  for (const m of text.matchAll(list)) {
-    const numbers = (m[2] ?? "").replace(/\([^)]*\)/g, "").match(/\d+/g) ?? [];
-    for (const n of numbers) out.push(`${m[1]}-${n}`);
+  for (const m of text.matchAll(ID_LIST)) {
+    const prefix = m[1] ?? "";
+    if (AFTER_NOTE.test(text.slice((m.index ?? 0) + m[0].length))) {
+      throw new Error(`"${m[0]}": a range or slash after a parenthesised note`);
+    }
+    for (const item of (m[2] ?? "").replace(/\([^)]*\)/g, "").split(",")) {
+      const tokens = item.match(/…|\.\.\.|–|\/|(?:[A-Z]+-)?\d+/g) ?? [];
+      const first = tokens[0] ?? "";
+      let last = Number(first);
+      out.push(`${prefix}-${first}`);
+      for (let k = 1; k + 1 < tokens.length; k += 2) {
+        const sep = tokens[k] as string;
+        const end = tokens[k + 1] as string;
+        const dash = end.lastIndexOf("-");
+        if (dash >= 0 && end.slice(0, dash) !== prefix) {
+          throw new Error(`"${m[0]}": ${end} does not continue the ${prefix} list`);
+        }
+        const digits = end.slice(dash + 1);
+        const n = Number(digits);
+        if (n <= last) {
+          const what = sep === "/" ? "the slash list goes on with" : "the range ends at";
+          throw new Error(`"${m[0]}": ${what} ${digits}, not after ${last}`);
+        }
+        for (let i = sep === "/" ? n : last + 1; i <= n; i++)
+          out.push(`${prefix}-${String(i).padStart(first.length, "0")}`);
+        last = n;
+      }
+    }
   }
   return out;
 }
@@ -165,8 +283,20 @@ function requirements(m: Milestone): { key: string; files: () => string[] }[] {
   });
 }
 
+/** The test keys the milestones before `milestone` (in MILESTONES order) already require. */
+function earlierKeys(milestone: string): Set<string> {
+  const keys = new Set<string>();
+  for (const [name, m] of Object.entries(MILESTONES)) {
+    if (name === milestone) break;
+    for (const r of requirements(m)) keys.add(r.key);
+  }
+  return keys;
+}
+
 describe.each(Object.entries(MILESTONES))("acceptance tests of %s", (milestone, m) => {
   const needed = requirements(m);
+  const earlier = earlierKeys(milestone);
+  const pending = needed.filter((r) => m.pending[r.key] !== undefined);
 
   it("match the IDs docs/09 lists", () => {
     expect(acceptanceIds(acceptanceText(milestone))).toEqual(m.ids);
@@ -178,6 +308,11 @@ describe.each(Object.entries(MILESTONES))("acceptance tests of %s", (milestone, 
     for (const key of Object.keys(m.pending)) expect(keys).toContain(key);
   });
 
+  it("name the increment each pending test waits for", () => {
+    for (const [key, why] of Object.entries(m.pending))
+      expect(why, key).toMatch(/\bincrements? \d/);
+  });
+
   it.each(needed.filter((r) => m.pending[r.key] === undefined).map((r) => [r.key, r]))(
     "%s has a test file named after it",
     (_key, r) => {
@@ -185,10 +320,17 @@ describe.each(Object.entries(MILESTONES))("acceptance tests of %s", (milestone, 
     },
   );
 
-  it.each(needed.filter((r) => m.pending[r.key] !== undefined).map((r) => [r.key, r]))(
+  it.each(pending.filter((r) => !earlier.has(r.key)).map((r) => [r.key, r]))(
     "%s is still pending (drop it from the list once its test lands)",
     (_key, r) => {
       expect(r.files()).toEqual([]);
+    },
+  );
+
+  it.each(pending.filter((r) => earlier.has(r.key)).map((r) => [r.key, r]))(
+    "%s keeps an earlier milestone's test while its change is pending",
+    (_key, r) => {
+      expect(r.files()).not.toEqual([]);
     },
   );
 
@@ -214,6 +356,42 @@ describe("acceptance ID lists", () => {
       acceptanceIds("Movement tests MV-01, 03, 17 (basic), 19 pass. NET-03 (x, 4) passes"),
     ).toEqual(["MV-01", "MV-03", "MV-17", "MV-19", "NET-03"]);
   });
+
+  it.each([
+    [
+      "MV-01…MV-20 pass",
+      Array.from({ length: 20 }, (_, i) => `MV-${String(i + 1).padStart(2, "0")}`),
+    ],
+    ["BAL-01…BAL-03 pass. NET-06 (lag comp) passes", ["BAL-01", "BAL-02", "BAL-03", "NET-06"]],
+    ["MV-08...10 and MV-18 – 19", ["MV-08", "MV-09", "MV-10", "MV-18", "MV-19"]],
+    ["MV-01, 03–05, 17 (basic)", ["MV-01", "MV-03", "MV-04", "MV-05", "MV-17"]],
+    ["NET-03/04 still pass", ["NET-03", "NET-04"]],
+    ["MV-10 / 11, NET-01/NET-02/05", ["MV-10", "MV-11", "NET-01", "NET-02", "NET-05"]],
+    ["MV-9…11", ["MV-9", "MV-10", "MV-11"]],
+    ["MV-8…10", ["MV-8", "MV-9", "MV-10"]],
+    ["MV-01…9", ["MV-01", "MV-02", "MV-03", "MV-04", "MV-05", "MV-06", "MV-07", "MV-08", "MV-09"]],
+    ["NET-03/4", ["NET-03", "NET-04"]],
+    ["NET-03/05…07", ["NET-03", "NET-05", "NET-06", "NET-07"]],
+    ["MV-01…03…05", ["MV-01", "MV-02", "MV-03", "MV-04", "MV-05"]],
+  ] as const)("expand ranges and slashes: %j", (text, ids) => {
+    expect(acceptanceIds(text)).toEqual(ids);
+  });
+
+  it.each([
+    ["MV-05…MV-03", /ends at 03, not after 5/],
+    ["MV-05…05", /ends at 05, not after 5/],
+    ["MV-01…NET-20", /NET-20 does not continue the MV list/],
+    ["NET-03/MV-04", /MV-04 does not continue the NET list/],
+    ["NET-04/03", /slash list goes on with 03, not after 4/],
+    ["NET-03/03", /slash list goes on with 03, not after 3/],
+    ["MV-01 (basic)…03", /a range or slash after a parenthesised note/],
+    ["MV-01, 17 (basic) / 18", /a range or slash after a parenthesised note/],
+  ])(
+    "refuse a backward range or slash list, a mixed prefix or a range after a note: %s",
+    (text, error) => {
+      expect(() => acceptanceIds(text)).toThrow(error);
+    },
+  );
 
   it.each([
     ['describe("MV-05: crouch", () => {});', true],

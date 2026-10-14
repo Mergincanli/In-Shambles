@@ -23,6 +23,8 @@ import { expectHealthy, sample, VIEW, waitForMoving } from "./health";
 // drive the player's own keys and the click that takes the pointer lock.
 
 const RUN_MS = 3000;
+/** Predicted ticks before the idle bot is judged: twice the scripted bots' 90-tick idle start. */
+const IDLE_CHECK_TICKS = 180;
 /** Where the console-and-HUD run saves its screenshot, when set (`E2E_SCREENSHOT_DIR`). */
 const SHOT_DIR = process.env.E2E_SCREENSHOT_DIR;
 /** The sky colour (src/render/renderer.ts) and how far a pixel may be from it to count as sky. */
@@ -80,6 +82,12 @@ async function openPlayerPage(
   return { page, errors };
 }
 
+/** Waits until the page has predicted more than `ticks` ticks (the status's `ticks`). */
+async function waitForTicks(page: Page, ticks: number): Promise<void> {
+  const past = (n: number) => Number(document.documentElement.dataset.ticks) > n;
+  await page.waitForFunction(past, ticks, { timeout: 15_000, polling: 50 });
+}
+
 describe("client e2e smoke (M2 design §5)", () => {
   let dir = "";
   let served: Served | null = null;
@@ -132,6 +140,44 @@ describe("client e2e smoke (M2 design §5)", () => {
     expect(distinctColors(shot)).toBeGreaterThan(8);
     // The bot looks level, so the floor fills the lower half: the world is drawn, lit and aimed.
     expect(nonSkyShare(shot, shot.height >> 1, shot.height)).toBeGreaterThan(0.9);
+  }, 60_000);
+
+  it("runs the Worker server on the course ?map= names, with an idle bot (D-063)", async () => {
+    const page = await (browser as Browser).newPage({ viewport: VIEW });
+    const errors = watchErrors(page);
+    const warnings: string[] = [];
+    page.on("console", (m) => {
+      if (m.type() === "warning") warnings.push(m.text());
+    });
+    await page.goto(`${served?.url}?autotest=1&bot=idle&map=jump_lab`);
+    await waitForRunning(page);
+    // Past every scripted bot's 1.5 s (90-tick) idle start, so a bot that moves shows it.
+    await waitForTicks(page, IDLE_CHECK_TICKS);
+    const s = (await sample(page)).s;
+    await page.close();
+
+    expect(errors).toEqual([]);
+    expect([s.state, s.map], JSON.stringify(s)).toEqual(["running", "jump_lab"]);
+    expect(Number(s.snapshots), JSON.stringify(s)).toBeGreaterThan(30);
+    // `idle` is a known bot that stands still: no distance, no "unknown bot" or "unknown map".
+    expect(Number(s.distance), JSON.stringify(s)).toBe(0);
+    expect(warnings.filter((w) => /unknown (bot|map)|is ignored/.test(w))).toEqual([]);
+
+    // A name this build lacks plays movement_lab, and boot prints chooseWorkerMap's warning.
+    const other = await (browser as Browser).newPage({ viewport: VIEW });
+    const otherErrors = watchErrors(other);
+    const otherWarnings: string[] = [];
+    other.on("console", (m) => {
+      if (m.type() === "warning") otherWarnings.push(m.text());
+    });
+    await other.goto(`${served?.url}?autotest=1&map=no_such_map`);
+    await waitForRunning(other);
+    const t = (await sample(other)).s;
+    await other.close();
+
+    expect(otherErrors).toEqual([]);
+    expect([t.state, t.map], JSON.stringify(t)).toEqual(["running", "movement_lab"]);
+    expect(otherWarnings.filter((w) => w.startsWith('unknown map "no_such_map"'))).toHaveLength(1);
   }, 60_000);
 
   it("moves the player from held keys, with no corrections", async () => {

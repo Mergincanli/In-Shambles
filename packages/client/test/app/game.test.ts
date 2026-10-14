@@ -38,6 +38,7 @@ import {
   THIRD_PERSON_DISTANCE,
 } from "../../src/app/game";
 import {
+  connectSearch,
   DEFAULT_SERVER_PORT,
   demoSearch,
   parseBootParams,
@@ -808,6 +809,7 @@ describe("boot URL parameters (M2 design §2 autotest hooks)", () => {
       bot: "circle",
       camera: null,
       connect: null,
+      map: null,
       netProfile: null,
       demo: null,
     });
@@ -823,6 +825,22 @@ describe("boot URL parameters (M2 design §2 autotest hooks)", () => {
     const p = parseBootParams("?connect=ws://127.0.0.1:28700&net_profile=wan-100-loss1");
     expect(p.connect).toBe("ws://127.0.0.1:28700");
     expect(p.netProfile).toBe("wan-100-loss1");
+  });
+
+  it("reads the local server's course (D-063), as written: app/maps.ts checks the name", () => {
+    expect(parseBootParams("?map=jump_lab").map).toBe("jump_lab");
+    expect(parseBootParams("?map=../x.cmap").map).toBe("../x.cmap");
+  });
+
+  it("drops ?map= from the console's connect and demo queries: the server or the demo picks the map (D-063)", () => {
+    expect(connectSearch("ws://h:1", "?map=jump_lab&net_profile=lan")).toEqual({
+      ok: true,
+      search: "net_profile=lan&connect=ws%3A%2F%2Fh%3A1%2F",
+    });
+    expect(demoSearch("x.demo", "?map=jump_lab&autotest=1")).toEqual({
+      ok: true,
+      search: "autotest=1&demo=x.demo",
+    });
   });
 
   it("reads a demo to play (D-044), and the console's demo query drops ?connect=", () => {

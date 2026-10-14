@@ -259,16 +259,22 @@ function hasIdDescribe(file: string, prefix: string): boolean {
  * net-01 file; NET-02's unit is one too, `shared/test/net/delta.test.ts`, with its real-store twin
  * in `client/test/net/net-02-store.test.ts`, the match's rule in
  * `server/test/match/match.test.ts` (a NET-02 describe) and its match legs in
- * `tools/test/net/net-02-delta-match.test.ts` since M3 increment 9).
- * acceptance-ids.test.ts checks the full docs/09 lists.
+ * `tools/test/net/net-02-delta-match.test.ts` since M3 increment 9), and IDs whose file a later
+ * increment adds (the M4 movement tests, M4 design §6), which move to the required list when it
+ * lands. acceptance-ids.test.ts checks the full docs/09 lists.
  */
-const ID_SUITES = [
-  ["BAL", "test:balance", ["01"]],
-  ["MV", "test:movement", ["01", "03", "04", "05", "06", "07", "08", "17", "18", "19"]],
-  ["NET", "test:net", ["02", "03", "04", "05", "08", "09", "12"]],
-] as const;
+const ID_SUITES: readonly (readonly [string, string, readonly string[], readonly string[]])[] = [
+  ["BAL", "test:balance", ["01"], []],
+  [
+    "MV",
+    "test:movement",
+    ["01", "03", "04", "05", "06", "07", "08", "17", "18", "19"],
+    ["02", "09", "10", "11", "12", "13", "14", "15", "16", "20"],
+  ],
+  ["NET", "test:net", ["02", "03", "04", "05", "08", "09", "12"], []],
+];
 
-describe.each(ID_SUITES)("naming of the %s-NN test files", (prefix, script, required) => {
+describe.each(ID_SUITES)("naming of the %s-NN test files", (prefix, script, required, later) => {
   const pattern = new RegExp(`^${prefix}-(\\d+)`, "i");
   const files = testFiles.filter((file) => pattern.test(basename(file)));
 
@@ -277,6 +283,16 @@ describe.each(ID_SUITES)("naming of the %s-NN test files", (prefix, script, requ
       expect.stringMatching(new RegExp(`^${prefix}-${id}-`, "i")),
     );
   });
+
+  it.each(later.map((id) => [id]))(
+    `have no ${prefix}-%s file yet (move it to the required list when it lands)`,
+    (id) => {
+      expect(required).not.toContain(id);
+      expect(files.map((file) => basename(file))).not.toContainEqual(
+        expect.stringMatching(new RegExp(`^${prefix}-${id}-`, "i")),
+      );
+    },
+  );
 
   // Pinned whole: a trailing `--project`, `--dir` or path would narrow the run to no ID test, and
   // vitest would still exit 0. Only the flag that shows the suites' printed reports may follow.

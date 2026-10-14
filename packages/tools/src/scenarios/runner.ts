@@ -1,14 +1,16 @@
 import {
   type CollisionWorld,
+  copyPlayerState,
   ENTITY_NONE,
   ENTITY_WORLD,
   lastPmoveSnap,
-  type PlayerState,
+  PlayerState,
   PMF_GROUNDED,
   PmoveEvent,
   PmoveEvents,
   PmoveParams,
   pmove,
+  quantizePlayerState,
   sanitizeUserCmd,
   TICK_DT,
   UserCmd,
@@ -44,6 +46,11 @@ export const SCENARIO_EVENT_CAPACITY = 4096;
  * A run's history. State index 0 is the start; index i is the state after tick i, so tick i
  * (1-based) moved the player from state i − 1 to state i, and an event emitted by tick i carries
  * tick number i. Time at state i is i · dt.
+ *
+ * Every state is kept whole (`state(i)`, copied with copyPlayerState), so a field PlayerState
+ * gains (stamina, and M4's health, timers and climb) is recorded without touching the record (M4
+ * design §1); origin, velocity, flags and yaw are also kept as typed-array columns for the metrics.
+ * All of it is allocated up front: recording a tick allocates nothing.
  */
 export class ScenarioRecord {
   /** States recorded so far, the start included. */
@@ -59,6 +66,7 @@ export class ScenarioRecord {
   readonly eventTick: Int32Array;
   readonly eventType: Uint8Array;
   readonly eventValue: Float64Array;
+  private readonly states: PlayerState[] = [];
 
   constructor(
     /** Ticks the record has room for. */
@@ -74,6 +82,7 @@ export class ScenarioRecord {
     this.eventTick = new Int32Array(SCENARIO_EVENT_CAPACITY);
     this.eventType = new Uint8Array(SCENARIO_EVENT_CAPACITY);
     this.eventValue = new Float64Array(SCENARIO_EVENT_CAPACITY);
+    for (let i = 0; i < states; i++) this.states.push(new PlayerState());
   }
 
   /** Ticks run so far. */
@@ -97,6 +106,16 @@ export class ScenarioRecord {
     return ((this.flags[i] as number) & PMF_GROUNDED) !== 0;
   }
 
+  /**
+   * Recorded state `i` (0 ≤ i < count), every field; the record's own object, to read, not to
+   * keep or change (a `clear` and new run overwrite it).
+   */
+  state(i: number): Readonly<PlayerState> {
+    const s = i >= 0 && i < this.count ? this.states[i] : undefined;
+    if (s === undefined) throw new RangeError(`state ${i} is not recorded (count ${this.count})`);
+    return s;
+  }
+
   /** Empties the record for reuse (the feel report, benches), keeping its arrays. */
   clear(): void {
     this.count = 0;
@@ -107,6 +126,7 @@ export class ScenarioRecord {
   /** Records `ps` as state `count`. */
   push(ps: PlayerState): void {
     const i = this.count++;
+    copyPlayerState(this.states[i] as PlayerState, ps);
     const o = ps.origin;
     const v = ps.velocity;
     const k = 3 * i;
@@ -121,28 +141,53 @@ export class ScenarioRecord {
   }
 }
 
+/** What `placePlayer` sets besides the origin and the view. */
+export interface PlaceOptions {
+  /** Grounded on the world (default), or airborne: a drop, a jump mid-flight, steep ground. */
+  readonly grounded?: boolean;
+  /** u/s; default at rest. Quantized to the 1/16 grid, as every simulated velocity is. */
+  readonly velocity?: P3 | Float64Array;
+  /** Hundredths; default SCENARIO_STAMINA (full, a rested player). */
+  readonly stamina?: number;
+}
+
+const DEFAULT_PLACE: PlaceOptions = {};
+/** A fresh state: placePlayer starts from it, so a field PlayerState gains is reset as well. */
+const BLANK_STATE = new PlayerState();
+
 /**
- * Puts a player at rest at `origin` facing `yaw` (u16), pitch 0, with full stamina. Grounded on
- * the world unless `grounded` is false (a drop or a spawn on steep ground), so a start on the
- * floor emits no LAND.
+ * Puts a player at `origin` facing `yaw` (u16), pitch 0: at rest with full stamina and grounded on
+ * the world unless `options` says otherwise, so a start on the floor emits no LAND. Every other
+ * field is reset, and the result is quantized (docs/05 §4.1) as every state the server holds is, so
+ * a scenario starts from a state the wire could carry.
  */
 export function placePlayer(
   ps: PlayerState,
   origin: P3 | Float64Array,
   yaw: number,
-  grounded = true,
+  options: PlaceOptions = DEFAULT_PLACE,
 ): PlayerState {
-  ps.origin[0] = origin[0] as number;
-  ps.origin[1] = origin[1] as number;
-  ps.origin[2] = origin[2] as number;
-  ps.velocity.fill(0);
+  const grounded = options.grounded ?? true;
+  const v = options.velocity;
+  // Read before the reset: `origin` or the velocity may be `ps`'s own.
+  const ox = origin[0] as number;
+  const oy = origin[1] as number;
+  const oz = origin[2] as number;
+  const vx = v === undefined ? 0 : (v[0] as number);
+  const vy = v === undefined ? 0 : (v[1] as number);
+  const vz = v === undefined ? 0 : (v[2] as number);
+  copyPlayerState(ps, BLANK_STATE);
+  ps.origin[0] = ox;
+  ps.origin[1] = oy;
+  ps.origin[2] = oz;
+  ps.velocity[0] = vx;
+  ps.velocity[1] = vy;
+  ps.velocity[2] = vz;
   ps.viewYaw = yaw & 0xffff;
-  ps.viewPitch = 0;
   ps.flags = grounded ? PMF_GROUNDED : 0;
   ps.groundEntity = grounded ? ENTITY_WORLD : ENTITY_NONE;
-  ps.waterLevel = 0;
-  ps.stamina = SCENARIO_STAMINA;
-  return ps;
+  ps.stamina = options.stamina ?? SCENARIO_STAMINA;
+  return quantizePlayerState(ps);
 }
 
 /** placePlayer at an anchor, facing the anchor's yaw unless `yaw` (u16) overrides it. */

@@ -42,7 +42,7 @@ function vz(r: ScenarioRecord, i: number): number {
 function inDeepWater(course: LoadedCourse, feet: number, yaw = 0): PlayerState {
   const deep = courseAnchor(course, "water_deep");
   const o = deep.origin;
-  return placePlayer(new PlayerState(), [o[0], o[1], o[2] + feet], yaw, false);
+  return placePlayer(new PlayerState(), [o[0], o[1], o[2] + feet], yaw, { grounded: false });
 }
 
 function run(course: LoadedCourse, ps: PlayerState, bot: CmdSource, ticks: number) {

@@ -13,6 +13,11 @@ export interface BootParams {
    * (D-031). As written in the URL; `parseServerUrl` checks it.
    */
   readonly connect: string | null;
+  /**
+   * `?map=<course>`: the map the local server (Worker) runs, by name among the bundled maps
+   * (`chooseWorkerMap`, D-063); movement_lab when absent.
+   */
+  readonly map: string | null;
   /** `?net_profile=<name>`: the simulated link on the client's end from the start (`lan` else). */
   readonly netProfile: string | null;
   /**
@@ -37,6 +42,7 @@ export function parseBootParams(search: string): BootParams {
     bot: q.get("bot"),
     camera,
     connect: q.get("connect"),
+    map: q.get("map"),
     netProfile: q.get("net_profile"),
     demo: q.get("demo"),
   };
@@ -87,8 +93,9 @@ export function parseServerUrl(text: string): ServerUrl {
 
 /**
  * The page query that plays on `address` (the console's `connect`, D-031): `search` with
- * `connect` set to the checked URL, everything else kept. A new session starts from a fresh page,
- * so the map, the scene and the prediction all follow the server.
+ * `connect` set to the checked URL and `map` dropped (the server runs its own, D-063), everything
+ * else kept. A new session starts from a fresh page, so the map, the scene and the prediction all
+ * follow the server.
  */
 export function connectSearch(
   address: string,
@@ -98,12 +105,14 @@ export function connectSearch(
   if (!target.ok) return target;
   const q = new URLSearchParams(search);
   q.set("connect", target.url);
+  q.delete("map");
   return { ok: true, search: q.toString() };
 }
 
 /**
  * The page query that plays the demo at `url` (the console's `demo`, D-044): `search` with `demo`
- * set and `connect` dropped (playback has no session), everything else kept.
+ * set and `connect` dropped (playback has no session), and `map` (a demo plays the map its header
+ * names, D-063), everything else kept.
  */
 export function demoSearch(
   url: string,
@@ -114,5 +123,6 @@ export function demoSearch(
   const q = new URLSearchParams(search);
   q.set("demo", raw);
   q.delete("connect");
+  q.delete("map");
   return { ok: true, search: q.toString() };
 }
